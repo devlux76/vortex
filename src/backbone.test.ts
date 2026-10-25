@@ -79,6 +79,19 @@ test('backbone client pushes complete metadata, hashes rooms, and reports adapte
   } finally {bridge.stop(); await f.close();}
 });
 
+test('control-only rooms stay readable without being reported to the wake router', async()=>{
+  const f=await fixture();
+  const bridge=connectBackbone({path:f.path,owner:'codex',token:'owner-token-123456',quietMs:0,core:f.core,onRing:()=>assert.fail('control event rang'),onError:()=>{}});
+  try {
+    await f.waitFor(()=>f.messages.some(m=>m.t==='state'));
+    const first=f.messages.length;
+    await f.core.recordMatch({interest:'a'.repeat(32),record:'b'.repeat(32),peer:'b',tier:'exact',score:1,fullScore:1,addrs:['/ip4/127.0.0.1/tcp/1/p2p/b']});
+    await f.waitFor(()=>f.messages.slice(first).some(m=>m.t==='state'));
+    assert.deepEqual(f.messages.filter(m=>m.t==='state').at(-1)!.rooms,[]);
+    assert.equal(f.core.read().events[0]?.kind,'match');
+  } finally {bridge.stop();await f.close();}
+});
+
 test('backbone client resynchronizes a running adapter after disconnect without duplicate dispatch', async()=>{
   const f=await fixture();
   const rings:any[]=[];
@@ -249,6 +262,7 @@ test('backbone rings option controls whether rooms are reported', async () => {
     const core = new Conversations('a', { send: async () => {}, save: () => {} });
     const room = await core.invite('b');
     await core.receive('b', { kind: 'accept', room });
+    await core.receive('b', { kind: 'message', room, id: 'data', body: 'wake data' });
     const bridge = connectBackbone({ path, owner: 'codex', token: 'owner-token-123456', quietMs: 0, core, rings, onRing: () => {}, onError: () => {} });
     const waitFor = async (check: () => boolean) => {
       const end = Date.now() + 2000;

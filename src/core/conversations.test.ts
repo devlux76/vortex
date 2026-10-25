@@ -187,7 +187,7 @@ test('notificationState counts an unread match without consent and drops it afte
   await core.recordMatch({interest:'a'.repeat(32),record:'b'.repeat(32),peer:'c',tier:'exact',score:1,fullScore:1,
     addrs:['/ip4/1/tcp/1/p2p/c']});
   assert.deepEqual(core.notificationState(),
-    {acked:0,waiters:0,rooms:[{room:'match:'+'a'.repeat(32),unread:1,oldest:1}]});
+    {acked:0,waiters:0,rooms:[{room:'match:'+'a'.repeat(32),unread:1,oldest:1,hasData:false}]});
   await core.ack(core.read().cursor);
   assert.deepEqual(core.notificationState().rooms,[]);
 });
@@ -243,7 +243,7 @@ test('notification metadata sees every unread room and excludes bodies and uncon
   for(let i=0;i<150;i++) await b.receive('stranger'+i,{kind:'invite',room:b.roomFor('stranger'+i)});
   await a.send(room,'private peer text'); await drain();
   const summary=b.notificationState();
-  assert.deepEqual(summary,{acked:1,waiters:0,rooms:[{room,unread:1,oldest:152}]});
+  assert.deepEqual(summary,{acked:1,waiters:0,rooms:[{room,unread:1,oldest:152,hasData:true}]});
   assert.ok(!JSON.stringify(summary).includes('private peer text'));
   summary.rooms[0].unread=9;
   assert.equal(b.notificationState().rooms[0].unread,1);
@@ -575,7 +575,7 @@ test('conference events are durable, wake without direct consent, and resolve wa
     await core.recordConference(input);
     assert.deepEqual((await waiting).events,[{...input,cursor:after+1,room:'conference:'+'a'.repeat(32),trust:'untrusted_peer_content'}]);
   }
-  assert.deepEqual(core.notificationState().rooms,[{room:'conference:'+'a'.repeat(32),unread:5,oldest:1}]);
+  assert.deepEqual(core.notificationState().rooms,[{room:'conference:'+'a'.repeat(32),unread:5,oldest:1,hasData:true}]);
   const restored=new Conversations('a',{send:async()=>{},save:()=>{}},saved);
   assert.deepEqual(restored.read(0),core.read(0));
   await core.ack(core.read().cursor);

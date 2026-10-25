@@ -105,12 +105,12 @@ let topicKey = null;
 let firstCursor = null;
 let throughCursor = null;
 let runCursors = [];
+const handled = handledOf(snapshot);
 if (pinned !== undefined) {
   const hasData = (Array.isArray(snapshot.events) ? snapshot.events : []).some((e) => e && Number.isSafeInteger(e.cursor) && e.cursor > acked && !handled.has(e.cursor) && !isControlEvent(e));
   if (!hasData) process.exit(0);
   target = snapshot.cursor;
 } else {
-  const handled = handledOf(snapshot);
   const unread = (Array.isArray(snapshot.events) ? snapshot.events : [])
     .filter((e) => e && Number.isSafeInteger(e.cursor) && e.cursor > acked && !handled.has(e.cursor) && (!room || e.room === room) && !isControlEvent(e))
     .sort((a, b) => a.cursor - b.cursor);

@@ -1,0 +1,30 @@
+# Template: replace /home/user and <checkout> with real paths before installing.
+# Installed at ~/.config/systemd/user/vortex-router.service (user unit).
+# The one wake router every VORTEX service on this machine subscribes to.
+# A service started with --on-ring is rung only while this is running.
+# It runs as an OTP release on a loopback-only named node, so fixes are
+# loaded into it with deploy/hot-load-router.sh instead of a restart, and
+# one owner's failure stop is cleared with
+#   bin/vortex_router rpc 'Vortex.Router.Owner.clear_failures("<owner>")'
+# Build first, in backbone/ of the deployed checkout:
+#   MIX_ENV=prod mix release --overwrite
+[Unit]
+Description=VORTEX wake router (Elixir backbone)
+
+[Service]
+Environment=PATH=/home/user/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin
+Environment=RELEASE_DISTRIBUTION=name
+Environment=RELEASE_NODE=vortex_router@127.0.0.1
+Environment=ERL_EPMD_ADDRESS=127.0.0.1
+Environment="ELIXIR_ERL_OPTIONS=-kernel inet_dist_use_interface {127,0,0,1}"
+Environment=VORTEX_ROUTER_SOCKET=<checkout>/.vortex/backbone/router.sock
+Environment=VORTEX_ROUTER_MAX_PER_HOUR=12
+ExecStartPre=/bin/mkdir -p <checkout>/.vortex/backbone
+# systemd runs one instance, so a socket file found here is left over from a crash.
+ExecStartPre=/bin/rm -f <checkout>/.vortex/backbone/router.sock
+ExecStart=/home/user/.local/share/vortex-live/backbone/_build/prod/rel/vortex_router/bin/vortex_router start
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

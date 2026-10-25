@@ -1,0 +1,24 @@
+# Template: replace /home/user, <checkout> and <codex-peer-id> before installing.
+# Installed at ~/.config/systemd/user/vortex-opencode.service (user unit; lingering is on).
+# Runs from a separate clone of main at ~/.local/share/vortex-live, so branch
+# switches in the working checkout never change the code a ring executes.
+# To update it: follow the verified deployment procedure in README.md.
+[Unit]
+Description=VORTEX service for owner opencode (mail wakes OpenCode through opencode.sh)
+Wants=vortex-router.service
+After=vortex-router.service
+
+[Service]
+WorkingDirectory=/home/user/.local/share/vortex-live
+Environment=PATH=/home/user/.bun/bin:/home/user/.opencode/bin:/usr/local/bin:/usr/bin:/bin
+Environment=VORTEX_OPENCODE_URL=http://127.0.0.1:4096
+# The OpenCode server password (OPENCODE_PASSWORD), sent by the wake adapter.
+EnvironmentFile=%h/.config/opencode-local/server.env
+# Peers whose delegated tasks are authorized work; replace with your own agents' peer ids.
+Environment=VORTEX_TRUSTED_PEERS=codex=<peer id>,claude=<peer id>
+ExecStart=/home/user/.bun/bin/bun src/cli.ts serve --dir <checkout>/.vortex/opencode --name opencode --port 7802 --p2p-port 7812 --semantic --backbone <checkout>/.vortex/backbone/router.sock --on-ring skills/vortex/adapters/opencode.sh --bootstrap /ip4/127.0.0.1/tcp/7810/p2p/<codex-peer-id>
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

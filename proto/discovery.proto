@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+// Discovery messages of VORTEX v5.1. Generated code is in src/core/proto;
+// regenerate with `bun run proto` after changing this file.
+
+// Section 4.2. Sent only inside a SignedAnnouncement.
+message Announcement {
+  // 16 random bytes. The origin maps this to an agent session privately.
+  bytes announcement_id = 1;
+  // SHA-256 of the embedding profile (Section 2.4), 32 bytes.
+  bytes namespace = 2;
+  // Orders successive profiles (Section 11.5).
+  uint32 profile_version = 3;
+  // The full embedding in the profile's encoding.
+  bytes vector = 4;
+  // The peer identity whose key signs the announcement, in its string form.
+  string origin = 5;
+  // An encoded Contact: where the origin can be dialed.
+  bytes contact = 6;
+  // Creation time, milliseconds since the Unix epoch.
+  uint64 issued_at = 7;
+  // Lifetime in seconds from issued_at.
+  uint32 ttl = 8;
+  // Present only when the agent asked for it and policy permitted.
+  optional string statement = 9;
+}
+
+// The signature covers the exact bytes of `announcement`, so a receiver
+// verifies what it was sent and never a re-encoding of it.
+message SignedAnnouncement {
+  // An encoded Announcement.
+  bytes announcement = 1;
+  // By the announcement's origin, over a fixed domain prefix and `announcement`.
+  bytes signature = 2;
+}
+
+// Where a peer can be dialed. It travels inside an announcement, so the
+// origin's signature covers it. A signed libp2p peer record, usable apart
+// from an announcement, is to replace it (TODO G1).
+message Contact {
+  // Multiaddrs, each ending in /p2p/<the origin's peer identity>.
+  repeated string addrs = 1;
+}
+
+// One record a responder holds that matches an announcement (Section 5.2).
+message DiscoveryResult {
+  // The announcement being answered.
+  bytes announcement_id = 1;
+  // An encoded SignedAnnouncement: the responder's own open interest.
+  bytes record = 2;
+  // The tier the responder claims: 0 for exact, otherwise the prefix length.
+  // The origin recomputes it and never trusts this (Section 10.6).
+  uint32 tier = 3;
+  // The responder's score at that tier.
+  float score = 4;
+  // An encoded SignedDescriptor. Exactly one of record and conference is nonempty.
+  bytes conference = 5;
+}
+
+// Sent on a direct stream to an announcement's origin, after one zero byte
+// that tells it apart from a conversation packet.
+message DiscoveryPacket {
+  repeated DiscoveryResult results = 1;
+}

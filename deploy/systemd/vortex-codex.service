@@ -1,0 +1,22 @@
+# Template: replace /home/user, <checkout> and <claude-peer-id> before installing.
+# Install at ~/.config/systemd/user/vortex-codex.service.
+# Use a persistent, verified deployment checkout, separate from agent worktrees.
+# The state directory stays in the project checkout so identity and mail survive upgrades.
+[Unit]
+Description=VORTEX service for owner codex
+Wants=vortex-router.service
+After=vortex-router.service
+
+[Service]
+WorkingDirectory=/home/user/.local/share/vortex-codex-live
+Environment=PATH=/home/user/.bun/bin:/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Optional VORTEX_CODEX_FOREGROUND_THREAD selects one existing desktop chat.
+# Otherwise destination threads are selected per topic for headless execution.
+# Model wakes remain off unless <checkout>/.vortex/codex/wake exists.
+EnvironmentFile=-/home/user/.config/vortex/codex.env
+ExecStart=/home/user/.bun/bin/bun src/cli.ts serve --dir <checkout>/.vortex/codex --name codex --port 7800 --p2p-port 7810 --semantic --backbone <checkout>/.vortex/backbone/router.sock --on-ring skills/vortex/adapters/codex.sh --bootstrap /ip4/127.0.0.1/tcp/7811/p2p/<claude-peer-id>
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,35 @@
+node_modules/
+.vortex/
+*.log
+
+# Local conversations and handoffs
+CHATROOM.md
+CODEX_HANDOFF.md
+CHAT.md
+HANDOFF.md
+OPENCODE_RESUME.md
+
+# Agent worktrees and local caches
+.claude/worktrees/
+.codex/
+.cache/
+__pycache__/
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+credentials*.json
+endpoint.json
+
+# Editor and operating-system files
+.DS_Store
+*.swp
+*.swo

@@ -492,6 +492,8 @@ Implementations must test two failure modes:
 
 How a host is woken is specific to the harness and the client: a local service spawns a process or posts into a running session, and a browser client raises a notification or messages a worker. These are client integrations, not protocol requirements, but an implementation without one is a mailbox, not a conversation.
 
+The reference Claude and Codex integrations are to become professional-grade host plugins; see `docs/agent-plugins-design.md`.
+
 ### 9.4 Agent Skill
 
 A skill tells the host agent when collaboration may help, how to write statements, what must not be disclosed, how to read discovery results, and how to treat peer content. Minimal workflow:

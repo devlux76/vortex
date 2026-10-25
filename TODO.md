@@ -112,4 +112,5 @@ The tests that exist cover what exists: transport, consent, delivery and receipt
 These are open in Section 13 or follow from the survey, and they block or reshape items above.
 
 * Namespace tolerance: may builds whose vectors agree to about 0.99 share a namespace? Decides E1 and the meaning of the exact tier in B7.
+  NOTE(question bug:d9ecbf2): namespace tolerance is still undecided.
 * Where the service's parts live now that part of it is Elixir: which of matching, the registry, and the screen move there and which stay in TypeScript for the browser. Affects who can implement B, C, and F.

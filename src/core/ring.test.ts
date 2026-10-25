@@ -164,13 +164,13 @@ test('no ring is chosen while a waiter is attached or an adapter is running', as
   await assert.rejects(waiting, /timed out/)
 })
 
-test('a room whose unread events are only control events does not ring', () => {
+test('a control-only room is skipped in favor of a data room', () => {
   const policy = createRingPolicy({ minIntervalMs: 0 })
   const core = {
-    read: () => ({ events: [
+    read: (after?: number) => ({ events: after === undefined ? [
       { room: 'control-room', kind: 'match' },
       { room: 'data-room', kind: 'message' },
-    ], cursor: 2 }),
+    ] : [], cursor: 2 }),
     rooms: () => ({ 'control-room': { localConsent: true, remoteConsent: true }, 'data-room': { localConsent: true, remoteConsent: true } }),
     waiters: () => 0,
   }

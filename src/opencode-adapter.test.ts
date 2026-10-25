@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -667,5 +667,16 @@ test('opencode adapter: busy session going idle via session.idle dispatches prom
     assert.ok(f.requests.filter((r) => r.url.startsWith('/api/session/active')).length <= 4, 'woken by the event stream, not by polling');
     writeFileSync(f.stateFile, JSON.stringify(f.snapshot(1, 1)));
     assert.equal(await new Promise<number | null>((resolve) => child.once('exit', resolve)), 0);
+  } finally { f.server.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('control events never create model threads or prompts', { timeout: 20000 }, async () => {
+  const f = await startFixture(0, { unpinned: true, events: [{ cursor: 1, kind: 'match', room: 'r1', peer: 'p', trust: 'untrusted_peer_content' }] });
+  try {
+    const child = spawn(WRAPPER, { env: f.env, stdio: 'ignore' });
+    const exit = await new Promise<number | null>((resolve) => child.once('exit', resolve));
+    assert.equal(exit, 0);
+    assert.equal(f.requests.filter((r) => r.method === 'POST').length, 0);
+    assert.equal(existsSync(join(f.dir, 'opencode-topics.json')), false);
   } finally { f.server.close(); rmSync(f.root, { recursive: true, force: true }); }
 });

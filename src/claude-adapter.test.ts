@@ -403,3 +403,17 @@ test('Claude adapter: missing jsonl keeps new:true with same UUID', () => {
     rmSync(cdir, { recursive: true, force: true });
   }
 });
+
+test('control events never create model threads or prompts', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vortex-claude-control-'));
+  try {
+    writeFileSync(join(dir, 'state.json'), JSON.stringify({ rooms: {}, events: [{ cursor: 1, kind: 'match', room: 'match:x', peer: 'p', trust: 'untrusted_peer_content' }], seen: [], cursor: 1, acked: 0 }));
+    const fakeCli = makeCli(dir);
+    makeBun(dir, fakeCli);
+    const bun = join(dir, 'bun');
+    const env = { ...process.env, PATH: dir + ':' + process.env.PATH, VORTEX_DIR: dir };
+    const r = spawnSync(bun, [HELPER], { env, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /"none":true/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

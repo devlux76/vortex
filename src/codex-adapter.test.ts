@@ -443,3 +443,13 @@ test('foreground notification does not depend on headless worker authority confi
     assert.equal(f.calls().length,1);assert.equal(f.calls()[0][0],'queue');
   }finally{f.clean();}
 });
+
+test('control events never create model threads or prompts', () => {
+  const f = fixture(); try {
+    f.put([{ cursor: 1, kind: 'match', room: 'match:x', peer: 'p', body: 'PEER_BODY_MUST_NOT_BECOME_PROMPT', trust: 'untrusted_peer_content' }]);
+    const result = f.run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(f.calls().length, 0);
+    assert.equal(existsSync(join(f.dir, 'created')), false);
+  } finally { f.clean(); }
+});

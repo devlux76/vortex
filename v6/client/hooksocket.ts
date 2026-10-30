@@ -2,7 +2,7 @@
 // (§8.6, §8.7). Newline-delimited JSON. Hooks never talk to the model or to the hub.
 import { mkdirSync } from 'node:fs'
 
-export type HostName = 'claude' | 'codex'
+export type HostName = 'claude' | 'codex' | 'opencode'
 
 export function bindingName (): string {
   return process.env.VORTEX_BINDING ?? 'default'

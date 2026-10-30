@@ -44,6 +44,8 @@ export abstract class BridgeBase {
   private ownsSocket = false
 
   protected abstract readonly host: HostName
+  /** Hosts without hooks (OpenCode) set false: no per-binding unix socket, passive mail goes through `onBatch`. */
+  protected readonly hookSocket: boolean = true
   /** Evidence level recorded for a wake batch already accepted before a restart. */
   protected abstract readonly wakeEvidence: Evidence
   protected readonly opts: BaseOptions
@@ -81,15 +83,18 @@ export abstract class BridgeBase {
     await this.client.bind(this.opts.binding, this.opts.rooms ?? ['all']).catch(() => {})
     await this.client.pin()
     this.connectStream()
-    await this.listen()
+    if (this.hookSocket) await this.listen()
   }
+
+  /** A hub stream just opened (hosts may pull passive mail here). */
+  protected streamOpened (): void {}
 
   private connectStream (): void {
     if (this.closed || this.busy) return
     const { ws } = this.client.stream(this.opts.binding, {
       onBatch: (batch, wake, messages, notices) => { void this.onBatch(batch, wake, messages, notices) },
       onEmpty: () => this.passiveWaiters.splice(0).forEach(w => w('empty')),
-      onOpen: () => { this.backoff = 500 },
+      onOpen: () => { this.backoff = 500; this.streamOpened() },
       onClose: ({ code }) => {
         if (this.ws === ws) this.ws = undefined
         if (code === 4409) { this.busy = true; return } // never steal: wait for the operator's release

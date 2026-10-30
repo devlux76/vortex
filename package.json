@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "proto": "sh proto/generate.sh",
     "bench:browser": "bun bench/serve.ts",
-    "vortex": "bun src/cli.ts"
+    "vortex": "bun src/cli.ts",
+    "v6:build": "bun v6/build.ts"
   },
   "dependencies": {
     "@chainsafe/libp2p-noise": "latest",

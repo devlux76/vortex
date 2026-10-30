@@ -184,7 +184,7 @@ test('plugin files: manifest, MCP, hooks (limit 0, no Stop) and marketplace; ser
   assert.equal(manifest.mcpServers, './.mcp.json')
   assert.equal(manifest.hooks, './hooks/hooks.json')
   const mcp = JSON.parse(readFileSync(`${dir}/.mcp.json`, 'utf8'))
-  assert.deepEqual(mcp.mcpServers.vortex, { command: 'bun', args: ['${PLUGIN_ROOT}/server.ts'] })
+  assert.deepEqual(mcp.mcpServers.vortex, { command: 'bun', args: ['${PLUGIN_ROOT}/dist/server.js'] })
   const hooks = JSON.parse(readFileSync(`${dir}/hooks/hooks.json`, 'utf8')).hooks
   assert.deepEqual(Object.keys(hooks).sort(), ['PostToolUse', 'UserPromptSubmit']) // no Stop hook
   for (const ev of Object.values<any>(hooks)) {
@@ -193,7 +193,7 @@ test('plugin files: manifest, MCP, hooks (limit 0, no Stop) and marketplace; ser
     const h = ev[0].hooks[0]
     assert.equal(h.type, 'command')
     assert.equal(h.additionalContextLimit, 0)
-    assert.match(h.command, /vx\.ts" hook context --host codex$/)
+    assert.match(h.command, /vx\.js" hook context --host codex$/)
   }
   const mk = JSON.parse(readFileSync(`${ROOT}/v6/.agents/plugins/marketplace.json`, 'utf8'))
   assert.equal(mk.plugins[0].name, manifest.name)

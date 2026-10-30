@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "bun",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/../../cli/vx.ts", "hook", "context"],
+            "args": ["${CLAUDE_PLUGIN_ROOT}/dist/vx.js", "hook", "context"],
             "timeout": 10
           }
         ]
@@ -19,7 +19,7 @@
           {
             "type": "command",
             "command": "bun",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/../../cli/vx.ts", "hook", "context"],
+            "args": ["${CLAUDE_PLUGIN_ROOT}/dist/vx.js", "hook", "context"],
             "timeout": 10
           }
         ]

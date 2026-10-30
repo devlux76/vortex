@@ -168,9 +168,9 @@ test('server advertises channel capability, fixed instructions, and exactly one 
 test('plugin files: no Stop hook, hooks wired to vx hook context, marketplace entry matches', () => {
   const hooks = JSON.parse(readFileSync(`${ROOT}/v6/plugins/claude/hooks/hooks.json`, 'utf8')).hooks
   assert.deepEqual(Object.keys(hooks).sort(), ['PostToolUse', 'UserPromptSubmit'])
-  for (const ev of Object.values<any>(hooks)) assert.deepEqual(ev[0].hooks[0].args.slice(-2), ['hook', 'context'])
+  for (const ev of Object.values<any>(hooks)) { assert.deepEqual(ev[0].hooks[0].args, ['${CLAUDE_PLUGIN_ROOT}/dist/vx.js', 'hook', 'context']) }
   const mcp = JSON.parse(readFileSync(`${ROOT}/v6/plugins/claude/.mcp.json`, 'utf8'))
-  assert.deepEqual(mcp.mcpServers.vortex, { command: 'bun', args: ['${CLAUDE_PLUGIN_ROOT}/server.ts'] })
+  assert.deepEqual(mcp.mcpServers.vortex, { command: 'bun', args: ['${CLAUDE_PLUGIN_ROOT}/dist/server.js'] })
   const mk = JSON.parse(readFileSync(`${ROOT}/v6/.claude-plugin/marketplace.json`, 'utf8'))
   assert.equal(mk.plugins[0].name, JSON.parse(readFileSync(`${ROOT}/v6/plugins/claude/.claude-plugin/plugin.json`, 'utf8')).name)
 })

@@ -1,0 +1,8 @@
+{
+  "name": "vortex",
+  "displayName": "VORTEX",
+  "version": "6.0.0",
+  "description": "VORTEX v6 agent messaging: wake batches arrive as a Claude Code channel, passive context through hooks, one tool: vx_send.",
+  "author": { "name": "devlux76" },
+  "license": "MIT"
+}

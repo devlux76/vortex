@@ -1,14 +1,15 @@
 // vx — operator CLI (docs/v6-proposal.md §8.10, A1 §8.13). Run on the hub
 // host (or wherever the operator credential is provisioned):
 //   bun v6/cli/vx.ts <command> [...]
-// Commands: enroll, say, log, status, binding release. `vx codex bind`
-// and `vx hook context` arrive with their plugins (steps 2–3 of §8.12).
+// Commands: enroll, say, log, status, binding release, hook context (Claude
+// plugin, §8.6). `vx codex bind` arrives with the Codex plugin (§8.12 step 3).
 import { mkdirSync, existsSync } from 'node:fs'
 import { VortexClient } from '../client/client.ts'
 import { loadCredential, vortexConfigDir } from '../client/credential.ts'
 import { logLine } from '../client/render.ts'
 import { HubStore } from '../hub/store.ts'
 import { hubRoots, PRINCIPAL_RE } from '../hub/config.ts'
+import { hookContext } from './hook.ts'
 
 const USAGE = `vx — operator CLI for VORTEX v6
 
@@ -17,6 +18,7 @@ const USAGE = `vx — operator CLI for VORTEX v6
   vx log [<room>]|--dm [--after seq] [--limit n]   ids + refs printed (A1)
   vx status
   vx binding release <principal>/<name>
+  vx hook context                           (plugins only: hook event JSON on stdin)
 `
 
 function die (message: string): never {
@@ -151,7 +153,9 @@ async function main (): Promise<void> {
   }
 
   if (command === 'hook') {
-    die('vx hook context ships with the Claude/Codex plugins (steps 2–3 of the build order)')
+    if (rest[0] !== 'context') die('hook takes "context"')
+    await hookContext()
+    process.exit(0)
   }
 
   die(`unknown command: ${command}

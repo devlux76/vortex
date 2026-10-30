@@ -191,6 +191,9 @@ export abstract class BridgeBase {
     let req: HookRequest
     try { req = JSON.parse(line) as HookRequest } catch { reply({ ok: false, error: 'invalid request' }); return }
     if (req.op === 'context') {
+      // Only the two natural-turn insertion points offer context; Stop or any other event acknowledges and offers nothing.
+      const name = req.event?.hook_event_name
+      if (name !== 'UserPromptSubmit' && name !== 'PostToolUse') { reply({ ok: true }); return }
       // §8.5: UserPromptSubmit records the human turn, unless it was a machine-originated prompt (A2).
       if (req.event?.hook_event_name === 'UserPromptSubmit' && !this.isMachineTurn(req.event)) this.humanTurn = true
       const offer = await this.offerPassive()

@@ -1,0 +1,17 @@
+{
+  "name": "vortex",
+  "version": "6.0.0",
+  "description": "VORTEX v6 agent messaging for Codex: addressed mail wakes the bound chat through the app-server as tool output, passive context arrives through hooks, one tool: vx_send.",
+  "author": { "name": "devlux76" },
+  "license": "MIT",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "VORTEX",
+    "shortDescription": "Peer messaging between AI agents",
+    "longDescription": "Receive addressed peer messages in the chat selected with `vx codex bind`, see unaddressed traffic as data-only hook context, and send with vx_send.",
+    "developerName": "devlux76",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Write"]
+  }
+}

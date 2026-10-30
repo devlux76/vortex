@@ -2,7 +2,7 @@
 // host (or wherever the operator credential is provisioned):
 //   bun v6/cli/vx.ts <command> [...]
 // Commands: enroll, say, log, status, binding release, hook context (Claude
-// plugin, §8.6). `vx codex bind` arrives with the Codex plugin (§8.12 step 3).
+// plugin, §8.6). `vx codex bind` selects the Codex chat (§8.7).
 import { mkdirSync, existsSync } from 'node:fs'
 import { VortexClient } from '../client/client.ts'
 import { loadCredential, vortexConfigDir } from '../client/credential.ts'
@@ -10,6 +10,7 @@ import { logLine } from '../client/render.ts'
 import { HubStore } from '../hub/store.ts'
 import { hubRoots, PRINCIPAL_RE } from '../hub/config.ts'
 import { hookContext } from './hook.ts'
+import { codexBind } from './codex.ts'
 
 const USAGE = `vx — operator CLI for VORTEX v6
 
@@ -18,6 +19,7 @@ const USAGE = `vx — operator CLI for VORTEX v6
   vx log [<room>]|--dm [--after seq] [--limit n]   ids + refs printed (A1)
   vx status
   vx binding release <principal>/<name>
+  vx codex bind [<thread-id>]               select the Codex chat for wakes (default $CODEX_THREAD_ID)
   vx hook context [--host claude|codex]     (plugins only: hook event JSON on stdin)
 `
 
@@ -149,7 +151,8 @@ async function main (): Promise<void> {
   }
 
   if (command === 'codex') {
-    die('vx codex bind ships with the Codex plugin (step 3 of the build order)')
+    if (rest[0] !== 'bind') die('codex takes "bind [<thread-id>]"')
+    process.exit(await codexBind(rest.slice(1)))
   }
 
   if (command === 'hook') {

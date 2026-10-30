@@ -4,7 +4,7 @@
 // only after the full output is written and flushed tells the server to
 // acknowledge `hook-returned`. Any failure before the write acknowledges nothing.
 import { connect } from 'node:net'
-import { bindingName, socketPath, type HookRequest, type HookResponse } from '../plugins/claude/socket.ts'
+import { bindingName, socketPath, type HostName, type HookRequest, type HookResponse } from '../client/hooksocket.ts'
 
 const EVENTS = new Set(['UserPromptSubmit', 'PostToolUse'])
 
@@ -18,11 +18,11 @@ function readStdin (): Promise<string> {
   })
 }
 
-export async function hookContext (): Promise<void> {
+export async function hookContext (host: HostName = 'claude'): Promise<void> {
   let event: Record<string, unknown> = {}
   try { event = JSON.parse(await readStdin()) as Record<string, unknown> } catch { /* still record nothing */ }
   const eventName = event.hook_event_name
-  const sock = connect(socketPath(bindingName()))
+  const sock = connect(socketPath(bindingName(), host))
   const lines: HookResponse[] = []
   const waiters: Array<() => void> = []
   let buf = ''

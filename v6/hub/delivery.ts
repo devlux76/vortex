@@ -20,7 +20,7 @@ export interface BatchFrame {
   notices: string[]
 }
 
-export type ServerFrame = BatchFrame | { type: 'error'; reason: string; batch?: string }
+export type ServerFrame = BatchFrame | { type: 'error'; reason: string; batch?: string } | { type: 'empty'; kind: 'passive' }
 export interface SocketLike { send (frame: ServerFrame): void; close (code: number, reason: string): void }
 
 interface BindingRuntime {
@@ -348,8 +348,15 @@ export class Delivery {
     const r = this.runtime(principal, name)
     const outstanding = this.store.outstandingBatch(principal, name, 'passive')
     if (outstanding !== undefined) { this.resend(outstanding); return }
-    this.composeAndPush(principal, name, 'passive', false)
+    // A2 (§8.14): nothing pending answers at once so the hook never waits.
+    if (this.composeAndPush(principal, name, 'passive', false) === undefined) socket.send({ type: 'empty', kind: 'passive' })
     void r
+  }
+
+  /** A2: a plugin-reported fault with no batch (e.g. a pull timeout) surfaces in `vx status` as lastError. */
+  handleFault (socket: SocketLike, principal: string, name: string, reason: string): void {
+    if (this.isStale(principal, name, socket)) return
+    this.runtime(principal, name).lastError = reason
   }
 
   lastError (principal: string, name: string): string | undefined {

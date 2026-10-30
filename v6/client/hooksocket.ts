@@ -1,6 +1,8 @@
-// Per-binding unix socket shared by the MCP server and `vx hook context` (§8.6).
-// Newline-delimited JSON. Hooks never talk to the model or to the hub.
+// Per-binding unix socket shared by a plugin's MCP server and `vx hook context`
+// (§8.6, §8.7). Newline-delimited JSON. Hooks never talk to the model or to the hub.
 import { mkdirSync } from 'node:fs'
+
+export type HostName = 'claude' | 'codex'
 
 export function bindingName (): string {
   return process.env.VORTEX_BINDING ?? 'default'
@@ -11,8 +13,8 @@ export function runtimeDir (): string {
   return `${base.replace(/\/$/, '')}/vortex`
 }
 
-export function socketPath (binding = bindingName()): string {
-  return `${runtimeDir()}/claude-${binding.replace(/[^A-Za-z0-9_.-]/g, '_')}.sock`
+export function socketPath (binding = bindingName(), host: HostName = 'claude'): string {
+  return `${runtimeDir()}/${host}-${binding.replace(/[^A-Za-z0-9_.-]/g, '_')}.sock`
 }
 
 export function ensureRuntimeDir (): void {

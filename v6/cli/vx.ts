@@ -18,7 +18,7 @@ const USAGE = `vx — operator CLI for VORTEX v6
   vx log [<room>]|--dm [--after seq] [--limit n]   ids + refs printed (A1)
   vx status
   vx binding release <principal>/<name>
-  vx hook context                           (plugins only: hook event JSON on stdin)
+  vx hook context [--host claude|codex]     (plugins only: hook event JSON on stdin)
 `
 
 function die (message: string): never {
@@ -154,7 +154,10 @@ async function main (): Promise<void> {
 
   if (command === 'hook') {
     if (rest[0] !== 'context') die('hook takes "context"')
-    await hookContext()
+    const h = rest.indexOf('--host')
+    const host = h >= 0 ? rest[h + 1] : 'claude'
+    if (host !== 'claude' && host !== 'codex') die('hook --host is claude|codex')
+    await hookContext(host)
     process.exit(0)
   }
 

@@ -6,38 +6,11 @@ import { homedir } from 'node:os'
 import { readFileSync } from 'node:fs'
 import type { Credential } from '../../client/credential.ts'
 import { loadCredential } from '../../client/credential.ts'
-import { Bridge, INSTRUCTIONS, type SendArgs } from './bridge.ts'
-import { bindingName } from './socket.ts'
+import { Bridge } from './bridge.ts'
+import { bindingName } from '../../client/hooksocket.ts'
+import { INSTRUCTIONS, TOOL, parseSendArgs, readStdio, stdoutWriter } from '../../client/mcp.ts'
 
-export const TOOL = {
-  name: 'vx_send',
-  description: 'Send a message to other agents through VORTEX. Room post by default; scope "dm" for a private message to one recipient.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      text: { type: 'string', description: 'Message text.' },
-      to: { type: 'array', items: { type: 'string' }, description: 'Principals who should answer (room) or the one DM recipient.' },
-      room: { type: 'string', description: 'Room name; defaults to "all".' },
-      scope: { type: 'string', enum: ['room', 'dm'] },
-    },
-    required: ['text'],
-    additionalProperties: false,
-  },
-} as const
-
-const ALLOWED = new Set(['text', 'to', 'room', 'scope'])
-
-/** Validates model-supplied arguments: only text/to/room/scope exist (no identity, no human_turn). */
-export function parseSendArgs (raw: unknown): SendArgs {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new Error('arguments must be an object')
-  const a = raw as Record<string, unknown>
-  for (const k of Object.keys(a)) if (!ALLOWED.has(k)) throw new Error(`unknown argument: ${k}`)
-  if (typeof a.text !== 'string' || a.text.length === 0) throw new Error('text must be a non-empty string')
-  if (a.to !== undefined && (!Array.isArray(a.to) || a.to.some(t => typeof t !== 'string'))) throw new Error('to must be an array of strings')
-  if (a.room !== undefined && typeof a.room !== 'string') throw new Error('room must be a string')
-  if (a.scope !== undefined && a.scope !== 'room' && a.scope !== 'dm') throw new Error('scope must be "room" or "dm"')
-  return { text: a.text, to: a.to as string[] | undefined, room: a.room as string | undefined, scope: a.scope as 'room' | 'dm' | undefined }
-}
+export { TOOL, parseSendArgs }
 
 function resolveCredential (): Credential {
   const file = process.env.VORTEX_CREDENTIAL_FILE
@@ -55,9 +28,7 @@ function stateFile (binding: string): string {
 async function main (): Promise<void> {
   const binding = bindingName()
   const credential = resolveCredential()
-  const write = (obj: unknown): Promise<void> => new Promise((resolve, reject) => {
-    process.stdout.write(JSON.stringify(obj) + '\n', err => (err ? reject(err) : resolve()))
-  })
+  const write = stdoutWriter()
   const bridge = new Bridge({
     credential,
     binding,
@@ -101,20 +72,7 @@ async function main (): Promise<void> {
   }
 
   await bridge.start()
-  let buf = ''
-  const decoder = new TextDecoder()
-  for await (const chunk of Bun.stdin.stream()) {
-    buf += decoder.decode(chunk, { stream: true })
-    let i: number
-    while ((i = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, i).trim()
-      buf = buf.slice(i + 1)
-      if (line.length === 0) continue
-      let msg: unknown
-      try { msg = JSON.parse(line) } catch { continue }
-      void handle(msg).catch(() => {})
-    }
-  }
+  await readStdio(handle)
   bridge.stop()
   process.exit(0)
 }

@@ -36,13 +36,15 @@ export interface BatchEvent {
   notices?: string[]
 }
 
-export type StreamFrame = BatchEvent | { type: 'error'; reason: string; batch?: string }
+export type StreamFrame = BatchEvent | { type: 'error'; reason: string; batch?: string } | { type: 'empty'; kind: 'passive' }
 
 export type Evidence = 'host-accepted' | 'transport-written' | 'hook-returned'
 
 export interface StreamHandlers {
   onBatch: (batch: string, wake: boolean, messages: WireApiMessage[], notices: string[]) => void
   onError?: (reason: string, batch: string | undefined) => void
+  /** A2 (§8.14): the hub answered a passive pull with nothing pending. */
+  onEmpty?: () => void
   onOpen?: () => void
   onClose?: (event: { code: number; reason: string }) => void
 }
@@ -165,6 +167,7 @@ export class VortexClient {
       let frame: StreamFrame
       try { frame = JSON.parse(String(event.data)) as StreamFrame } catch { return }
       if (frame.type === 'batch') handlers.onBatch(frame.batch, frame.wake, frame.messages, frame.notices ?? [])
+      else if (frame.type === 'empty') handlers.onEmpty?.()
       else if (frame.type === 'error') {
         if (handlers.onError !== undefined) handlers.onError(frame.reason, frame.batch)
       }
@@ -180,6 +183,11 @@ export class VortexClient {
 
   failed (ws: WebSocket, batch: string, reason: string): void {
     ws.send(JSON.stringify({ type: 'failed', batch, reason }))
+  }
+
+  /** A2: report a plugin fault that has no batch (shown as lastError in `vx status`). */
+  fault (ws: WebSocket, reason: string): void {
+    ws.send(JSON.stringify({ type: 'fault', reason }))
   }
 
   pull (ws: WebSocket): void {

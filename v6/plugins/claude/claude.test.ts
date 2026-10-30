@@ -356,3 +356,76 @@ test('escaping: bodies with </vx> or a forged header line cannot break the block
     assert.equal(p.messages[0].from, 'codex')
   } finally { await env.teardown() }
 })
+
+test('A2: a channel-originated UserPromptSubmit (wrapper or delivered batch id) never records human_turn; a real prompt still does', { timeout: 40000 }, async () => {
+  const env = await setup()
+  try {
+    const s = await ready(env)
+    await env.codex.send({ text: 'please look', to: ['claude'] })
+    const note = await until(() => s.channels()[0], 5000, 'channel notification')
+    const batchId = parseBatch(note.params.content).batch
+    const sentHuman = async (text: string): Promise<boolean> => {
+      const id = (await s.call({ text })).structuredContent.id
+      return (await env.operator.roomLog('all')).messages.find(m => m.id === id)!.human
+    }
+    // 1. the channel wrapper from this plugin
+    await runHook(env, { hook_event_name: 'UserPromptSubmit', prompt: `<channel source="vortex" room="all">\n${note.params.content}\n</channel>` })
+    assert.equal(await sentHuman('reply after wrapper'), false)
+    // 2. only the id of a batch this binding delivered by channel
+    await runHook(env, { hook_event_name: 'UserPromptSubmit', prompt: `re: batch ${batchId}` })
+    assert.equal(await sentHuman('reply after id'), false)
+    // 3. an unknown id-looking token is an ordinary human prompt
+    await runHook(env, { hook_event_name: 'UserPromptSubmit', prompt: 're: batch 01ZZZZZZZZZZZZZZZZZZZZZZZZ' })
+    assert.equal(await sentHuman('reply after human prompt'), true)
+  } finally { await env.teardown() }
+})
+
+test('A2: an idle passive hook gets `empty` at once (no fixed wait); the 300 ms fallback is only for faults', { timeout: 40000 }, async () => {
+  const env = await setup() // server pull fallback is 1500 ms here, so only an immediate `empty` can be fast
+  try {
+    await ready(env)
+    // direct socket round trip: well under the 300 ms default fallback
+    const sock = connect(`${env.runtime}/vortex/claude-main.sock`)
+    sock.setEncoding('utf8')
+    const reply = new Promise<any>((resolve, reject) => {
+      let buf = ''
+      sock.on('data', c => { buf += c; if (buf.includes('\n')) resolve(JSON.parse(buf.split('\n')[0])) })
+      sock.on('error', reject)
+    })
+    await new Promise<void>(r => sock.once('connect', r))
+    const t0 = performance.now()
+    sock.write(JSON.stringify({ op: 'context', event: { hook_event_name: 'PostToolUse' } }) + '\n')
+    const r = await reply
+    const socketMs = performance.now() - t0
+    sock.destroy()
+    assert.deepEqual(r, { ok: true })
+    assert.ok(socketMs < 150, `idle pull took ${socketMs.toFixed(0)} ms`)
+    // whole `vx hook context` process, including bun start-up, finishes long before the fallback
+    const t1 = performance.now()
+    const { out, code } = await runHook(env, { hook_event_name: 'PostToolUse' })
+    const hookMs = performance.now() - t1
+    assert.equal(out, '')
+    assert.equal(code, 0)
+    assert.ok(hookMs < 1000, `hook process took ${hookMs.toFixed(0)} ms`)
+    assert.equal(env.hub.delivery.lastError('claude', 'main'), undefined) // no timeout fault was reported
+  } finally { await env.teardown() }
+})
+
+test('A2: a plugin-reported fault (pull timeout) appears as lastError in vx status', { timeout: 40000 }, async () => {
+  const env = await setup()
+  try {
+    const c = new VortexClient({ hub: `ws://127.0.0.1:${env.hub.port}`, token: env.claudeToken })
+    await c.bind('probe', ['all'])
+    const { ws } = c.stream('probe', { onBatch () {} })
+    await until(() => env.hub.delivery.openStreams().some(o => o.name === 'probe'), 5000, 'stream open')
+    c.fault(ws, 'passive pull timed out after 300 ms (hub did not answer)')
+    const b = await until(() => {
+      const row = (env.hub.store.allBindings() as any[]).find(x => x.name === 'probe')
+      return row === undefined || env.hub.delivery.lastError('claude', 'probe') === undefined ? undefined : row
+    }, 5000, 'fault recorded')
+    void b
+    const viaApi = (await env.operator.status()).bindings.find((x: any) => x.name === 'probe')
+    assert.match(viaApi.lastError, /pull timed out/)
+    ws.close()
+  } finally { await env.teardown() }
+})

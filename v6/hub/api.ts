@@ -334,6 +334,14 @@ export class Api {
       this.deps.delivery.handleFailed(socket, data.principal, data.name, frame.batch, frame.reason)
       return
     }
+    if (frame?.type === 'fault') {
+      if (typeof frame.reason !== 'string' || frame.reason.length === 0) {
+        socket.send({ type: 'error', reason: 'fault requires a reason' })
+        return
+      }
+      this.deps.delivery.handleFault(socket, data.principal, data.name, frame.reason.slice(0, 200))
+      return
+    }
     if (frame?.type === 'pull') {
       if (frame.kind !== 'passive') {
         socket.send({ type: 'error', reason: "pull kind must be 'passive'" })
@@ -342,7 +350,7 @@ export class Api {
       this.deps.delivery.handlePull(socket, data.principal, data.name)
       return
     }
-    socket.send({ type: 'error', reason: 'unknown frame type: must be delivered | failed | pull' })
+    socket.send({ type: 'error', reason: 'unknown frame type: must be delivered | failed | pull | fault' })
   }
 
   private onClose (ws: ServerWebSocket): void {

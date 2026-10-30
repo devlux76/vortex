@@ -150,6 +150,8 @@ export class Api {
     }
     let reply_to: string | undefined
     let human_turn = body.human_turn === true
+    let reply_author: string | undefined
+    let reply_ts: number | undefined
     if (body.reply_to !== undefined) {
       if (typeof body.reply_to !== 'string') return json({ error: 'invalid reply_to' }, 400)
       const original = this.deps.store.getMessage(body.reply_to)
@@ -168,12 +170,14 @@ export class Api {
         }
       }
       reply_to = body.reply_to
+      reply_author = original.from
+      reply_ts = original.ts
     }
     if (this.deps.skipRateLimit !== true && !this.allowSend(principal)) return json({ error: 'send rate exceeded' }, 429)
     const human = principal === 'operator' ? true : human_turn
     // Pre-acceptance rendered fit check (§8.4): canonical labels + full batch
     // wrapper incl. the fixed peer-data line; 413 before storage/seq advance.
-    const fit = fitSingle({ id: 'x', seq: 0, ts: 0, from: principal, scope, room, to, text: body.text, human }, this.bounds())
+    const fit = fitSingle({ id: 'x', seq: 0, ts: 0, from: principal, scope, room, to, text: body.text, human, reply_author, reply_ts }, this.bounds())
     if (!fit.fits) return json({ error: `rendered batch exceeds bounds (${fit.bytes} bytes / ${fit.codePoints} code points)` }, 413)
     const stored = this.deps.store.insertMessage({ from: principal, scope, room, to, text: body.text, reply_to, human })
     this.deps.delivery.onMessageStored(this.deps.store.getMessage(stored.id)!)
@@ -301,7 +305,7 @@ export class Api {
 
   private onOpen (ws: ServerWebSocket): void {
     const data = ws.data as unknown as { principal: string; name: string }
-    const socket = bunSocket(ws)
+    const socket = socketOf(ws)
     if (this.deps.delivery.attach(socket, data.principal, data.name)) return
     ws.close(4409, 'binding busy')
   }
@@ -313,7 +317,7 @@ export class Api {
       ws.send(JSON.stringify({ type: 'error', reason: 'invalid JSON frame' }))
       return
     }
-    const socket = bunSocket(ws)
+    const socket = socketOf(ws)
     if (frame?.type === 'delivered') {
       if (typeof frame.batch !== 'string' || !EVIDENCE_KINDS.includes(frame.evidence)) {
         socket.send({ type: 'error', reason: 'delivered requires a batch id and an evidence kind (host-accepted | transport-written | hook-returned)' })
@@ -343,7 +347,7 @@ export class Api {
 
   private onClose (ws: ServerWebSocket): void {
     const data = ws.data as unknown as { principal: string; name: string }
-    this.deps.delivery.detach(bunSocket(ws), data.principal, data.name)
+    this.deps.delivery.detach(socketOf(ws), data.principal, data.name)
   }
 }
 
@@ -357,6 +361,16 @@ function clampInt (raw: string | null, min: number, max: number, fallback: numbe
   const n = Number(raw)
   if (!Number.isInteger(n)) return fallback
   return Math.min(Math.max(n, min), max)
+}
+
+/**
+ * One stable wrapper per connection: the delivery engine compares sockets by
+ * identity to decide ownership, so a fresh wrapper per frame would make every
+ * acknowledgment look stale and every close look foreign (§8.3 takeover).
+ */
+function socketOf (ws: ServerWebSocket): SocketLike {
+  const data = ws.data as unknown as { sock?: SocketLike }
+  return (data.sock ??= bunSocket(ws))
 }
 
 function bunSocket (ws: ServerWebSocket): SocketLike & { close: (code: number, reason: string) => void } {

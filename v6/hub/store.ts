@@ -31,6 +31,8 @@ export interface BatchRow {
   status: 'pending' | 'failed' | 'delivered'
   error?: string
   msgIds: string[]
+  /** One-line [vx: ...] notices rendered above the messages; kept for replay. */
+  notices: string[]
   created: number
 }
 
@@ -103,6 +105,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
   evidence TEXT,
   error TEXT,
   msg_ids TEXT NOT NULL,
+  notices TEXT NOT NULL DEFAULT '[]',
   created INTEGER NOT NULL
 );
 `
@@ -161,7 +164,7 @@ export class HubStore {
 
   /** Exists (do not reveal). */
   principalExists (name: string): boolean {
-    return this.db.prepare('SELECT 1 FROM principals WHERE name = ?').get(name) !== undefined
+    return this.db.prepare('SELECT 1 FROM principals WHERE name = ?').get(name) != null
   }
 
   operatorExists (): boolean {
@@ -223,7 +226,7 @@ export class HubStore {
   }
 
   isMember (room: string, principal: string): boolean {
-    return this.db.prepare('SELECT 1 FROM members WHERE room = ? AND principal = ?').get(room, principal) !== undefined
+    return this.db.prepare('SELECT 1 FROM members WHERE room = ? AND principal = ?').get(room, principal) != null
   }
 
   memberRooms (principal: string): string[] {
@@ -236,7 +239,7 @@ export class HubStore {
 
   getMessage (id: string): StoredMessage | undefined {
     const row = this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as any
-    return row === undefined ? undefined : this.rowToMessage(row)
+    return row == null ? undefined : this.rowToMessage(row)
   }
 
   getMessagesByIds (ids: string[]): StoredMessage[] {
@@ -244,7 +247,7 @@ export class HubStore {
     const stmt = this.db.prepare('SELECT * FROM messages WHERE id = ?')
     for (const id of ids) {
       const row = stmt.get(id) as any
-      if (row !== undefined) out.push(this.rowToMessage(row))
+      if (row != null) out.push(this.rowToMessage(row))
     }
     return out
   }
@@ -338,11 +341,16 @@ export class HubStore {
   }
 
   /** Take a paused-notice marker for render-time addition, once per conversation. */
-  takeConversationNotice (conv: string): string | undefined {
+  peekConversationNotice (conv: string): string | undefined {
     const row = this.db.prepare('SELECT notice_pending FROM conversations WHERE conv = ?').get(conv) as any
-    if (row === undefined || row.notice_pending !== 1) return undefined
-    this.db.prepare('UPDATE conversations SET notice_pending = 0 WHERE conv = ?').run(conv)
+    if (row == null || row.notice_pending !== 1) return undefined
     return `[vx: conversation paused after ${this.cfg.loopBreakerLimit} automatic messages; operator message resumes]`
+  }
+
+  takeConversationNotice (conv: string): string | undefined {
+    const text = this.peekConversationNotice(conv)
+    if (text !== undefined) this.db.prepare('UPDATE conversations SET notice_pending = 0 WHERE conv = ?').run(conv)
+    return text
   }
 
   // Retention (§8.4): pending rows are never pruned; only delivered/free msgs.
@@ -435,7 +443,7 @@ export class HubStore {
       const stats = this.pendingStats(principal, binding)
       while (stats.count > this.cfg.pendingMaxMessages || stats.bytes > this.cfg.pendingMaxBytes) {
         const oldest = this.db.prepare(
-          `SELECT msg_id FROM pending WHERE binding_principal = ? AND binding_name = ? ORDER BY enqueued LIMIT 1`,
+          `SELECT msg_id FROM pending WHERE binding_principal = ? AND binding_name = ? ORDER BY rowid LIMIT 1`,
         ).get(principal, binding) as any
         if (oldest === undefined) break
         this.db.prepare('DELETE FROM pending WHERE binding_principal = ? AND binding_name = ? AND msg_id = ?').run(principal, binding, oldest.msg_id)
@@ -473,13 +481,14 @@ export class HubStore {
     const rows = this.db.prepare(
       `SELECT m.* FROM pending p JOIN messages m ON m.id = p.msg_id
        WHERE p.binding_principal = ? AND p.binding_name = ? AND p.kind = ?
-       ORDER BY p.enqueued`,
+       ORDER BY p.rowid`,
     ).all(principal, binding, kind) as any[]
     return rows.map(r => this.rowToMessage(r))
   }
 
-  deletePending (ids: string[]): void {
-    for (const id of ids) this.db.prepare('DELETE FROM pending WHERE msg_id = ?').run(id)
+  deletePending (principal: string, binding: string, ids: string[]): void {
+    const stmt = this.db.prepare('DELETE FROM pending WHERE binding_principal = ? AND binding_name = ? AND msg_id = ?')
+    for (const id of ids) stmt.run(principal, binding, id)
   }
 
   consumeExpiredNotice (principal: string, binding: string): number {
@@ -494,20 +503,20 @@ export class HubStore {
   // deliveries (batch records; id stable across retries §8.4)
   // ------------------------------------------------------------------
 
-  insertBatchRow (b: { id: string; principal: string; binding: string; kind: 'wake' | 'passive'; msgIds: string[] }): void {
+  insertBatchRow (b: { id: string; principal: string; binding: string; kind: 'wake' | 'passive'; msgIds: string[]; notices: string[] }): void {
     this.db.prepare(
-      `INSERT INTO deliveries (id, binding_principal, binding_name, kind, status, msg_ids, created)
-       VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
-    ).run(b.id, b.principal, b.binding, b.kind, JSON.stringify(b.msgIds), Date.now())
+      `INSERT INTO deliveries (id, binding_principal, binding_name, kind, status, msg_ids, notices, created)
+       VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)`,
+    ).run(b.id, b.principal, b.binding, b.kind, JSON.stringify(b.msgIds), JSON.stringify(b.notices), Date.now())
   }
 
   getBatch (id: string): BatchRow | undefined {
     const row = this.db.prepare('SELECT * FROM deliveries WHERE id = ?').get(id) as any
-    if (row === undefined) return undefined
+    if (row == null) return undefined
     return {
       id: row.id, principal: row.binding_principal, binding: row.binding_name,
       kind: row.kind, status: row.status, error: row.error === null ? undefined : row.error,
-      msgIds: JSON.parse(row.msg_ids), created: row.created,
+      msgIds: JSON.parse(row.msg_ids), notices: JSON.parse(row.notices), created: row.created,
     }
   }
 
@@ -518,7 +527,7 @@ export class HubStore {
        ORDER BY created DESC, id DESC LIMIT 1`,
     ).get(principal, binding, kind) as any
     if (!row) return undefined
-    return { id: row.id, principal: row.binding_principal, binding: row.binding_name, kind: row.kind, status: row.status, error: row.error === null ? undefined : row.error, msgIds: JSON.parse(row.msg_ids), created: row.created }
+    return { id: row.id, principal: row.binding_principal, binding: row.binding_name, kind: row.kind, status: row.status, error: row.error === null ? undefined : row.error, msgIds: JSON.parse(row.msg_ids), notices: JSON.parse(row.notices), created: row.created }
   }
 
   outstandingBatchesOf (principal: string, binding: string): BatchRow[] {
@@ -530,8 +539,8 @@ export class HubStore {
   deliverBatch (id: string, evidence: string): void {
     this.db.transaction(() => {
       const row = this.getBatch(id)
-      if (row !== undefined) {
-        this.deletePending(row.msgIds)
+      if (row != null) {
+        this.deletePending(row.principal, row.binding, row.msgIds)
         this.db.prepare(
           `UPDATE deliveries SET status = 'delivered', evidence = ? WHERE id = ?`,
         ).run(evidence, id)

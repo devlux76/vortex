@@ -7,7 +7,7 @@ import type { HubConfig } from './config.ts'
 import type { StoredMessage, BatchRow } from './store.ts'
 import { dmPairKey } from './store.ts'
 import { ulid } from '../client/ulid.ts'
-import { measure, type Bounds } from '../client/render.ts'
+import { measure, PLACEHOLDER_BATCH, type Bounds } from '../client/render.ts'
 
 export type Evidence = 'host-accepted' | 'transport-written' | 'hook-returned'
 
@@ -16,6 +16,8 @@ export interface BatchFrame {
   batch: string
   wake: boolean
   messages: StoredMessage[]
+  /** One-line [vx: ...] notices that render above the messages (§8.4, §8.5). */
+  notices: string[]
 }
 
 export type ServerFrame = BatchFrame | { type: 'error'; reason: string; batch?: string }
@@ -73,7 +75,8 @@ export class Delivery {
   /** Route one freshly stored message to the deliverable bindings. */
   onMessageStored (m: StoredMessage): void {
     if (m.scope === 'dm') {
-      // DMs are not delivered via room bindings per spec; store only.
+      // §8.2: only the single recipient's bindings receive a DM; never room members.
+      for (const b of this.store.bindingsOf(m.to[0])) this.enqueue(m, b.principal, b.name)
       return
     }
     const room = m.room!
@@ -185,35 +188,46 @@ export class Delivery {
     const key = this.scopeKeyOf(candidates[0])
     const scoped = candidates.filter(m => this.scopeKeyOf(m) === key)
     const isRoom = key.startsWith('room:')
-    const notices: string[] = []
-    const expired = this.store.consumeExpiredNotice(principal, name)
+    // Notices are peeked, not consumed, until a batch is actually built, so a
+    // message that cannot fit beside them never loses a notice (§8.4/§8.5).
+    const expired = this.store.getBinding(principal, name)?.expiredPending ?? 0
+    const allNotices: string[] = []
     if (expired > 0) {
       const roomHint = isRoom ? `vx log ${key.slice(5)}` : 'vx log --dm'
-      notices.push(`[vx: ${expired} older messages expired; ${roomHint}]`)
+      allNotices.push(`[vx: ${expired} older messages expired; ${roomHint}]`)
     }
-    const pausedNotice = this.store.takeConversationNotice(key)
-    if (pausedNotice !== undefined) notices.push(pausedNotice)
-    const picked: StoredMessage[] = []
-    for (const m of scoped) {
-      if (picked.length >= this.bounds().maxMessages) break
-      const candidate = {
-        batch: 'xxxxxxxxxxxxxxxxxxxxxxxxxx',
-        scope: (isRoom ? 'room' : 'dm') as 'room' | 'dm',
-        room: isRoom ? scoped[0].room : undefined,
-        notices,
-        messages: [...picked, m],
+    const pausedNotice = this.store.peekConversationNotice(key)
+    if (pausedNotice !== undefined) allNotices.push(pausedNotice)
+    const pick = (notices: string[]): StoredMessage[] => {
+      const out: StoredMessage[] = []
+      for (const m of scoped) {
+        if (out.length >= this.bounds().maxMessages) break
+        const candidate = {
+          batch: PLACEHOLDER_BATCH,
+          scope: (isRoom ? 'room' : 'dm') as 'room' | 'dm',
+          room: isRoom ? scoped[0].room : undefined,
+          notices,
+          messages: [...out, m],
+        }
+        if (!measure(candidate, this.bounds()).fits) break
+        out.push(m)
       }
-      const m2 = measure(candidate, this.bounds())
-      if (!m2.fits) break
-      picked.push(m)
+      return out
     }
+    let notices = allNotices
+    let picked = pick(notices)
+    if (picked.length === 0 && notices.length > 0) { notices = []; picked = pick(notices) }
     if (picked.length === 0) return undefined
+    if (notices.length > 0) {
+      if (expired > 0) this.store.consumeExpiredNotice(principal, name)
+      if (pausedNotice !== undefined) this.store.takeConversationNotice(key)
+    }
     // Real id replaces the constant-length placeholder: sizing holds (all ULIDs
     // are exactly 26 chars, so the wrapper length is id-content-invariant).
     const id = ulid()
-    const batch: BatchRow = { id, principal, binding: name, kind, status: 'pending', msgIds: picked.map(m => m.id), created: Date.now() }
+    const batch: BatchRow = { id, principal, binding: name, kind, status: 'pending', msgIds: picked.map(m => m.id), notices, created: Date.now() }
     this.store.insertBatchRow(batch)
-    const frame: BatchFrame = { type: 'batch', batch: id, wake, messages: picked }
+    const frame: BatchFrame = { type: 'batch', batch: id, wake, messages: picked, notices }
     hosted.send(frame)
     this.startRetryTimer(batch)
     return batch
@@ -239,7 +253,7 @@ export class Delivery {
     if (r.ws === undefined) return undefined
     const messages = this.store.getMessagesByIds(batch.msgIds)
     if (messages.length === 0) { this.store.deleteBatchRow(batch.id); return undefined }
-    r.ws.send({ type: 'batch', batch: batch.id, wake: batch.kind === 'wake', messages })
+    r.ws.send({ type: 'batch', batch: batch.id, wake: batch.kind === 'wake', messages, notices: batch.notices })
     return batch
   }
 

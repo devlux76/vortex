@@ -10,6 +10,7 @@ import { readFileSync, writeFileSync, existsSync, unlinkSync, rmSync } from 'nod
 
 let hubHandles: any
 let aliceToken: string
+let bobToken: string
 let operatorToken: string
 
 async function setup () {
@@ -35,6 +36,7 @@ async function setup () {
   const store = hubHandles.store
   const { token } = store.createPrincipal('alice')
   aliceToken = token
+  bobToken = store.createPrincipal('bob').token
   // read operator token – if the credential file was not created (operator existed from previous DB), create it now.
   const { operatorCredentialPath } = (await import('../hub/config.ts')).hubRoots()
   let opCred: any
@@ -55,6 +57,33 @@ async function teardown () {
   if (process.env.XDG_CONFIG_HOME) rmSync(process.env.XDG_CONFIG_HOME as string, { recursive: true })
   delete process.env.XDG_STATE_HOME
   delete process.env.XDG_CONFIG_HOME
+}
+
+interface TestFrame { batch: string; wake: boolean; messages: any[]; notices: string[] }
+async function openFrames (c: VortexClient, binding: string) {
+  const frames: TestFrame[] = []
+  const waiters: Array<() => void> = []
+  let consumed = 0
+  let resolveClosed!: (n: number) => void
+  const closed = new Promise<number>(r => { resolveClosed = r })
+  let resolveOpen!: () => void
+  const opened = new Promise<void>(r => { resolveOpen = r })
+  const { ws } = c.stream(binding, {
+    onBatch: (batch, wake, messages, notices) => { frames.push({ batch, wake, messages, notices }); waiters.splice(0).forEach(w => w()) },
+    onOpen: () => resolveOpen(),
+    onClose: ({ code }) => resolveClosed(code),
+  })
+  await Promise.race([opened, new Promise((_, rej) => setTimeout(() => rej(new Error('ws open timeout')), 3000))])
+  const next = async (ms = 3000): Promise<TestFrame> => {
+    const deadline = Date.now() + ms
+    while (frames.length <= consumed) {
+      const left = deadline - Date.now()
+      if (left <= 0) throw new Error('timed out waiting for batch frame')
+      await Promise.race([new Promise<void>(r => waiters.push(r)), new Promise(r => setTimeout(r, left))])
+    }
+    return frames[consumed++]
+  }
+  return { ws, frames, next, closed }
 }
 
 test('setup and teardown', async () => {
@@ -100,32 +129,30 @@ test('escaped single‑message rejection before storage (413)', async t => {
 
 test('at‑least‑once replay after reconnect (same batch id)', async t => {
   await setup()
-  const client = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: aliceToken })
+  const alice = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: aliceToken })
+  const bob = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: bobToken })
   const binding = 'replay-binding'
-  await client.bind(binding, ['all'])
-  // open first stream and capture batch id
-  const batchIds: string[] = []
-  const ws1 = client.stream(binding, {
-    onBatch: (batch) => { batchIds.push(batch) },
-    onOpen: () => {},
-    onError: () => {},
-    onClose: () => {},
-  }).ws
-  await client.send({ text: 'msg1' })
-  // wait for first batch
-  await new Promise(r => setTimeout(r, 200))
-  ws1.close()
-  // open second stream – should replay the same batch id
-  const ws2 = client.stream(binding, {
-    onBatch: (batch) => { batchIds.push(batch) },
-    onOpen: () => {},
-    onError: () => {},
-    onClose: () => {},
-  }).ws
-  // give time for replay
-  await new Promise(r => setTimeout(r, 200))
-  ws2.close()
-  assert.equal(batchIds[0], batchIds[1], 'replayed batch id matches original')
+  await bob.bind(binding, ['all'])
+  const first = await openFrames(bob, binding)
+  await alice.send({ text: 'msg1', to: ['bob'] })
+  const b1 = await first.next()
+  assert.deepEqual(b1.messages.map(m => m.text), ['msg1'])
+  // close without acknowledging, then reconnect
+  first.ws.close()
+  await first.closed
+  const second = await openFrames(bob, binding)
+  const b2 = await second.next()
+  assert.equal(b2.batch, b1.batch, 'replayed batch id matches original')
+  assert.deepEqual(b2.messages.map(m => m.text), ['msg1'])
+  // after the ack it is gone: a third connection replays nothing
+  bob.delivered(second.ws, b2.batch, 'host-accepted')
+  await new Promise(r => setTimeout(r, 100))
+  second.ws.close()
+  await second.closed
+  const third = await openFrames(bob, binding)
+  await new Promise(r => setTimeout(r, 150))
+  assert.equal(third.frames.length, 0, 'acknowledged batch is not replayed')
+  third.ws.close()
   await teardown()
 })
 
@@ -152,73 +179,60 @@ test('second stream on same binding returns 4409', async t => {
 
 test('late ack after takeover rejected', async t => {
   await setup()
-  const client = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: aliceToken })
+  const alice = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: aliceToken })
+  const bob = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: bobToken })
   const opClient = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: operatorToken })
   const binding = 'takeover-binding'
-  await client.bind(binding, ['all'])
-  // open first stream and capture batch id
-  const batchIds: string[] = []
-  const ws1Close = new Promise<number>((resolve) => {
-    const ws1 = client.stream(binding, {
-      onBatch: (batch) => { batchIds.push(batch) },
-      onOpen: () => {},
-      onError: () => {},
-      onClose: ({ code }) => { resolve(code) },
-    }).ws
-    // send a message to create a batch
-    client.send({ text: 'msg1' })
-  })
-  // wait for ws1 batch and then release binding via operator
-  await new Promise(r => setTimeout(r, 200))
-  const releaseRes = await opClient.release('alice', binding)
-  assert.ok(releaseRes.ok)
-  const code1 = await ws1Close
-  assert.equal(code1, 4409)
-  // open second stream (takeover) and expect the same batch id
-  const ws2Batch = new Promise<string>((resolve) => {
-    const ws2 = client.stream(binding, {
-      onBatch: (batch) => { resolve(batch) },
-      onOpen: () => {},
-      onError: () => {},
-      onClose: () => {},
-    }).ws
-  })
-  const batch2 = await ws2Batch
-  assert.equal(batch2, batchIds[0], 'rebinding replays same batch')
-  // deliver the batch on ws2
-  client.delivered((client.stream(binding, { onBatch: () => {}, onOpen: () => {}, onError: () => {}, onClose: () => {} }).ws), batch2, 'host-accepted')
-  // pending should be cleared
-  const pending = hubHandles.store.pendingMessages('alice', binding, 'wake')
-  assert.equal(pending.length, 0, 'pending cleared after ack from new stream')
+  await bob.bind(binding, ['all'])
+  const s1 = await openFrames(bob, binding)
+  await alice.send({ text: 'msg1', to: ['bob'] })
+  const b1 = await s1.next()
+  // operator release is the only takeover: the old stream is closed 4409
+  assert.ok((await opClient.release('bob', binding)).ok)
+  assert.equal(await s1.closed, 4409)
+  const s2 = await openFrames(bob, binding)
+  const b2 = await s2.next()
+  assert.equal(b2.batch, b1.batch, 'takeover replays the same batch')
+
+  // Engine level: an acknowledgment from the superseded connection is
+  // rejected and cannot consume the replacement binding's work.
+  const sent: any[] = []
+  const stale = { send: (f: any) => { sent.push(f) }, close: (c: number) => { sent.push({ closed: c }) } }
+  const accepted = hubHandles.delivery.handleDelivered(stale, 'bob', binding, b2.batch, 'host-accepted')
+  assert.equal(accepted, false)
+  assert.ok(sent.some(f => f.type === 'error' && /stale/.test(f.reason)), 'stale ack gets an error frame')
+  assert.equal(hubHandles.store.pendingMessages('bob', binding, 'wake').length, 1, 'stale ack consumed nothing')
+
+  // The current owner's ack works and clears the work.
+  bob.delivered(s2.ws, b2.batch, 'host-accepted')
+  await new Promise(r => setTimeout(r, 150))
+  assert.equal(hubHandles.store.pendingMessages('bob', binding, 'wake').length, 0, 'pending cleared by the new owner')
+  s2.ws.close()
   await teardown()
 })
 
-
 test('batch limits: max 20 messages per batch', async t => {
   await setup()
-  const client = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: aliceToken })
+  const alice = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: aliceToken })
+  const bob = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: bobToken })
   const binding = 'limit-binding'
-  await client.bind(binding, ['all'])
-  const batches: number[] = []
-  const ws = client.stream(binding, {
-    onBatch: (batch, _wake, msgs) => { batches.push(msgs.length) },
-    onOpen: () => {},
-    onError: () => {},
-    onClose: () => {},
-  }).ws;
-  // give the websocket a moment to open
-  await new Promise(r => setTimeout(r, 100));
-  // send 25 short messages
-  for (let i = 0; i < 25; i++) {
-    await client.send({ text: `msg${i}` });
-  }
-  // allow batches to be flushed
-  await new Promise(r => setTimeout(r, 2000));
-  ws.close();
-
-  // after flushing, expect no pending wake messages for this binding
-  const pending = hubHandles.store.pendingMessages('alice', 'limit-binding', 'wake');
-  assert.equal(pending.length, 0, 'no pending wake messages');
+  await bob.bind(binding, ['all'])
+  // 25 passive messages (to nobody), pulled by bob
+  for (let i = 0; i < 25; i++) await alice.send({ text: `msg${i}` })
+  const s = await openFrames(bob, binding)
+  bob.pull(s.ws)
+  const first = await s.next()
+  assert.equal(first.messages.length, 20, 'a batch holds at most 20 messages')
+  assert.equal(first.wake, false)
+  bob.delivered(s.ws, first.batch, 'hook-returned')
+  await new Promise(r => setTimeout(r, 100))
+  bob.pull(s.ws)
+  const second = await s.next()
+  assert.deepEqual(second.messages.map(m => m.text), ['msg20', 'msg21', 'msg22', 'msg23', 'msg24'])
+  bob.delivered(s.ws, second.batch, 'hook-returned')
+  await new Promise(r => setTimeout(r, 100))
+  assert.equal(hubHandles.store.pendingMessages('bob', binding, 'passive').length, 0)
+  s.ws.close()
   await teardown()
 });
 

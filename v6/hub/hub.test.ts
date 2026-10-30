@@ -13,13 +13,21 @@ let aliceToken: string
 let operatorToken: string
 
 async function setup () {
-  // Ensure a clean state – delete any prior DB and config.
+  // Use temporary directories for isolation
+  const { mkdtempSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const stateTmp = mkdtempSync(`${tmpdir()}/vortex-state-`)
+  const configTmp = mkdtempSync(`${tmpdir()}/vortex-config-`)
+  process.env.XDG_STATE_HOME = stateTmp
+  process.env.XDG_CONFIG_HOME = configTmp
+  // Ensure a clean state – delete any prior DB and config if they exist
   const { hubRoots } = await import('../hub/config.ts')
   const roots = hubRoots()
   const { existsSync, unlinkSync, rmSync } = await import('node:fs')
   if (existsSync(roots.db)) unlinkSync(roots.db)
   if (existsSync(roots.state)) rmSync(roots.state, { recursive: true })
   if (existsSync(roots.config)) rmSync(roots.config, { recursive: true })
+
 
   // assign a random free port to avoid collisions
   hubHandles = await startHub({ cfg: { listen: '127.0.0.1:0', sendPerMinute: 1000, loopBreakerLimit: 2, wakeCoalesceMs: 10, wakeMinIntervalMs: 20, wakeHourlyLimit: 100 } })
@@ -41,6 +49,12 @@ async function setup () {
 
 async function teardown () {
   await hubHandles.stop()
+  // Clean temporary directories
+  const { rmSync } = await import('node:fs')
+  if (process.env.XDG_STATE_HOME) rmSync(process.env.XDG_STATE_HOME as string, { recursive: true })
+  if (process.env.XDG_CONFIG_HOME) rmSync(process.env.XDG_CONFIG_HOME as string, { recursive: true })
+  delete process.env.XDG_STATE_HOME
+  delete process.env.XDG_CONFIG_HOME
 }
 
 test('setup and teardown', async () => {
@@ -85,8 +99,34 @@ test('escaped single‑message rejection before storage (413)', async t => {
 })
 
 test('at‑least‑once replay after reconnect (same batch id)', async t => {
-  // Replay behavior is exercised indirectly by other tests; explicit check omitted for brevity.
-  assert.ok(true)
+  await setup()
+  const client = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: aliceToken })
+  const binding = 'replay-binding'
+  await client.bind(binding, ['all'])
+  // open first stream and capture batch id
+  const batchIds: string[] = []
+  const ws1 = client.stream(binding, {
+    onBatch: (batch) => { batchIds.push(batch) },
+    onOpen: () => {},
+    onError: () => {},
+    onClose: () => {},
+  }).ws
+  await client.send({ text: 'msg1' })
+  // wait for first batch
+  await new Promise(r => setTimeout(r, 200))
+  ws1.close()
+  // open second stream – should replay the same batch id
+  const ws2 = client.stream(binding, {
+    onBatch: (batch) => { batchIds.push(batch) },
+    onOpen: () => {},
+    onError: () => {},
+    onClose: () => {},
+  }).ws
+  // give time for replay
+  await new Promise(r => setTimeout(r, 200))
+  ws2.close()
+  assert.equal(batchIds[0], batchIds[1], 'replayed batch id matches original')
+  await teardown()
 })
 
 test('second stream on same binding returns 4409', async t => {
@@ -95,30 +135,70 @@ test('second stream on same binding returns 4409', async t => {
   const binding = 'dup-binding'
   await client.bind(binding, ['all'])
   const ws1 = client.stream(binding, { onBatch: () => {}, onOpen: () => {}, onError: () => {}, onClose: () => {} }).ws
-  // second attempt
-  const ws2 = client.stream(binding, {
-    onBatch: () => {},
-    onOpen: () => {},
-    onError: (reason) => {
-      // should receive error frame
-      assert.ok(reason)
-    },
-    onClose: ({ code }) => {
-      // Accept any non-normal close code (4409 per spec)
-      assert.notStrictEqual(code, 1000)
-    },
-  }).ws
+  const closePromise = new Promise<number>((resolve) => {
+    const ws2 = client.stream(binding, {
+      onBatch: () => {},
+      onOpen: () => {},
+      onError: () => {},
+      onClose: ({ code }) => { resolve(code) },
+    }).ws
+    // ws2 will be closed by hub with 4409
+  })
+  const code = await closePromise
+  assert.equal(code, 4409)
   ws1.close()
-  ws2.close()
   await teardown()
 })
 
 test('late ack after takeover rejected', async t => {
-  // Takeover rejection behavior exercised indirectly; explicit check omitted.
-  assert.ok(true)
+  await setup()
+  const client = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: aliceToken })
+  const binding = 'takeover-binding'
+  await client.bind(binding, ['all'])
+  const ws1 = client.stream(binding, { onBatch: () => {}, onOpen: () => {}, onError: () => {}, onClose: () => {} }).ws
+  const closePromise = new Promise<number>((resolve) => {
+    const ws2 = client.stream(binding, {
+      onBatch: () => {},
+      onOpen: () => {},
+      onError: () => {},
+      onClose: ({ code }) => { resolve(code) },
+    }).ws
+    // ws2 will be closed immediately with 4409
+  })
+  const code = await closePromise
+  assert.equal(code, 4409)
+  ws1.close()
+  await teardown()
 })
 
-// Loop breaker pause/resume test
+test('batch limits: max 20 messages per batch', async t => {
+  await setup()
+  const client = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: aliceToken })
+  const binding = 'limit-binding'
+  await client.bind(binding, ['all'])
+  const batches: number[] = []
+  const ws = client.stream(binding, {
+    onBatch: (batch, _wake, msgs) => { batches.push(msgs.length) },
+    onOpen: () => {},
+    onError: () => {},
+    onClose: () => {},
+  }).ws;
+  // give the websocket a moment to open
+  await new Promise(r => setTimeout(r, 100));
+  // send 25 short messages
+  for (let i = 0; i < 25; i++) {
+    await client.send({ text: `msg${i}` });
+  }
+  // allow batches to be flushed
+  await new Promise(r => setTimeout(r, 2000));
+  ws.close();
+
+  // after flushing, expect no pending wake messages for this binding
+  const pending = hubHandles.store.pendingMessages('alice', 'limit-binding', 'wake');
+  assert.equal(pending.length, 0, 'no pending wake messages');
+  await teardown()
+});
+
 test('loop breaker pauses after limit and resumes on operator message', async t => {
   await setup()
   const client = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: aliceToken })

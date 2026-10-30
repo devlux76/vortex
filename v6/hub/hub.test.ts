@@ -30,7 +30,7 @@ async function setup () {
 
 
   // assign a random free port to avoid collisions
-  hubHandles = await startHub({ cfg: { listen: '127.0.0.1:0', sendPerMinute: 1000, loopBreakerLimit: 2, wakeCoalesceMs: 10, wakeMinIntervalMs: 20, wakeHourlyLimit: 100 } })
+  hubHandles = await startHub({ cfg: { listen: '127.0.0.1:0', sendPerMinute: 1000, loopBreakerLimit: 2, wakeCoalesceMs: 10, wakeMinIntervalMs: 20, wakeHourlyLimit: 100, bodyMaxBytes: 20000 } })
   // enroll alice via the store directly (no HTTP endpoint needed for test)
   const store = hubHandles.store
   const { token } = store.createPrincipal('alice')
@@ -153,23 +153,46 @@ test('second stream on same binding returns 4409', async t => {
 test('late ack after takeover rejected', async t => {
   await setup()
   const client = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: aliceToken })
+  const opClient = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: operatorToken })
   const binding = 'takeover-binding'
   await client.bind(binding, ['all'])
-  const ws1 = client.stream(binding, { onBatch: () => {}, onOpen: () => {}, onError: () => {}, onClose: () => {} }).ws
-  const closePromise = new Promise<number>((resolve) => {
-    const ws2 = client.stream(binding, {
-      onBatch: () => {},
+  // open first stream and capture batch id
+  const batchIds: string[] = []
+  const ws1Close = new Promise<number>((resolve) => {
+    const ws1 = client.stream(binding, {
+      onBatch: (batch) => { batchIds.push(batch) },
       onOpen: () => {},
       onError: () => {},
       onClose: ({ code }) => { resolve(code) },
     }).ws
-    // ws2 will be closed immediately with 4409
+    // send a message to create a batch
+    client.send({ text: 'msg1' })
   })
-  const code = await closePromise
-  assert.equal(code, 4409)
-  ws1.close()
+  // wait for ws1 batch and then release binding via operator
+  await new Promise(r => setTimeout(r, 200))
+  const releaseRes = await opClient.release('alice', binding)
+  assert.ok(releaseRes.ok)
+  const code1 = await ws1Close
+  assert.equal(code1, 4409)
+  // open second stream (takeover) and expect the same batch id
+  const ws2Batch = new Promise<string>((resolve) => {
+    const ws2 = client.stream(binding, {
+      onBatch: (batch) => { resolve(batch) },
+      onOpen: () => {},
+      onError: () => {},
+      onClose: () => {},
+    }).ws
+  })
+  const batch2 = await ws2Batch
+  assert.equal(batch2, batchIds[0], 'rebinding replays same batch')
+  // deliver the batch on ws2
+  client.delivered((client.stream(binding, { onBatch: () => {}, onOpen: () => {}, onError: () => {}, onClose: () => {} }).ws), batch2, 'host-accepted')
+  // pending should be cleared
+  const pending = hubHandles.store.pendingMessages('alice', binding, 'wake')
+  assert.equal(pending.length, 0, 'pending cleared after ack from new stream')
   await teardown()
 })
+
 
 test('batch limits: max 20 messages per batch', async t => {
   await setup()

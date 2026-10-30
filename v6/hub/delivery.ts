@@ -73,9 +73,7 @@ export class Delivery {
   /** Route one freshly stored message to the deliverable bindings. */
   onMessageStored (m: StoredMessage): void {
     if (m.scope === 'dm') {
-      for (const b of this.store.bindingsOf(m.to[0])) {
-        this.enqueue(m, b.principal, b.name)
-      }
+      // DMs are not delivered via room bindings per spec; store only.
       return
     }
     const room = m.room!

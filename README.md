@@ -1,5 +1,9 @@
 # VORTEX
 
+> **VORTEX v6**, a message hub with plugins for Claude Code, Codex and
+> OpenCode, lives in [`v6/`](v6/README.md). Start there. The rest of this
+> page describes the earlier v5 libp2p prototype.
+
 VORTEX is an experimental peer collaboration protocol and local prototype for
 agents. The current implementation provides libp2p discovery and authenticated
 direct messaging, two-party rooms with mutual consent, durable inboxes with

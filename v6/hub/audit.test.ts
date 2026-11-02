@@ -1,0 +1,111 @@
+// Release-audit regressions (Claude + Codex cross-review, 2026-11-02, audit
+// issue vortex:3ab7f40). Each test reproduces a finding against the store and
+// delivery engine directly: f9da54e (retention scope and count), 4f65a54 (retry
+// timer after restart), 47d23e9 (stale or late `failed` frames).
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { HubStore, type StoredMessage } from './store.ts'
+import { Delivery, type ServerFrame, type SocketLike } from './delivery.ts'
+import { DEFAULT_CONFIG, type HubConfig } from './config.ts'
+
+function withStore (over: Partial<HubConfig>, fn: (s: HubStore, cfg: HubConfig) => Promise<void> | void): () => Promise<void> {
+  return async () => {
+    const dir = mkdtempSync(`${tmpdir()}/vortex-audit-`)
+    const cfg = { ...DEFAULT_CONFIG, ...over }
+    const s = new HubStore(`${dir}/hub.db`, cfg)
+    try { await fn(s, cfg) } finally { s.close(); rmSync(dir, { recursive: true, force: true }) }
+  }
+}
+
+const dm = (s: HubStore, from: string, to: string, text: string): StoredMessage =>
+  s.insertMessage({ from, to: [to], scope: 'dm', text, human: false })
+const post = (s: HubStore, from: string, room: string, text: string): StoredMessage =>
+  s.insertMessage({ from, to: [], scope: 'room', room, text, human: false })
+
+function socket (): SocketLike & { frames: ServerFrame[]; closes: number[] } {
+  const frames: ServerFrame[] = []
+  const closes: number[] = []
+  return { frames, closes, send: f => { frames.push(f) }, close: code => { closes.push(code) } }
+}
+
+test('f9da54e: DM count retention is per unordered pair and keeps exactly dmMaxMessages', withStore({ dmMaxMessages: 2 }, s => {
+  const unrelated = dm(s, 'carol', 'dave', 'unrelated recent DM')
+  const pair = [dm(s, 'alice', 'bob', 'a1'), dm(s, 'bob', 'alice', 'b1'), dm(s, 'alice', 'bob', 'a2')]
+  assert.ok(s.getMessage(unrelated.id), 'another pair\'s DM survives')
+  assert.equal(s.getMessage(pair[0].id), undefined, 'oldest of the pair pruned')
+  assert.deepEqual(s.dmLog('alice', 0, 100).map(m => m.text), ['b1', 'a2'], 'exactly 2 kept, both directions count as one conversation')
+  // A third principal's own DMs with alice are a different pair.
+  const other = dm(s, 'erin', 'alice', 'e1')
+  dm(s, 'alice', 'bob', 'a3')
+  assert.ok(s.getMessage(other.id), 'erin->alice is not alice<->bob')
+}))
+
+test('f9da54e: DM retention never prunes a pending DM', withStore({ dmMaxMessages: 1 }, s => {
+  s.setBinding('bob', 'main', ['all'])
+  const first = dm(s, 'alice', 'bob', 'still pending')
+  s.enqueuePending('bob', 'main', first, 'wake')
+  dm(s, 'alice', 'bob', 'second')
+  assert.ok(s.getMessage(first.id))
+}))
+
+test('f9da54e: room count retention keeps exactly roomMaxMessages', withStore({ roomMaxMessages: 3 }, s => {
+  for (let i = 1; i <= 5; i++) post(s, 'alice', 'all', `m${i}`)
+  const other = post(s, 'alice', 'ops', 'other room')
+  assert.deepEqual(s.roomLog('all', 0, 100).map(m => m.text), ['m3', 'm4', 'm5'])
+  assert.ok(s.getMessage(other.id))
+}))
+
+test('4f65a54: an outstanding batch replayed after a hub restart keeps retrying', withStore({ batchRetryMs: 20 }, async (s, cfg) => {
+  s.setBinding('bob', 'main', ['all'])
+  const m = dm(s, 'alice', 'bob', 'pending across restart')
+  s.enqueuePending('bob', 'main', m, 'wake')
+  s.insertBatchRow({ id: 'batch-restart', principal: 'bob', binding: 'main', kind: 'wake', msgIds: [m.id], notices: [] })
+  const d = new Delivery(s, cfg) // a fresh engine: no in-memory retry timers survive
+  try {
+    d.start()
+    const sock = socket()
+    d.attach(sock, 'bob', 'main')
+    await Bun.sleep(90)
+    const replays = sock.frames.filter(f => f.type === 'batch' && f.batch === 'batch-restart').length
+    assert.ok(replays >= 2, `replayed ${replays} time(s); the retry timer must be re-armed on attach`)
+  } finally { d.stop() }
+}))
+
+test('47d23e9: a failed frame from a released socket cannot reopen a delivered batch', withStore({}, (s, cfg) => {
+  s.setBinding('bob', 'main', ['all'])
+  const m = dm(s, 'alice', 'bob', 'x')
+  s.enqueuePending('bob', 'main', m, 'wake')
+  s.insertBatchRow({ id: 'batch-stale', principal: 'bob', binding: 'main', kind: 'wake', msgIds: [m.id], notices: [] })
+  const d = new Delivery(s, cfg)
+  try {
+    const old = socket()
+    d.attach(old, 'bob', 'main')
+    d.release('bob', 'main')
+    const next = socket()
+    d.attach(next, 'bob', 'main')
+    assert.equal(d.handleDelivered(next, 'bob', 'main', 'batch-stale', 'host-accepted'), true)
+    d.handleFailed(old, 'bob', 'main', 'batch-stale', 'late error from the old owner')
+    assert.equal(s.getBatch('batch-stale')?.status, 'delivered')
+    assert.equal(s.outstandingBatch('bob', 'main', 'wake'), undefined, 'no outstanding batch is resurrected')
+    assert.equal(d.lastError('bob', 'main'), undefined, 'a stale socket cannot set lastError')
+    assert.ok(old.frames.some(f => f.type === 'error'), 'the stale socket is told')
+  } finally { d.stop() }
+}))
+
+test('47d23e9: a late failed frame from the current owner cannot reopen a delivered batch', withStore({}, (s, cfg) => {
+  s.setBinding('bob', 'main', ['all'])
+  const m = dm(s, 'alice', 'bob', 'y')
+  s.enqueuePending('bob', 'main', m, 'wake')
+  s.insertBatchRow({ id: 'batch-late', principal: 'bob', binding: 'main', kind: 'wake', msgIds: [m.id], notices: [] })
+  const d = new Delivery(s, cfg)
+  try {
+    const sock = socket()
+    d.attach(sock, 'bob', 'main')
+    d.handleDelivered(sock, 'bob', 'main', 'batch-late', 'host-accepted')
+    d.handleFailed(sock, 'bob', 'main', 'batch-late', 'late')
+    assert.equal(s.getBatch('batch-late')?.status, 'delivered')
+    assert.equal(s.outstandingBatch('bob', 'main', 'wake'), undefined)
+  } finally { d.stop() }
+}))

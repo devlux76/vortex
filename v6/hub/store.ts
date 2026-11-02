@@ -531,28 +531,34 @@ export class HubStore {
     return new Map(rows.map(r => [r.conv as string, r.t as number]))
   }
 
-  // Retention (§8.4): pending rows are never pruned; only delivered/free msgs.
+  // Retention (§8.4): per conversation (a room, or one unordered DM pair, the
+  // same unit as §8.5), keep the newest N and nothing older than the age limit.
+  // Pending rows are never pruned. `seq < (Nth newest seq)` keeps exactly N; a
+  // conversation with fewer than N rows yields NULL and deletes nothing.
   private pruneRetention (m: { scope: 'room' | 'dm'; room?: string; from: string; to: string[]; text: string }): void {
+    let where: string
+    let params: Array<string | number>
+    let max: number
+    let days: number
     if (m.scope === 'room') {
-      // keep last roomMaxMessages (§8.4)
-      this.db.prepare(
-        `DELETE FROM messages WHERE room = ? AND id NOT IN (SELECT msg_id FROM pending) AND seq <=
-           (SELECT COALESCE(MIN(seq), 0) - 1 FROM (SELECT seq FROM messages WHERE room = ? ORDER BY seq DESC LIMIT 1 OFFSET ?))`,
-      ).run(m.room!, m.room!, this.cfg.roomMaxMessages)
-      const cutoff = Date.now() - this.cfg.roomMaxDays * 86_400_000
-      this.db.prepare(
-        `DELETE FROM messages WHERE room = ? AND id NOT IN (SELECT msg_id FROM pending) AND ts < ?`,
-      ).run(m.room!, cutoff)
+      where = 'room = ?'
+      params = [m.room!]
+      max = this.cfg.roomMaxMessages
+      days = this.cfg.roomMaxDays
     } else {
-      this.db.prepare(
-        `DELETE FROM messages WHERE scope = 'dm' AND id NOT IN (SELECT msg_id FROM pending) AND seq <=
-           (SELECT COALESCE(MIN(seq), 0) - 1 FROM (SELECT seq FROM messages WHERE scope = 'dm' AND (fromp = ? OR to_json = ?) ORDER BY seq DESC LIMIT 1 OFFSET ?))`,
-      ).run(m.from, JSON.stringify(m.to), this.cfg.dmMaxMessages)
-      const cutoff = Date.now() - this.cfg.dmMaxDays * 86_400_000
-      this.db.prepare(
-        `DELETE FROM messages WHERE scope = 'dm' AND id NOT IN (SELECT msg_id FROM pending) AND ts < ? AND (fromp = ? OR to_json = ?)`,
-      ).run(cutoff, m.from, JSON.stringify(m.to))
+      const [a, b] = [m.from, m.to[0]]
+      where = "scope = 'dm' AND ((fromp = ? AND to_json = ?) OR (fromp = ? AND to_json = ?))"
+      params = [a, JSON.stringify([b]), b, JSON.stringify([a])]
+      max = this.cfg.dmMaxMessages
+      days = this.cfg.dmMaxDays
     }
+    this.db.prepare(
+      `DELETE FROM messages WHERE ${where} AND id NOT IN (SELECT msg_id FROM pending) AND seq <
+         (SELECT seq FROM messages WHERE ${where} ORDER BY seq DESC LIMIT 1 OFFSET ?)`,
+    ).run(...params, ...params, Math.max(0, max - 1))
+    this.db.prepare(
+      `DELETE FROM messages WHERE ${where} AND id NOT IN (SELECT msg_id FROM pending) AND ts < ?`,
+    ).run(...params, Date.now() - days * 86_400_000)
   }
 
   roomLog (room: string, after: number, limit: number): StoredMessage[] {

@@ -359,7 +359,11 @@ export class Delivery {
     // wake first (§8.4: prioritize wake submissions).
     const outstanding = this.store.outstandingBatchesOf(principal, name)
     outstanding.sort((a, b) => (a.kind === 'wake' ? 0 : 1) - (b.kind === 'wake' ? 0 : 1))
-    for (const b of outstanding) this.resend(b)
+    for (const b of outstanding) {
+      // A batch persisted by an earlier hub process has no in-memory retry
+      // timer; re-arm it so the 15 min retry (§8.4) survives a restart.
+      if (this.resend(b) !== undefined && !this.retryTimers.has(b.id)) this.startRetryTimer(b)
+    }
     // Wake mail that accumulated while no socket existed goes out now.
     this.attemptWakePush(principal, name)
     return true
@@ -415,9 +419,16 @@ export class Delivery {
   }
 
   handleFailed (socket: SocketLike, principal: string, name: string, batchId: string, reason: string): void {
+    // Same ownership and state guards as handleDelivered: a released or replaced
+    // socket cannot touch the binding's work, and a delivered batch stays delivered.
+    if (this.isStale(principal, name, socket)) {
+      socket.send({ type: 'error', reason: 'stale-generation: failure report rejected after takeover or reconnect loss', batch: batchId })
+      socket.close(4409, 'binding ownership changed')
+      return
+    }
     const batch = this.store.getBatch(batchId)
-    if (batch === undefined || batch.principal !== principal || batch.binding !== name) {
-      socket.send({ type: 'error', reason: 'unknown batch', batch: batchId })
+    if (batch === undefined || batch.principal !== principal || batch.binding !== name || batch.status === 'delivered') {
+      socket.send({ type: 'error', reason: 'unknown or already delivered batch', batch: batchId })
       return
     }
     this.store.markBatchFailed(batchId, reason)

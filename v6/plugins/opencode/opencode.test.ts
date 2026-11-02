@@ -443,8 +443,8 @@ test('the model cannot select human identity or invoke the manual actions', asyn
       assert.throws(() => parseSendArgs(bad), /unknown argument/)
     }
     assert.deepEqual(Object.keys((tool.input as any).properties).sort(), Object.keys(TOOL.inputSchema.properties).sort())
-    // the only model tool is vx_send; manual actions are commands, never tools
-    assert.deepEqual([...host.tools.keys()], ['vx_send'])
+    // Model tools send/read as the agent; manual actions remain commands.
+    assert.deepEqual([...host.tools.keys()], ['vx_send', 'vx_read'])
     await tool.execute({ text: 'agent words', to: ['peer'] }, { sessionID: 'ses_wake' })
     const g = await until(() => got.find(x => x.messages.some(m => m.text === 'agent words')), 5000, 'peer receives the agent message')
     assert.equal(g.messages[0].from, 'opencode')

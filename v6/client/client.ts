@@ -142,6 +142,10 @@ export class VortexClient {
     return await expectJson(await this.req('GET', `/v1/dms?after=${after}&limit=${limit}`), 200)
   }
 
+  async ownDmLog (after = 0, limit = 100): Promise<{ messages: WireApiMessage[] }> {
+    return await expectJson(await this.req('GET', `/v1/dms/mine?after=${after}&limit=${limit}`), 200)
+  }
+
   async recent (limit = 200): Promise<{ messages: WireApiMessage[] }> {
     return await expectJson(await this.req('GET', `/v1/recent?limit=${limit}`), 200)
   }

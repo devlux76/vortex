@@ -150,7 +150,7 @@ async function ready (env: Env, binding = 'main') {
   return s
 }
 
-test('server advertises channel capability, fixed instructions, and exactly one tool', { timeout: 40000 }, async () => {
+test('server advertises channel capability, fixed instructions, and send/read tools', { timeout: 40000 }, async () => {
   const env = await setup()
   try {
     const s = new McpServer(env)

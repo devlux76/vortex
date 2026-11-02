@@ -132,13 +132,19 @@ for (const host of ['claude', 'codex'] as const) {
       assert.equal(init.result.serverInfo.name, 'vortex')
       assert.equal(init.result.instructions, INSTRUCTIONS)
       const tools = await server.request('tools/list')
-      assert.deepEqual(tools.result.tools.map((t: any) => t.name), ['vx_send'])
+      assert.deepEqual(tools.result.tools.map((t: any) => t.name), ['vx_send', 'vx_read'])
 
       // `vx hook context` exactly as the host's hooks.json runs it
       const hooks = JSON.parse(readFileSync(`${root}/hooks/hooks.json`, 'utf8')).hooks.UserPromptSubmit[0].hooks[0]
       await until(() => e.hub.delivery.openStreams().some(s => s.principal === host) || undefined, 8000, 'plugin stream')
       await e.peer.send({ text: 'passive from the isolated copy', to: [] })
       await sleep(100)
+      // Ordinary MCP read works without channel initialization or a host-wake
+      // connection; the following hook must still receive this same mail.
+      const read = await server.request('tools/call', { name: 'vx_read' })
+      assert.equal(read.result.isError, undefined)
+      assert.ok(read.result.content[0].text.includes('passive from the isolated copy'))
+      assert.match(read.result.content[0].text, /\[vx: next after=\d+; more=false\]$/)
       const proc = Bun.spawn(resolveCommand(hooks, rootVar, root), {
         cwd: tmpdir(), stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
         env: { ...process.env, ...envv },
@@ -158,7 +164,7 @@ for (const host of ['claude', 'codex'] as const) {
   })
 }
 
-test('opencode: the bundled entry alone loads with a fake ctx, registers vx_send, and admits a wake', async () => {
+test('opencode: the bundled entry alone exposes send/read tools and admits a wake', async () => {
   const e = await env()
   const root = isolate('opencode')
   try {
@@ -172,12 +178,15 @@ test('opencode: the bundled entry alone loads with a fake ctx, registers vx_send
       session: 'ses_wake', directory: host.directory, binding: 'iso',
       credentialFile: e.agent.opencode.file, operatorCredentialFile: `${root}/none.json`, passivePullMs: 50,
     }))
-    assert.deepEqual([...host.tools.keys()], ['vx_send'])
+    assert.deepEqual([...host.tools.keys()], ['vx_send', 'vx_read'])
     assert.equal(host.tools.get('vx_send')!.options?.codemode, false)
     await until(() => e.hub.delivery.openStreams().some(s => s.principal === 'opencode') || undefined, 8000, 'plugin stream')
     await e.peer.send({ text: 'wake the bundle', to: ['opencode'] })
     await until(() => host.synthetics.length >= 1 || undefined, 8000, 'admission')
     assert.equal(host.synthetics[0].delivery, 'queue')
+    const read = await host.tools.get('vx_read')!.execute({}, { sessionID: 'ses_wake' })
+    assert.match(read.content!, /wake the bundle/)
+    assert.match(read.content!, /\[vx: next after=\d+; more=false\]$/)
     const wake = { sessionID: 'ses_wake', system: [] as any[] }
     await host.fire('context', wake)
     assert.equal(wake.system[0].text, INSTRUCTIONS)

@@ -103,6 +103,7 @@ export class Api {
     if (method === 'DELETE' && /^\/v1\/bindings\/[^/]+\/[^/]+$/.test(path)) return this.deleteBinding(req, path)
     if (method === 'GET' && /^\/v1\/rooms\/[^/]+\/log$/.test(path)) return this.roomLog(req, url, path)
     if (method === 'GET' && path === '/v1/dms') return this.dmLog(req, url)
+    if (method === 'GET' && path === '/v1/dms/mine') return this.ownDmLog(req, url)
     if (method === 'GET' && path === '/v1/recent') return this.recent(req, url)
     if (method === 'GET' && path === '/v1/status') return this.status(req)
     return json({ error: 'not found' }, 404)
@@ -267,6 +268,14 @@ export class Api {
     const after = clampInt(url.searchParams.get('after'), 0, Number.MAX_SAFE_INTEGER, 0)
     const limit = clampInt(url.searchParams.get('limit'), 1, this.deps.cfg.logLimitMax, 100)
     return json({ messages: this.deps.store.dmLogAll(after, limit) }, 200)
+  }
+
+  private async ownDmLog (req: Request, url: URL): Promise<Response> {
+    const principal = this.authorized(req)
+    if (principal === undefined) return json({ error: 'unauthorized' }, 401)
+    const after = clampInt(url.searchParams.get('after'), 0, Number.MAX_SAFE_INTEGER, 0)
+    const limit = clampInt(url.searchParams.get('limit'), 1, this.deps.cfg.logLimitMax, 100)
+    return json({ messages: this.deps.store.dmLog(principal, after, limit) }, 200)
   }
 
   private async recent (req: Request, url: URL): Promise<Response> {

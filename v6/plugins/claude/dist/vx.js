@@ -509,30 +509,33 @@ class HubStore {
       const seq = this.db.prepare("SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM messages").get().next;
       let reply_author = undefined;
       let reply_ts = undefined;
+      let referenced;
       if (m.reply_to !== undefined) {
-        const r = this.getMessage(m.reply_to);
-        reply_author = r?.from;
-        reply_ts = r?.ts;
+        referenced = this.getMessage(m.reply_to);
+        reply_author = referenced?.from;
+        reply_ts = referenced?.ts;
       }
       this.db.prepare(`INSERT INTO messages (id, seq, ts, scope, room, to_json, fromp, text, reply_to, human, reply_author, reply_ts)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, seq, now, m.scope, m.room ?? null, toJson, m.from, m.text, m.reply_to ?? null, m.human ? 1 : 0, reply_author ?? null, reply_ts ?? null);
       if (m.scope === "room")
         this.addMember(m.room, m.from);
       const bump = this.bumpConversation(conversationKey, m.from, m.human, now);
+      const resetConvs = bump.operatorReset ? [conversationKey] : [];
+      if (m.from === "operator" && m.scope === "dm" && referenced !== undefined && referenced.scope === "dm") {
+        const refConv = dmPairKey(referenced.from, referenced.to[0]);
+        if (refConv !== conversationKey && this.operatorResetConversation(refConv, now))
+          resetConvs.push(refConv);
+      }
       const msg = { id, seq, ts: now, scope: m.scope, room: m.room, to: m.to, from: m.from, text: m.text, reply_to: m.reply_to, human: m.human, reply_author, reply_ts };
       this.pruneRetention(msg);
-      return { ...msg, conversationKey, ...bump };
+      return { ...msg, conversationKey, ...bump, resetConvs };
     })();
     return built;
   }
   bumpConversation(conv, from, human, now) {
     this.db.prepare("INSERT INTO conversations (conv) VALUES (?) ON CONFLICT(conv) DO NOTHING").run(conv);
     if (from === "operator") {
-      const was = this.conversationRow(conv);
-      this.db.prepare(`UPDATE conversations SET auto_count = 0, level = 0, cooling_until = NULL, paused = 0,
-           last_cooldown_end = CASE WHEN cooling_until IS NOT NULL THEN ? ELSE last_cooldown_end END WHERE conv = ?`).run(now, conv);
-      this.db.prepare("DELETE FROM cooldown_notices WHERE conv = ?").run(conv);
-      return { enteredCooldown: false, operatorReset: was.coolingUntil !== null, expiredInline: false };
+      return { enteredCooldown: false, operatorReset: this.operatorResetConversation(conv, now), expiredInline: false };
     }
     if (human)
       return { enteredCooldown: false, operatorReset: false, expiredInline: false };
@@ -553,6 +556,14 @@ class HubStore {
       return { enteredCooldown: true, operatorReset: false, expiredInline };
     }
     return { enteredCooldown: false, operatorReset: false, expiredInline };
+  }
+  operatorResetConversation(conv, now) {
+    this.db.prepare("INSERT INTO conversations (conv) VALUES (?) ON CONFLICT(conv) DO NOTHING").run(conv);
+    const was = this.conversationRow(conv);
+    this.db.prepare(`UPDATE conversations SET auto_count = 0, level = 0, cooling_until = NULL, paused = 0,
+         last_cooldown_end = CASE WHEN cooling_until IS NOT NULL THEN ? ELSE last_cooldown_end END WHERE conv = ?`).run(now, conv);
+    this.db.prepare("DELETE FROM cooldown_notices WHERE conv = ?").run(conv);
+    return was.coolingUntil !== null;
   }
   recordCooldownNotices(conv, until) {
     let targets;

@@ -340,20 +340,21 @@ export class HubStore {
    * Single transaction: bump seq, insert message, join sender to a room,
    * update the conversation counts (§8.5), prune retention (§8.4).
    */
-  insertMessage (m: Omit<StoredMessage, 'id' | 'seq' | 'ts' | 'human' | 'reply_author' | 'reply_ts'> & { human: boolean }): StoredMessage & { conversationKey: string; enteredCooldown: boolean; operatorReset: boolean; expiredInline: boolean } {
+  insertMessage (m: Omit<StoredMessage, 'id' | 'seq' | 'ts' | 'human' | 'reply_author' | 'reply_ts'> & { human: boolean }): StoredMessage & { conversationKey: string; enteredCooldown: boolean; operatorReset: boolean; expiredInline: boolean; resetConvs: string[] } {
     const now = Date.now()
     const conversationKey = m.scope === 'dm' ? dmPairKey(m.from, m.to[0]) : roomKey(m.room!)
     const toJson = JSON.stringify(m.to)
-    const built: StoredMessage & { conversationKey: string; enteredCooldown: boolean; operatorReset: boolean; expiredInline: boolean } = this.db.transaction(() => {
+    const built: StoredMessage & { conversationKey: string; enteredCooldown: boolean; operatorReset: boolean; expiredInline: boolean; resetConvs: string[] } = this.db.transaction(() => {
       const id = ulid(now)
       const seq = (this.db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM messages').get() as any).next as number
       // Resolve reply reference for the (re author HH:MM) label.
       let reply_author: string | undefined = undefined
       let reply_ts: number | undefined = undefined
+      let referenced: StoredMessage | undefined
       if (m.reply_to !== undefined) {
-        const r = this.getMessage(m.reply_to)
-        reply_author = r?.from
-        reply_ts = r?.ts
+        referenced = this.getMessage(m.reply_to)
+        reply_author = referenced?.from
+        reply_ts = referenced?.ts
       }
       this.db.prepare(
         `INSERT INTO messages (id, seq, ts, scope, room, to_json, fromp, text, reply_to, human, reply_author, reply_ts)
@@ -363,9 +364,16 @@ export class HubStore {
       // A4: decay is evaluated on PRIOR state here, before this message is
       // enqueued (the caller enqueues after insertMessage, in the same txn).
       const bump = this.bumpConversation(conversationKey, m.from, m.human, now)
+      const resetConvs: string[] = bump.operatorReset ? [conversationKey] : []
+      // §8.5 (retained by A4): an operator DM reply also resets exactly its
+      // REFERENCED direct conversation; never unrelated pairs, never via a peer.
+      if (m.from === 'operator' && m.scope === 'dm' && referenced !== undefined && referenced.scope === 'dm') {
+        const refConv = dmPairKey(referenced.from, referenced.to[0])
+        if (refConv !== conversationKey && this.operatorResetConversation(refConv, now)) resetConvs.push(refConv)
+      }
       const msg: StoredMessage = { id, seq, ts: now, scope: m.scope, room: m.room, to: m.to, from: m.from, text: m.text, reply_to: m.reply_to, human: m.human, reply_author, reply_ts }
       this.pruneRetention(msg)
-      return { ...msg, conversationKey, ...bump }
+      return { ...msg, conversationKey, ...bump, resetConvs }
     })()
     return built
   }
@@ -378,13 +386,7 @@ export class HubStore {
   private bumpConversation (conv: string, from: string, human: boolean, now: number): { enteredCooldown: boolean; operatorReset: boolean; expiredInline: boolean } {
     this.db.prepare('INSERT INTO conversations (conv) VALUES (?) ON CONFLICT(conv) DO NOTHING').run(conv)
     if (from === 'operator') {
-      const was = this.conversationRow(conv)!
-      this.db.prepare(
-        `UPDATE conversations SET auto_count = 0, level = 0, cooling_until = NULL, paused = 0,
-           last_cooldown_end = CASE WHEN cooling_until IS NOT NULL THEN ? ELSE last_cooldown_end END WHERE conv = ?`,
-      ).run(now, conv)
-      this.db.prepare('DELETE FROM cooldown_notices WHERE conv = ?').run(conv)
-      return { enteredCooldown: false, operatorReset: was.coolingUntil !== null, expiredInline: false }
+      return { enteredCooldown: false, operatorReset: this.operatorResetConversation(conv, now), expiredInline: false }
     }
     if (human) return { enteredCooldown: false, operatorReset: false, expiredInline: false } // self-reported: neither counts nor resets
     // A cooldown whose deadline passed but whose timer has not run yet expires
@@ -408,6 +410,18 @@ export class HubStore {
       return { enteredCooldown: true, operatorReset: false, expiredInline }
     }
     return { enteredCooldown: false, operatorReset: false, expiredInline }
+  }
+
+  /** Operator override (A4): end any cooldown, reset count/level. Returns whether it was cooling. */
+  private operatorResetConversation (conv: string, now: number): boolean {
+    this.db.prepare('INSERT INTO conversations (conv) VALUES (?) ON CONFLICT(conv) DO NOTHING').run(conv)
+    const was = this.conversationRow(conv)!
+    this.db.prepare(
+      `UPDATE conversations SET auto_count = 0, level = 0, cooling_until = NULL, paused = 0,
+         last_cooldown_end = CASE WHEN cooling_until IS NOT NULL THEN ? ELSE last_cooldown_end END WHERE conv = ?`,
+    ).run(now, conv)
+    this.db.prepare('DELETE FROM cooldown_notices WHERE conv = ?').run(conv)
+    return was.coolingUntil !== null
   }
 
   /** One notice row per binding that receives this conversation (A4 per-binding notice). */

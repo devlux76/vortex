@@ -305,3 +305,26 @@ test('A4-10 inline expiry by a new message releases held rows on EVERY binding (
     await until(() => bob.texts().includes('s3'), 2000, "bob's held row released by the inline expiry")
   } finally { bob.close(); alice.close(); await env.stop() }
 })
+
+test('A4-11 operator DM reply resets exactly its REFERENCED direct conversation and releases its held rows', async () => {
+  const env = await setup({ cooldownBaseMs: 60_000, cooldownMaxMs: 60_000 })
+  const bob = await stream(env)
+  try {
+    let original = ''
+    for (let i = 0; i < 3; i++) original = (await (await dm(env, 'alice', 'bob', `a${i}`)).json() as { id: string }).id
+    for (let i = 0; i < 3; i++) await dm(env, 'carol', 'bob', `c${i}`)
+    assert.ok(row(env, conv('alice', 'bob')).coolingUntil! > Date.now())
+    assert.ok(row(env, conv('bob', 'carol')).coolingUntil! > Date.now())
+    // A peer's human_turn reply never resets (self-reported).
+    assert.equal((await post(env, 'bob', { scope: 'dm', to: ['alice'], reply_to: original, text: 'peer', human_turn: true })).status, 200)
+    assert.ok(row(env, conv('alice', 'bob')).coolingUntil! > Date.now(), 'peer human_turn does not reset')
+    const held = bob.texts()
+    assert.equal((await post(env, 'operator', { scope: 'dm', to: ['alice'], reply_to: original, text: 'resume this exchange' })).status, 200)
+    const target = row(env, conv('alice', 'bob'))
+    assert.equal(target.coolingUntil, null, 'referenced DM conversation reset')
+    assert.equal(target.level, 0); assert.equal(target.count, 0)
+    assert.ok(row(env, conv('bob', 'carol')).coolingUntil! > Date.now(), 'unrelated pair still cooling')
+    await until(() => bob.texts().length > held.length && bob.texts().some(t => t.startsWith('a')), 2000, "bob's held alice rows released")
+    assert.ok(!bob.texts().includes('c2'), 'carol rows still held')
+  } finally { bob.close(); await env.stop() }
+})

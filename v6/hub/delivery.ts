@@ -127,14 +127,14 @@ export class Delivery {
   }
 
   /** After a send commits: arm the expiry timer for a new cooldown; release at once on operator reset. */
-  afterCommit (info: { conversationKey: string; enteredCooldown: boolean; operatorReset: boolean; expiredInline?: boolean }): void {
+  afterCommit (info: { conversationKey: string; enteredCooldown: boolean; operatorReset: boolean; expiredInline?: boolean; resetConvs?: string[] }): void {
     if (info.enteredCooldown) this.armCoolingTimer()
-    // Operator reset, or an expiry performed inline by this message before the
-    // timer ran: release the conversation's held rows on every binding.
-    if (info.operatorReset || info.expiredInline === true) {
-      for (const b of this.store.bindingsHoldingWake(info.conversationKey)) this.scheduleCoalesce(b.principal, b.name)
-      this.armCoolingTimer()
-    }
+    // Operator resets (own and referenced DM conversation), or an expiry done
+    // inline by this message before the timer ran: release held rows on every binding.
+    const release = new Set<string>(info.resetConvs ?? (info.operatorReset ? [info.conversationKey] : []))
+    if (info.expiredInline === true) release.add(info.conversationKey)
+    for (const c of release) for (const b of this.store.bindingsHoldingWake(c)) this.scheduleCoalesce(b.principal, b.name)
+    if (release.size > 0) this.armCoolingTimer()
   }
 
   private armCoolingTimer (): void {

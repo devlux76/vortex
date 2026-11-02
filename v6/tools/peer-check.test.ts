@@ -96,3 +96,21 @@ test('device-hub: same --dir on a new port refreshes the endpoint, keeps princip
     assert.equal(second.cred.principal, 'dev-a')
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
+
+test('stale replay: a previous run\'s PING/DONE queued for the responder is ignored (seq boundary)', async () => {
+  const e = await env()
+  try {
+    const a = new VortexClient(e.a)
+    const b = new VortexClient(e.b)
+    await b.bind('peercheck', ['all']) // bound but not streaming: old mail stays pending, as after a crashed run
+    await a.send({ scope: 'room', room: 'all', to: ['dev-b'], text: 'vx-peer-check PING oldrun-23 host=old' })
+    await a.send({ scope: 'dm', to: ['dev-b'], text: 'vx-peer-check DONE oldrun host=old' })
+    const responder = main(['--credential', e.bFile, '--role', 'respond', '--peer', 'dev-a', '--timeout-ms', '15000', '--out', join(e.root, 'b.ev')])
+    await new Promise(r => setTimeout(r, 500))
+    assert.equal(await initiate(e, join(e.root, 'a.ev')), 0, 'the current run completes despite replayed stale mail')
+    assert.equal(await responder, 0)
+    const ev = JSON.parse(readFileSync(join(e.root, 'b.ev'), 'utf8'))
+    assert.ok(ev.staleIgnored >= 2, `stale messages ignored (${ev.staleIgnored})`)
+    assert.ok(ev.rounds.every((r: any) => !String(r.nonce).startsWith('oldrun')), 'never answered the old PING')
+  } finally { await e.stop() }
+})

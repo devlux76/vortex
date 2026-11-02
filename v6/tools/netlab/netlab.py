@@ -347,8 +347,11 @@ def cmd_deploy_vortex(a) -> None:
     for n in ['hub', 'peer-a', 'peer-b']:
         scp_to(n, str(tar), '/tmp/vx.tgz')
         ssh(n, 'rm -rf ~/vx && tar -C ~ -xzf /tmp/vx.tgz && ~/vx/bun --version')
-    ssh('hub', 'pkill -f device-hub.ts || true; rm -rf ~/hubdir', check=False)
-    ssh('hub', 'cd ~/vx && setsid -f ./bun v6/tools/device-hub.ts --dir ~/hubdir --tls 10.10.9.10:7844' + (f' --loop-limit {a.loop_limit}' if a.loop_limit else '') + (f' --wake-hourly-limit {a.wake_hourly_limit}' if a.wake_hourly_limit else '') + ' > ~/hub.log 2>&1 < /dev/null & '
+    # Stop the previous hub by PID (a pattern kill would match this SSH shell itself),
+    # then wipe and verify its state, so every deploy is a genuinely fresh hub.
+    ssh('hub', '[ -f ~/hub.pid ] && kill $(cat ~/hub.pid) 2>/dev/null; sleep 1; rm -f ~/hub.pid', check=False)
+    ssh('hub', 'rm -rf ~/hubdir && [ ! -e ~/hubdir ] && ! ss -ltn | grep -q ":7844 "')
+    ssh('hub', 'cd ~/vx && setsid -f sh -c \'echo $$ > ~/hub.pid; exec ./bun v6/tools/device-hub.ts --dir ~/hubdir --tls 10.10.9.10:7844' + (f' --loop-limit {a.loop_limit}' if a.loop_limit else '') + (f' --wake-hourly-limit {a.wake_hourly_limit}' if a.wake_hourly_limit else '') + ' > ~/hub.log 2>&1 < /dev/null\'; '
                'for i in $(seq 50); do [ -s ~/hubdir/dev-b.json ] && break; sleep 0.2; done; cat ~/hub.log')
     for who, node in [('dev-a', 'peer-a'), ('dev-b', 'peer-b')]:
         scp_from('hub', f'hubdir/{who}.json', str(RUN / f'{who}.json'))

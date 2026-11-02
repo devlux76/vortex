@@ -5,12 +5,14 @@
 
 export const PINNED_REVISION = '88e0591d104706814c7c47d66a8a01de24bd46a8'
 
+export type JsonValue = string | number | boolean | null | JsonValue[] | { readonly [k: string]: JsonValue }
+
 export interface SyntheticInput {
   sessionID: string
   id?: string
   text: string
   description?: string
-  metadata?: Record<string, unknown>
+  metadata?: { readonly [k: string]: JsonValue }
   delivery?: 'steer' | 'queue'
   resume?: boolean
 }
@@ -20,9 +22,16 @@ export interface Registration { dispose: () => Promise<void> }
 export interface ToolInfoLike {
   name: string
   description: string
-  input: unknown
+  input: { readonly [k: string]: JsonValue }
   options?: { codemode: boolean }
   execute: (input: unknown, context: { sessionID: string; signal?: AbortSignal }) => Promise<{ content?: string; output?: unknown }>
+}
+
+/** The session hooks this plugin uses, as the subset of the fork's SessionHooks it reads/writes. */
+export interface HookEvents {
+  context: { readonly sessionID: string; system: Array<{ type: 'text'; text: string } | { type: string; text?: string }> }
+  prompt: { readonly sessionID: string }
+  'experimental.idle': { readonly sessionID: string }
 }
 
 export interface CommandInvocation { sessionID: string; prompt: { text: string }; delivery: 'steer' | 'queue' }
@@ -34,7 +43,7 @@ export interface PluginCtx {
   session: {
     synthetic: (input: SyntheticInput) => Promise<{ id: string }>
     wait: (input: { sessionID: string }) => Promise<void>
-    hook: (name: string, callback: (event: any) => Promise<void> | void) => Promise<Registration>
+    hook: <K extends keyof HookEvents>(name: K, callback: (event: HookEvents[K]) => Promise<void> | void) => Promise<Registration>
   }
   tool: { transform: (callback: (editor: { add: (tool: ToolInfoLike) => void }) => void) => Promise<Registration> }
   command: {

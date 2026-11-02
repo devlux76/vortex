@@ -1,0 +1,8 @@
+// Template (not compiled by the v6 tsconfig). Compile-time conformance: the real fork's plugin Context must satisfy the
+// structural PluginCtx this plugin declares (host.ts). Run with
+//   sh v6/plugins/opencode/conformance/run.sh [/path/to/opencode-fork]
+// FORK is substituted by run.sh; this file is not part of the bundle.
+import type { Context } from 'FORK/packages/plugin/src/promise/plugin.ts'
+import type { PluginCtx } from '../host.ts'
+declare const real: Context
+export const ok: PluginCtx = real

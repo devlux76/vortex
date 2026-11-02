@@ -1,6 +1,6 @@
-# Amendment A4 (DRAFT for cross-review): hub pacing with automatic cooldown
+# Amendment A4: hub pacing with automatic cooldown
 
-Status: design draft r2 (Codex review of 2bbbd92 applied). Claude, 2026-11-02, bug:e79eb06. Not normative until Claude and Codex agree; no code yet.
+Status: design APPROVED for implementation (Codex review of 8deb91d, with its two normative corrections recorded below). Claude, 2026-11-02, bug:e79eb06. The implementation pin needs independent review.
 Numbering: this takes A4. The optional TUI-on-daemon Codex surface amendment, if it is adopted, takes the next free number when it is written. Neither reserves a number for the other.
 Supersedes, on adoption: §8.5 bullet 2 (pause until operator), and the "Over budget: the batch waits" sentence in §8.4 (made precise and persistent below). All other §8.4/§8.5 rules stand.
 
@@ -16,11 +16,10 @@ A timer cannot fix the current design. Once addressed mail is converted to passi
 
 ### 1. Loop breaker becomes a cooldown (replaces "pause until operator")
 - **Counting is unchanged.** Per conversation, count `human=false` messages since the last reset. A room is one conversation; a DM is the unordered authenticated pair. A plugin-reported `human_turn` neither increments nor resets the count, because it is self-reported by a peer.
-- **Entering cooldown.** When the count reaches T:
-  1. apply decay (below);
-  2. `level := level + 1`;
-  3. set `cooling_until = now + C(level)`.
-  First entry from level 0 therefore gives C(1) = C_base.
+- **Order of operations for an arriving automatic (`human=false`) message:**
+  1. **Decay check on PRIOR state.** Before updating `count`/`last_auto_ts` or enqueueing the message, evaluate genuine quiet (below) using the conversation's prior state and its existing held/pending/outstanding wake rows. If it has been genuinely quiet for at least D, set `level := 0`.
+  2. Accept, store and count the message (`count += 1`, `last_auto_ts = now`), and enqueue it.
+  3. If `count` reaches T: `level := level + 1`, `cooling_until = now + C(level)`. First entry from level 0 gives C(1) = C_base.
 - **During cooldown:**
   - Messages are stored as usual.
   - An addressed message (one that would be wake-eligible under §8.4) is enqueued as a WAKE pending row, exactly as if no cooldown existed. It is HELD: wake batch selection skips rows whose conversation is cooling.
@@ -31,7 +30,7 @@ A timer cannot fix the current design. Once addressed mail is converted to passi
 - **Decay counts genuine quiet only.** `quiet_since = max(last_auto_ts, last_cooldown_end, last_drain_ts)`:
   - `last_cooldown_end` is the moment the conversation's latest cooldown expired;
   - `last_drain_ts` is the moment the conversation's last outstanding or held wake row, on every binding, was acknowledged.
-  While any wake row of the conversation is held, pending or in an outstanding batch, the conversation is not quiet. At step 1 above, the level resets to 0 only if `now − quiet_since ≥ D` and the conversation is quiet now. Forced cooldown silence and undelivered work therefore never count as recovery. A capped runaway loop that sends nothing during its cap is still capped at its next threshold. Evaluation is lazy (at the next cooldown entry); no extra timer.
+  While any wake row of the conversation is held, pending or in an outstanding batch, the conversation is not quiet, and a conversation that is cooling now is not quiet either. At step 1 above, the level resets to 0 only if the prior state is quiet and `now − quiet_since ≥ D`. Forced cooldown silence and undelivered work therefore never count as recovery. A capped runaway loop that sends nothing during its cap is still capped at its next threshold. No quiet timer or extra flag is needed.
 - **Operator override.** An `operator` message in the conversation ends any cooldown at once, resets count and level to 0, and sets `last_cooldown_end = now`. The existing rule stands: a human DM reply resets only its referenced direct conversation. Peers have no reset path: not via `human_turn`, not via any API.
 - **Notice (per binding, narrowed promise).** On cooldown entry, the hub records one notice row per binding that receives this conversation (`cooldown_notices(conv, binding_principal, binding_name, cooling_until)`). The first later batch to that binding containing that conversation's mail carries the line once and deletes the row: `[vx: conversation cooled down after 12 automatic messages until HH:MM]`. HH:MM is hub-local `cooling_until`. It counts toward the rendered bounds.
   - Visibility is not promised during the cooldown: that batch may only be the release batch.
@@ -40,7 +39,7 @@ A timer cannot fix the current design. Once addressed mail is converted to passi
 
 ### 2. Wake selection and fairness
 - A batch stays single-conversation (current behaviour).
-- Selection takes the oldest selectable wake row, skipping held conversations. A cooling conversation therefore never blocks wake mail from other conversations on the same binding.
+- Held (cooling) conversations are skipped, so a cooling conversation never blocks wake mail from other conversations on the same binding. LRS (below) chooses the conversation; FIFO chooses the rows inside it.
 - **Explicit fairness across eligible conversations, per binding: least-recently-served (LRS).**
   - Among conversations with at least one selectable wake row, pick the one whose last wake push to this binding is oldest. A never-served conversation counts as oldest; ties go to the oldest head row.
   - Within the chosen conversation, take its rows in order (FIFO), up to the batch bounds (20 messages / 6,000 code points / 8 KiB).
@@ -73,14 +72,11 @@ A timer cannot fix the current design. Once addressed mail is converted to passi
 |---|---|---|
 | T `loopBreakerLimit` | 12 | Unchanged. Long enough for a real multi-step exchange. |
 | C_base `cooldownBaseMs` | 10 min | Long enough to stop a tight loop. Short enough that collaboration resumes within a coffee break. |
-| C_max `cooldownMaxMs` | 2 h | Caps the backoff. Worst case for a runaway two-agent loop: about 12 messages per 2 h per conversation. |
+| C_max `cooldownMaxMs` | 2 h | Caps the backoff, so a runaway conversation earns at most one release per 2 h at the cap. |
 | D `cooldownDecayMs` | 2 h | A quiet conversation returns to the base cooldown after one cap-length of silence. |
 | coalesce / interval / hourly | 2 s / 10 s / 60 | Unchanged §8.4 numbers. |
 
-**Enforced bounds, not cost estimates.**
-- Automatic messages per conversation: at most T per cooldown cycle. Cycles can start at 0, 10, 30, 70, 150 min…, then every 2 h at the cap. So within any first 60 minutes, at most 3 cycles, i.e. ≤ 36 automatic messages. At a sustained cap: ≤ T per (C_max + time to reach T) per conversation.
-- Wakes per binding are bounded separately: ≤ 1 per 10 s and ≤ `wakeHourlyLimit` per rolling hour.
-- Messages are not wakes: one wake batch can carry up to 20 held messages, so model turns ≤ wake permits, not ≤ messages.
+**The only claimed bound is the wake-permit limit.** Per binding: ≤ 1 wake push per 10 s and ≤ `wakeHourlyLimit` per rolling hour. Messages are still accepted and stored during cooldown, so automatic message throughput is NOT bounded by this amendment (only by the §8.5 send rate). It is counted for diagnostics only. One wake batch can carry up to 20 held messages, so wake-started model turns are bounded by wake permits, not by message counts.
 
 ## Tests required (bun test, loopback only)
 1. **No-traffic expiry:** reach T; send nothing more; at cooldown expiry the held addressed mail is pushed as ONE wake batch with no new message or human turn. Held rows are never offered to a passive pull before expiry.
@@ -89,7 +85,7 @@ A timer cannot fix the current design. Once addressed mail is converted to passi
    - First entry is C_base, not half of it.
    - Successive cooldowns double up to C_max.
    - Forced silence does not decay: reach the cap, send nothing during the capped cooldown, reach T again, and the next cooldown is still C_max.
-   - Genuine idle decay: after release and drain, D of quiet makes the next entry C_base.
+   - Genuine idle decay: release and drain, wait D, then a fresh T-message exchange enters cooldown at C_base. The decay check runs on the first new message, from prior state.
    - Held or outstanding wake rows block decay.
 4. **Operator override:** an operator message ends the cooldown at once and resets count/level. A peer `human_turn: true` does not reset or shorten it. Other conversations are unaffected.
 5. **Fairness:**
@@ -115,7 +111,7 @@ A timer cannot fix the current design. Once addressed mail is converted to passi
   - admitted-unique = sent;
   - no duplicate admissions;
   - every cooldown releases without traffic;
-  - wake turns ≤ the budget formula above;
+  - wake turns ≤ the wake-permit limit;
   - 0 pending at the end.
 
 ## Out of scope

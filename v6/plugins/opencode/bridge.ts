@@ -63,7 +63,6 @@ export class OpenCodeBridge extends BridgeBase {
   private passiveChain: Promise<void> = Promise.resolve()
   private inflight = new Set<string>()
   private pullTimer?: ReturnType<typeof setInterval>
-  private startRetry?: ReturnType<typeof setTimeout>
   private readonly oopts: OpenCodeBridgeOptions
 
   constructor (opts: OpenCodeBridgeOptions) {
@@ -71,25 +70,15 @@ export class OpenCodeBridge extends BridgeBase {
     this.oopts = opts
   }
 
-  /** Connects in the background with bounded backoff; never throws into plugin setup. */
+  /** Connects in the background (BridgeBase retries with bounded backoff); never throws into plugin setup. */
   begin (): void {
-    let delay = 500
-    const attempt = async (): Promise<void> => {
-      if (this.closed) return
-      try {
-        await this.start()
-      } catch (e) {
-        this.lastFailure = `hub connect failed: ${(e as Error).message}`
-        delay = Math.min(delay * 2, 30_000)
-        this.startRetry = setTimeout(() => { void attempt() }, delay)
-        return
-      }
-      if (this.closed) { this.stop(); return }
-      const every = this.oopts.passivePullMs ?? 30_000
-      this.pullTimer = setInterval(() => this.pullPassive(), every)
-    }
-    void attempt()
+    if (this.closed) return
+    void this.start()
+    const every = this.oopts.passivePullMs ?? 30_000
+    this.pullTimer = setInterval(() => this.pullPassive(), every)
   }
+
+  protected override hubFailed (reason: string): void { this.lastFailure = `hub connect failed: ${reason}` }
 
   protected override streamOpened (): void { this.pullPassive() }
 
@@ -176,7 +165,6 @@ export class OpenCodeBridge extends BridgeBase {
   /** Awaited cleanup: no timers, no reconnect, hub stream closed before this resolves. */
   async shutdown (): Promise<void> {
     if (this.pullTimer !== undefined) clearInterval(this.pullTimer)
-    if (this.startRetry !== undefined) clearTimeout(this.startRetry)
     const ws = this.ws
     const closed = ws === undefined || ws.readyState === 3
       ? Promise.resolve()

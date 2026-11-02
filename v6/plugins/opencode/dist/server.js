@@ -65,8 +65,10 @@ ${b64}
 class VortexClient {
   cfg;
   tlsOptions;
-  constructor(cfg) {
+  timeoutMs;
+  constructor(cfg, opts = {}) {
     this.cfg = cfg;
+    this.timeoutMs = opts.timeoutMs ?? 15000;
   }
   async pin() {
     if (this.cfg.fingerprint === undefined || this.tlsOptions !== undefined)
@@ -86,7 +88,8 @@ class VortexClient {
         "content-type": "application/json"
       },
       ...body === undefined ? {} : { body: JSON.stringify(body) },
-      ...tls === undefined ? {} : { tls }
+      ...tls === undefined ? {} : { tls },
+      signal: AbortSignal.timeout(this.timeoutMs)
     });
   }
   async send(msg) {
@@ -431,13 +434,42 @@ class BridgeBase {
     } catch {}
   }
   async start() {
-    await this.client.bind(this.opts.binding, this.opts.rooms ?? ["all"]).catch(() => {});
-    await this.client.pin();
-    this.connectStream();
     if (this.hookSocket)
       await this.listen();
+    this.establish();
   }
   streamOpened() {}
+  hubFailed(_reason) {}
+  async establish() {
+    if (this.closed || this.busy)
+      return;
+    try {
+      await this.client.pin();
+      await this.client.bind(this.opts.binding, this.opts.rooms ?? ["all"]);
+    } catch (e) {
+      this.hubFailed(e.message);
+      if (e.status === undefined) {
+        this.retry();
+        return;
+      }
+    }
+    if (this.closed || this.busy)
+      return;
+    try {
+      this.connectStream();
+    } catch (e) {
+      this.hubFailed(e.message);
+      this.retry();
+    }
+  }
+  retry() {
+    if (this.closed || this.busy)
+      return;
+    this.reconnectTimer = setTimeout(() => {
+      this.establish();
+    }, this.backoff);
+    this.backoff = Math.min(this.backoff * 2, 30000);
+  }
   connectStream() {
     if (this.closed || this.busy)
       return;
@@ -457,10 +489,7 @@ class BridgeBase {
           this.busy = true;
           return;
         }
-        if (this.closed)
-          return;
-        this.reconnectTimer = setTimeout(() => this.connectStream(), this.backoff);
-        this.backoff = Math.min(this.backoff * 2, 30000);
+        this.retry();
       }
     });
     this.ws = ws;
@@ -727,35 +756,20 @@ class OpenCodeBridge extends BridgeBase {
   passiveChain = Promise.resolve();
   inflight = new Set;
   pullTimer;
-  startRetry;
   oopts;
   constructor(opts) {
     super(opts, "opencode");
     this.oopts = opts;
   }
   begin() {
-    let delay = 500;
-    const attempt = async () => {
-      if (this.closed)
-        return;
-      try {
-        await this.start();
-      } catch (e) {
-        this.lastFailure = `hub connect failed: ${e.message}`;
-        delay = Math.min(delay * 2, 30000);
-        this.startRetry = setTimeout(() => {
-          attempt();
-        }, delay);
-        return;
-      }
-      if (this.closed) {
-        this.stop();
-        return;
-      }
-      const every = this.oopts.passivePullMs ?? 30000;
-      this.pullTimer = setInterval(() => this.pullPassive(), every);
-    };
-    attempt();
+    if (this.closed)
+      return;
+    this.start();
+    const every = this.oopts.passivePullMs ?? 30000;
+    this.pullTimer = setInterval(() => this.pullPassive(), every);
+  }
+  hubFailed(reason) {
+    this.lastFailure = `hub connect failed: ${reason}`;
   }
   streamOpened() {
     this.pullPassive();
@@ -851,8 +865,6 @@ class OpenCodeBridge extends BridgeBase {
   async shutdown() {
     if (this.pullTimer !== undefined)
       clearInterval(this.pullTimer);
-    if (this.startRetry !== undefined)
-      clearTimeout(this.startRetry);
     const ws = this.ws;
     const closed = ws === undefined || ws.readyState === 3 ? Promise.resolve() : new Promise((resolve) => {
       const t = setTimeout(resolve, 2000);

@@ -81,15 +81,48 @@ export abstract class BridgeBase {
 
   // ---- hub stream ------------------------------------------------------------
 
+  /**
+   * Local setup only; the hub connection runs in the background (F13). A hub
+   * that is down, late, unpinnable or silent never blocks or kills the host's
+   * stdio loop: `vx_send`/`vx_read` stay up and report the hub error per call.
+   */
   async start (): Promise<void> {
-    await this.client.bind(this.opts.binding, this.opts.rooms ?? ['all']).catch(() => {})
-    await this.client.pin()
-    this.connectStream()
     if (this.hookSocket) await this.listen()
+    void this.establish()
   }
 
   /** A hub stream just opened (hosts may pull passive mail here). */
   protected streamOpened (): void {}
+
+  /** A hub connection attempt failed (pin, bind or transport); the bridge retries with backoff. */
+  protected hubFailed (_reason: string): void {}
+
+  /**
+   * Pin, bind, then open the stream. Binding again on every attempt is an
+   * idempotent upsert of this plugin's own rooms (nothing else writes them), so
+   * a hub that started late, restarted or lost its state still learns the
+   * binding instead of answering the stream 404 forever.
+   */
+  private async establish (): Promise<void> {
+    if (this.closed || this.busy) return
+    try {
+      await this.client.pin()
+      await this.client.bind(this.opts.binding, this.opts.rooms ?? ['all'])
+    } catch (e) {
+      this.hubFailed((e as Error).message)
+      // No HTTP answer (refused, reset, timeout, TLS probe/pin): try again later. An
+      // answered refusal (400/401) is also what the stream gets; it closes and retries.
+      if ((e as { status?: unknown }).status === undefined) { this.retry(); return }
+    }
+    if (this.closed || this.busy) return
+    try { this.connectStream() } catch (e) { this.hubFailed((e as Error).message); this.retry() }
+  }
+
+  private retry (): void {
+    if (this.closed || this.busy) return
+    this.reconnectTimer = setTimeout(() => { void this.establish() }, this.backoff)
+    this.backoff = Math.min(this.backoff * 2, 30_000)
+  }
 
   private connectStream (): void {
     if (this.closed || this.busy) return
@@ -100,9 +133,7 @@ export abstract class BridgeBase {
       onClose: ({ code }) => {
         if (this.ws === ws) this.ws = undefined
         if (code === 4409) { this.busy = true; return } // never steal: wait for the operator's release
-        if (this.closed) return
-        this.reconnectTimer = setTimeout(() => this.connectStream(), this.backoff)
-        this.backoff = Math.min(this.backoff * 2, 30_000)
+        this.retry()
       },
     })
     this.ws = ws

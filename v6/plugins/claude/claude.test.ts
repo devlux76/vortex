@@ -452,3 +452,70 @@ test('A5 vx_read: room and own-DM history with cursor footer; non-consuming; wor
     assert.equal(bad.isError, true, 'unknown/identity arguments rejected')
   } finally { await env.teardown() }
 })
+
+// ---- F13: the hub connection never blocks or kills the plugin --------------
+
+function freePort (): number {
+  const l = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data () {} } })
+  const port = l.port
+  l.stop(true)
+  return port
+}
+
+test('F13: hub down when the plugin starts: MCP answers at once, then a new binding binds and streams when the hub comes up', { timeout: 40000 }, async () => {
+  const env = await setup()
+  const stateDir = env.newDir()
+  const configDir = env.newDir()
+  const cfg = { sendPerMinute: 1000, wakeCoalesceMs: 10, wakeMinIntervalMs: 20, wakeHourlyLimit: 100 }
+  let late: Awaited<ReturnType<typeof startHub>> | undefined
+  try {
+    const port = freePort()
+    const first = await startHub({ stateDir, configDir, cfg: { ...cfg, listen: `127.0.0.1:${port}` } })
+    const token = first.store.createPrincipal('claude').token
+    await first.stop()
+    const credFile = `${env.newDir()}/claude-late.json`
+    writeFileSync(credFile, JSON.stringify({ hub: `ws://127.0.0.1:${port}`, token, rooms: ['all'] }))
+    const s = new McpServer({ ...env, claudeCredFile: credFile }, { binding: 'late' })
+    const t0 = Date.now()
+    const init = await s.handshake()
+    assert.equal(init.serverInfo.name, 'vortex')
+    assert.ok(Date.now() - t0 < 3000, 'initialize is not held behind the hub connection')
+    const down = await s.call({ text: 'while the hub is down' })
+    assert.equal(down.isError, true, 'a send with the hub down is a tool error, not a dead server')
+    await sleep(1200) // several failed attempts, so recovery comes from a retry, not the first try
+    late = await startHub({ stateDir, configDir, cfg: { ...cfg, listen: `127.0.0.1:${port}` } })
+    await until(() => late!.delivery.openStreams().some(o => o.principal === 'claude' && o.name === 'late'), 15000, 'late binding stream open')
+    assert.ok(late.store.getBinding('claude', 'late'), 'the binding was created by a retried bind')
+    const up = await s.call({ text: 'after the hub came up' })
+    assert.ok(!up.isError, up.content?.[0]?.text)
+  } finally {
+    await late?.stop()
+    await env.teardown()
+  }
+})
+
+test('F13: an unreachable pinned (wss) hub does not kill the MCP server', { timeout: 40000 }, async () => {
+  const env = await setup()
+  try {
+    const credFile = `${env.newDir()}/claude-pinned.json`
+    writeFileSync(credFile, JSON.stringify({ hub: `wss://127.0.0.1:${freePort()}`, token: 'x'.repeat(32), fingerprint: 'ab'.repeat(32), rooms: ['all'] }))
+    const s = new McpServer({ ...env, claudeCredFile: credFile }, { binding: 'pinned' })
+    const init = await s.handshake()
+    assert.equal(init.serverInfo.name, 'vortex')
+    await sleep(800) // the background pin attempt has failed by now
+    const list = (await s.request('tools/list')).result.tools
+    assert.deepEqual(list.map((t: any) => t.name), ['vx_send', 'vx_read'])
+    const r = await s.call({ text: 'pinned hub unreachable' })
+    assert.equal(r.isError, true)
+  } finally { await env.teardown() }
+})
+
+test('F13: an HTTP call to a hub that accepts but never answers times out', { timeout: 20000 }, async () => {
+  const hole = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data () {} } })
+  try {
+    const client = new VortexClient({ hub: `ws://127.0.0.1:${hole.port}`, token: 'x' }, { timeoutMs: 300 })
+    const t0 = Date.now()
+    await assert.rejects(client.send({ scope: 'room', room: 'all', text: 'into the void' }))
+    assert.ok(Date.now() - t0 < 5000, `took ${Date.now() - t0} ms`)
+  } finally { hole.stop(true) }
+})

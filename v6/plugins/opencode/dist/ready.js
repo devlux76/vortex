@@ -64,8 +64,10 @@ ${b64}
 class VortexClient {
   cfg;
   tlsOptions;
-  constructor(cfg) {
+  timeoutMs;
+  constructor(cfg, opts = {}) {
     this.cfg = cfg;
+    this.timeoutMs = opts.timeoutMs ?? 15000;
   }
   async pin() {
     if (this.cfg.fingerprint === undefined || this.tlsOptions !== undefined)
@@ -85,7 +87,8 @@ class VortexClient {
         "content-type": "application/json"
       },
       ...body === undefined ? {} : { body: JSON.stringify(body) },
-      ...tls === undefined ? {} : { tls }
+      ...tls === undefined ? {} : { tls },
+      signal: AbortSignal.timeout(this.timeoutMs)
     });
   }
   async send(msg) {

@@ -90,7 +90,12 @@ async function pinnedTls (hub: string, fingerprint: string): Promise<Record<stri
 export class VortexClient {
   private cfg: Credential
   private tlsOptions?: Record<string, unknown>
-  constructor (cfg: Credential) { this.cfg = cfg }
+  private readonly timeoutMs: number
+  /** `timeoutMs` bounds each HTTP call, body included, so a silent hub cannot hang a tool call. */
+  constructor (cfg: Credential, opts: { timeoutMs?: number } = {}) {
+    this.cfg = cfg
+    this.timeoutMs = opts.timeoutMs ?? 15_000
+  }
 
   /**
    * Resolve and verify the pinned TLS options (no-op without a fingerprint).
@@ -117,6 +122,7 @@ export class VortexClient {
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       ...(tls === undefined ? {} : { tls }),
+      signal: AbortSignal.timeout(this.timeoutMs),
     })
   }
 

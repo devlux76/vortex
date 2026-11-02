@@ -68,5 +68,7 @@ Conclusion: the baseline every surface can rely on is **ordinary MCP tools that 
 5. Each host exposes vx_read with identical schema and behaviour (Claude MCP, Codex MCP, OpenCode tool.transform), via fake hosts. OpenCode is also checked by the real-fork conformance script.
 6. Live acceptance (later, separate): an actual desktop plugin tool call per host. A stdio test does not substitute for that (Codex).
 
+Codex packaging uses the portable root `plugin.json` and `mcp.json` schemas (stdio), so the host resolves `${PLUGIN_ROOT}` in the launch arguments. The legacy `.mcp.json` form on installed Codex 0.166.0-alpha.5.1 passes that placeholder literally and fails before initialization. Hooks remain in the OpenAI manifest extension.
+
 ## Out of scope
 Native event subscriptions; any claim of local idle wake; Slack/Teams installation or accounts; search (possible later: `vx_search`, if needed).

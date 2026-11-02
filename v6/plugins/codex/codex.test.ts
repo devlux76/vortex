@@ -182,14 +182,15 @@ async function ready (env: Env, opts: { bind?: boolean; threads?: string } = {})
 const streamGone = (env: Env) =>
   until(() => !env.hub.delivery.openStreams().some(o => o.principal === 'codex') || undefined, 5000, 'old stream gone')
 
-test('plugin files: manifest, MCP, hooks (limit 0, no Stop) and marketplace; server has no channel, fixed instructions, one tool', { timeout: 40000 }, async () => {
+test('plugin files: portable manifest, MCP, hooks (limit 0, no Stop) and marketplace; server has no channel, fixed instructions, send/read tools', { timeout: 40000 }, async () => {
   const dir = `${ROOT}/v6/plugins/codex`
-  const manifest = JSON.parse(readFileSync(`${dir}/.codex-plugin/plugin.json`, 'utf8'))
+  const manifest = JSON.parse(readFileSync(`${dir}/plugin.json`, 'utf8'))
   assert.equal(manifest.name, 'vortex')
-  assert.equal(manifest.mcpServers, './.mcp.json')
-  assert.equal(manifest.hooks, './hooks/hooks.json')
-  const mcp = JSON.parse(readFileSync(`${dir}/.mcp.json`, 'utf8'))
-  assert.deepEqual(mcp.mcpServers.vortex, { command: 'bun', args: ['${PLUGIN_ROOT}/dist/server.js'] })
+  assert.equal(manifest.$schema, 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json')
+  assert.equal(manifest.extensions['com.openai'].hooks, './hooks/hooks.json')
+  const mcp = JSON.parse(readFileSync(`${dir}/mcp.json`, 'utf8'))
+  assert.equal(mcp.$schema, 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json')
+  assert.deepEqual(mcp.mcpServers.vortex, { type: 'stdio', command: 'bun', args: ['${PLUGIN_ROOT}/dist/server.js'] })
   const hooks = JSON.parse(readFileSync(`${dir}/hooks/hooks.json`, 'utf8')).hooks
   assert.deepEqual(Object.keys(hooks).sort(), ['PostToolUse', 'UserPromptSubmit']) // no Stop hook
   for (const ev of Object.values<any>(hooks)) {

@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "vortex": {
-      "command": "bun",
-      "args": ["${PLUGIN_ROOT}/dist/server.js"]
-    }
-  }
-}

@@ -324,6 +324,7 @@ test('send is crash-atomic: failed recipient enqueue stores nothing', async () =
       if (p === 'carol') throw new Error('simulated crash during enqueue')
       return real(p, b, m, k)
     }
+    const head = store.db.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages').get().m as number
     const failed = await post(env, 'alice', { text: 'lost?', to: ['bob'] })
     assert.equal(failed.status, 500)
     assert.equal(env.hub.store.pendingStats('bob', 'o1').count, 0, 'bob row rolled back with the message')
@@ -332,7 +333,7 @@ test('send is crash-atomic: failed recipient enqueue stores nothing', async () =
     const ok = await post(env, 'alice', { text: 'kept', to: ['bob'] })
     assert.equal(ok.status, 200)
     const { seq } = await ok.json() as { seq: number }
-    assert.equal(store.db.prepare('SELECT MAX(seq) AS m FROM messages').get().m, seq, 'seq not consumed by the rolled-back send')
+    assert.equal(seq, head + 1, 'seq not consumed by the rolled-back send')
     assert.equal(env.hub.store.pendingStats('bob', 'o1').count, 1)
     assert.equal(env.hub.store.pendingStats('carol', 'c1').count, 1)
   } finally { await env.stop() }

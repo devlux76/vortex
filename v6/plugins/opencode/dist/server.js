@@ -628,22 +628,23 @@ class BridgeBase {
 
 // v6/plugins/opencode/bridge.ts
 function describeError(e) {
-  if (e instanceof Error && e.message.length > 0)
-    return e.message;
-  if (typeof e === "object" && e !== null) {
-    const o = e;
-    const tag = typeof o._tag === "string" ? o._tag : typeof o.name === "string" && o.name !== "Error" ? o.name : undefined;
-    const msg = typeof o.message === "string" && o.message.length > 0 ? o.message : undefined;
-    if (tag !== undefined || msg !== undefined)
-      return [tag, msg].filter(Boolean).join(": ");
-    try {
-      const j = JSON.stringify(e);
-      if (j !== undefined && j !== "{}")
-        return j;
-    } catch {}
-  }
-  const str = String(e);
-  return str.length > 0 ? str : "unknown error";
+  const MAX = 300;
+  const clip = (s) => s.length > MAX ? `${s.slice(0, MAX)}\u2026` : s;
+  if (typeof e === "string")
+    return e.length > 0 ? clip(e) : "unknown error";
+  if (typeof e !== "object" || e === null)
+    return e === undefined || e === null ? "unknown error" : clip(String(e));
+  const o = e;
+  const str = (v) => typeof v === "string" && v.length > 0 ? v : undefined;
+  const tag = str(o._tag) ?? (str(o.name) !== "Error" ? str(o.name) : undefined);
+  const msg = str(o.message);
+  const code = typeof o.code === "string" || typeof o.code === "number" ? String(o.code) : undefined;
+  const parts = [tag, msg].filter((x) => x !== undefined);
+  if (code !== undefined)
+    parts.push(`code ${code}`);
+  if (parts.length > 0)
+    return clip(parts.join(": "));
+  return o instanceof Error ? "Error" : "unknown error (non-standard host error)";
 }
 function batchMessageId(batch) {
   return `msg_vx_${batch}`;

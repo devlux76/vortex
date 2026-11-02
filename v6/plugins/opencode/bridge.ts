@@ -11,18 +11,25 @@ import type { SyntheticInput } from './host.ts'
 
 export { INSTRUCTIONS, type SendArgs } from '../../client/mcp.ts'
 
-/** Host errors (Effect-style) may carry an empty message; keep the tag/name so failures stay diagnosable. */
+/**
+ * Host errors (Effect-style) may carry an empty message. Keep only allowlisted
+ * fields (tag, name, message, scalar code) so failure reasons stay diagnosable
+ * without ever serializing nested host data (requests, headers, causes).
+ */
 export function describeError (e: unknown): string {
-  if (e instanceof Error && e.message.length > 0) return e.message
-  if (typeof e === 'object' && e !== null) {
-    const o = e as Record<string, unknown>
-    const tag = typeof o._tag === 'string' ? o._tag : (typeof o.name === 'string' && o.name !== 'Error' ? o.name : undefined)
-    const msg = typeof o.message === 'string' && o.message.length > 0 ? o.message : undefined
-    if (tag !== undefined || msg !== undefined) return [tag, msg].filter(Boolean).join(': ')
-    try { const j = JSON.stringify(e); if (j !== undefined && j !== '{}') return j } catch { /* cyclic */ }
-  }
-  const str = String(e)
-  return str.length > 0 ? str : 'unknown error'
+  const MAX = 300
+  const clip = (s: string): string => (s.length > MAX ? `${s.slice(0, MAX)}…` : s)
+  if (typeof e === 'string') return e.length > 0 ? clip(e) : 'unknown error'
+  if (typeof e !== 'object' || e === null) return e === undefined || e === null ? 'unknown error' : clip(String(e))
+  const o = e as Record<string, unknown>
+  const str = (v: unknown): string | undefined => (typeof v === 'string' && v.length > 0 ? v : undefined)
+  const tag = str(o._tag) ?? (str(o.name) !== 'Error' ? str(o.name) : undefined)
+  const msg = str(o.message)
+  const code = typeof o.code === 'string' || typeof o.code === 'number' ? String(o.code) : undefined
+  const parts = [tag, msg].filter((x): x is string => x !== undefined)
+  if (code !== undefined) parts.push(`code ${code}`)
+  if (parts.length > 0) return clip(parts.join(': '))
+  return o instanceof Error ? 'Error' : 'unknown error (non-standard host error)'
 }
 
 /** Stable host message id for a batch (§8.8): the inbox reconciles repeats of it. */

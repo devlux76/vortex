@@ -15,6 +15,7 @@
 // hub, stream not open); 5 OpenCode unreachable; 2 usage/credential error.
 import { readFileSync } from 'node:fs'
 import { loadCredential, type Credential } from '../../client/credential.ts'
+import { VortexClient } from '../../client/client.ts'
 
 export type ReadyState = 'ready' | 'never-bound' | 'offline' | 'opencode-unreachable'
 
@@ -43,8 +44,8 @@ interface Deps { fetch: Fetch; now: () => number; sleep: (ms: number) => Promise
 
 const defaultDeps: Deps = { fetch: (input, init) => fetch(input, init), now: () => Date.now(), sleep: ms => new Promise(r => setTimeout(r, ms)) }
 
-function hubHttp (hub: string): string {
-  return hub.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '')
+function hubLabel (hub: string): string {
+  return hub.replace(/\/+$/, '')
 }
 
 /** Boots the wake Location: any directory-scoped request does; /api/config is cheap and read-only. */
@@ -59,11 +60,13 @@ async function activate (o: ReadyOptions, d: Deps): Promise<boolean> {
 
 interface BindingStatus { principal: string; name: string; open: boolean; pending?: { wake?: number; passive?: number }; lastError?: string }
 
-async function bindingStatus (o: ReadyOptions, d: Deps): Promise<BindingStatus | undefined | 'hub-error'> {
+/** Hub status through the shared VortexClient, so the enrolled TLS fingerprint pin applies exactly as in the plugin. */
+async function bindingStatus (o: ReadyOptions, client: VortexClient): Promise<BindingStatus | undefined | 'hub-error'> {
   try {
-    const res = await d.fetch(`${hubHttp(o.credential.hub)}/v1/status`, { headers: { authorization: `Bearer ${o.credential.token}` }, signal: AbortSignal.timeout(10_000) })
-    if (!res.ok) return 'hub-error'
-    const body = await res.json() as { bindings?: BindingStatus[] }
+    const body = await Promise.race([
+      client.status() as Promise<{ bindings?: BindingStatus[] }>,
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('status timeout')), 10_000)),
+    ])
     const principal = o.credential.principal ?? 'opencode'
     return (body.bindings ?? []).find(b => b.principal === principal && b.name === o.binding)
   } catch { return 'hub-error' }
@@ -72,15 +75,17 @@ async function bindingStatus (o: ReadyOptions, d: Deps): Promise<BindingStatus |
 /** Polls until the binding's stream is open or the deadline passes; never throws. */
 export async function checkReady (o: ReadyOptions, deps: Partial<Deps> = {}): Promise<ReadyResult> {
   const d: Deps = { ...defaultDeps, ...deps }
+  if (!Number.isFinite(o.timeoutMs) || o.timeoutMs < 1 || o.timeoutMs > MAX_TIMEOUT_MS) throw new RangeError(`timeoutMs must be finite within 1..${MAX_TIMEOUT_MS}`)
   const deadline = d.now() + o.timeoutMs
   const poll = o.pollMs ?? 1000
   let activated = false
   let last: BindingStatus | undefined | 'hub-error' = undefined
+  const client = new VortexClient(o.credential)
   while (true) {
     // Re-activate until it succeeds: OpenCode may still be starting.
     if (!activated) activated = await activate(o, d)
     if (activated) {
-      last = await bindingStatus(o, d)
+      last = await bindingStatus(o, client)
       if (last !== undefined && last !== 'hub-error' && last.open) {
         return { state: 'ready', detail: `binding ${last.principal}/${last.name} stream open`, pending: norm(last.pending), lastError: last.lastError }
       }
@@ -89,7 +94,7 @@ export async function checkReady (o: ReadyOptions, deps: Partial<Deps> = {}): Pr
     await d.sleep(poll)
   }
   if (!activated) return { state: 'opencode-unreachable', detail: `OpenCode at ${o.server} did not answer a directory-scoped request for ${o.directory}` }
-  if (last === 'hub-error') return { state: 'offline', detail: `hub ${hubHttp(o.credential.hub)} status unavailable; cannot confirm the stream` }
+  if (last === 'hub-error') return { state: 'offline', detail: `hub ${hubLabel(o.credential.hub)} status unavailable (unreachable, unauthorized or TLS pin mismatch); cannot confirm the stream` }
   if (last === undefined) {
     return { state: 'never-bound', detail: `no binding ${o.credential.principal ?? 'opencode'}/${o.binding} on the hub: fresh setup, or the plugin is inactive for ${o.directory} (check options.directory, acceptRevisions, credential; OpenCode logs "[vortex] inactive: ...")` }
   }
@@ -110,8 +115,21 @@ function parse (argv: string[]): Map<string, string> {
   return m
 }
 
+/** Readiness must terminate: a finite whole number of ms in [1, 3_600_000]. NaN, Infinity, 0 and negatives are usage errors. */
+export const MAX_TIMEOUT_MS = 3_600_000
+
+export function parseTimeout (raw: string | undefined): number | string {
+  if (raw === undefined) return 60_000
+  if (!/^[0-9]+$/.test(raw.trim())) return `--timeout-ms must be a whole number of milliseconds (1..${MAX_TIMEOUT_MS}), got "${raw}"`
+  const n = Number(raw)
+  if (!Number.isSafeInteger(n) || n < 1 || n > MAX_TIMEOUT_MS) return `--timeout-ms must be within 1..${MAX_TIMEOUT_MS}, got ${raw}`
+  return n
+}
+
 export async function main (argv: string[]): Promise<number> {
   const f = parse(argv)
+  const timeoutMs = parseTimeout(f.get('timeout-ms'))
+  if (typeof timeoutMs === 'string') { console.error(`vortex-ready: ${timeoutMs}`); return 2 }
   const directory = f.get('directory')
   if (directory === undefined || !directory.startsWith('/')) { console.error('vortex-ready: --directory <absolute wake Location> is required'); return 2 }
   let credential: Credential | undefined
@@ -128,7 +146,7 @@ export async function main (argv: string[]): Promise<number> {
     directory: directory.replace(/\/+$/, '') || '/',
     binding: f.get('binding') ?? 'opencode',
     credential,
-    timeoutMs: Number(f.get('timeout-ms') ?? 60_000),
+    timeoutMs,
     password: process.env.OPENCODE_SERVER_PASSWORD,
   })
   const line = `vortex-ready: ${r.state}: ${r.detail}${r.lastError ? ` (lastError: ${r.lastError})` : ''}`

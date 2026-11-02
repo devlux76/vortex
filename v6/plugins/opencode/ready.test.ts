@@ -96,3 +96,60 @@ test('a different directory does not count as activation of the wake Location', 
     assert.equal(r.state, 'never-bound', r.detail)
   } finally { oc.stop(); await env.stop() }
 })
+
+async function tlsEnv () {
+  const root = mkdtempSync(`${tmpdir()}/vx-ready-tls-`)
+  const hub = await startHub({ stateDir: `${root}/state`, configDir: `${root}/config`, cfg: { listen: '127.0.0.1:0', tlsListen: '127.0.0.1:0' } as any })
+  const token = hub.store.createPrincipal('opencode').token
+  const oc = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => Response.json({ data: [] }) })
+  const good = { hub: `wss://127.0.0.1:${hub.tlsPort}`, token, principal: 'opencode', fingerprint: hub.fingerprint! }
+  const client = new VortexClient(good)
+  await client.bind('opencode', ['all'])
+  let ws: WebSocket | undefined
+  await new Promise<void>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('pinned stream did not open')), 3000)
+    ws = client.stream('opencode', { onBatch: () => {}, onOpen: () => { clearTimeout(t); resolve() } }).ws
+  })
+  return { hub, oc, good, stop: async () => { try { ws?.close() } catch {} ; oc.stop(true); await hub.stop(); rmSync(root, { recursive: true, force: true }) } }
+}
+
+test('TLS: readiness uses the enrolled fingerprint pin like the plugin (correct pin -> ready)', async () => {
+  const e = await tlsEnv()
+  try {
+    const r = await checkReady({ server: `http://127.0.0.1:${e.oc.port}`, directory: '/work/wake', binding: 'opencode', credential: e.good, timeoutMs: 1500, pollMs: 50 })
+    assert.equal(r.state, 'ready', r.detail)
+  } finally { await e.stop() }
+})
+
+test('TLS: a wrong fingerprint pin is never reported ready, even with the stream open', async () => {
+  const e = await tlsEnv()
+  try {
+    const bad = { ...e.good, fingerprint: 'ab'.repeat(32) }
+    const r = await checkReady({ server: `http://127.0.0.1:${e.oc.port}`, directory: '/work/wake', binding: 'opencode', credential: bad, timeoutMs: 400, pollMs: 50 })
+    assert.notEqual(r.state, 'ready')
+    assert.match(r.detail, /TLS pin mismatch/)
+  } finally { await e.stop() }
+})
+
+test('timeout: only finite whole ms in 1..3600000; NaN/Infinity/0/negative are usage errors', async () => {
+  const { parseTimeout } = await import('./ready.ts')
+  assert.equal(parseTimeout(undefined), 60_000)
+  assert.equal(parseTimeout('1'), 1)
+  assert.equal(parseTimeout('3600000'), 3_600_000)
+  for (const bad of ['not-a-number', 'NaN', 'Infinity', '0', '-5', '1.5', '1e3', '3600001', '']) assert.equal(typeof parseTimeout(bad), 'string', bad)
+  await assert.rejects(checkReady({ server: 'http://127.0.0.1:9', directory: '/w', binding: 'b', credential: { hub: 'ws://127.0.0.1:9', token: 't' }, timeoutMs: Number.NaN }), RangeError)
+})
+
+test('timeout: the CLI exits 2 on a malformed timeout before any network request', async () => {
+  let requests = 0
+  const srv = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => { requests++; return Response.json({ bindings: [] }) } })
+  const root = mkdtempSync(`${tmpdir()}/vx-ready-cli-`)
+  const file = `${root}/cred.json`
+  await Bun.write(file, JSON.stringify({ hub: `ws://127.0.0.1:${srv.port}`, token: 't', principal: 'opencode' }))
+  const child = Bun.spawn(['bun', `${import.meta.dir}/ready.ts`, '--directory', '/work/wake', '--server', `http://127.0.0.1:${srv.port}`, '--credential', file, '--timeout-ms', 'not-a-number'], { stdout: 'pipe', stderr: 'pipe' })
+  try {
+    const code = await Promise.race([child.exited, new Promise<string>(r => setTimeout(() => r('still-running'), 5000))])
+    assert.equal(code, 2)
+    assert.equal(requests, 0)
+  } finally { child.kill(); await child.exited; srv.stop(true); rmSync(root, { recursive: true, force: true }) }
+})

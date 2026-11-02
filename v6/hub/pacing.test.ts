@@ -288,3 +288,20 @@ test('A4-9 crash atomicity: failure entering cooldown stores neither the message
     assert.equal(store.db.prepare("SELECT COUNT(*) AS c FROM messages WHERE text = 'z3'").get().c, 0)
   } finally { await env.stop() }
 })
+
+test('A4-10 inline expiry by a new message releases held rows on EVERY binding (not only the new recipient)', async () => {
+  const env = await setup({ cooldownBaseMs: 300 })
+  const bob = await stream(env, 'bob', 'o1')
+  const alice = await stream(env, 'alice', 'a1')
+  try {
+    for (const t of ['s1', 's2']) { await dm(env, 'alice', 'bob', t); await until(() => bob.texts().includes(t)) }
+    await dm(env, 'alice', 'bob', 's3') // T=3 → cooling; s3 held in bob/o1
+    const d = env.hub.delivery as any
+    clearTimeout(d.coolingTimer); d.coolingTimer = undefined; d.coolingAt = undefined // the expiry timer has not fired yet
+    await sleep(400) // past cooling_until
+    assert.ok(!bob.texts().includes('s3'), 'still held (timer suppressed)')
+    await dm(env, 'bob', 'alice', 'reply') // inline expiry happens on bob's message, recipient is alice
+    await until(() => alice.texts().includes('reply'), 2000, 'reply to alice')
+    await until(() => bob.texts().includes('s3'), 2000, "bob's held row released by the inline expiry")
+  } finally { bob.close(); alice.close(); await env.stop() }
+})

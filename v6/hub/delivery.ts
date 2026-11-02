@@ -127,9 +127,11 @@ export class Delivery {
   }
 
   /** After a send commits: arm the expiry timer for a new cooldown; release at once on operator reset. */
-  afterCommit (info: { conversationKey: string; enteredCooldown: boolean; operatorReset: boolean }): void {
+  afterCommit (info: { conversationKey: string; enteredCooldown: boolean; operatorReset: boolean; expiredInline?: boolean }): void {
     if (info.enteredCooldown) this.armCoolingTimer()
-    if (info.operatorReset) {
+    // Operator reset, or an expiry performed inline by this message before the
+    // timer ran: release the conversation's held rows on every binding.
+    if (info.operatorReset || info.expiredInline === true) {
       for (const b of this.store.bindingsHoldingWake(info.conversationKey)) this.scheduleCoalesce(b.principal, b.name)
       this.armCoolingTimer()
     }

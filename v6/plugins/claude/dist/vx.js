@@ -532,11 +532,11 @@ class HubStore {
       this.db.prepare(`UPDATE conversations SET auto_count = 0, level = 0, cooling_until = NULL, paused = 0,
            last_cooldown_end = CASE WHEN cooling_until IS NOT NULL THEN ? ELSE last_cooldown_end END WHERE conv = ?`).run(now, conv);
       this.db.prepare("DELETE FROM cooldown_notices WHERE conv = ?").run(conv);
-      return { enteredCooldown: false, operatorReset: was.coolingUntil !== null };
+      return { enteredCooldown: false, operatorReset: was.coolingUntil !== null, expiredInline: false };
     }
     if (human)
-      return { enteredCooldown: false, operatorReset: false };
-    this.expireConversation(conv, now);
+      return { enteredCooldown: false, operatorReset: false, expiredInline: false };
+    const expiredInline = this.expireConversation(conv, now);
     const prior = this.conversationRow(conv);
     if (prior.level > 0 && prior.coolingUntil === null && !this.hasWakeWork(conv)) {
       const quietSince = Math.max(prior.lastAutoTs ?? 0, prior.lastCooldownEnd ?? 0, prior.lastDrainTs ?? 0);
@@ -550,9 +550,9 @@ class HubStore {
       const until = now + Math.min(this.cfg.cooldownBaseMs * 2 ** (level - 1), this.cfg.cooldownMaxMs);
       this.db.prepare("UPDATE conversations SET level = ?, cooling_until = ? WHERE conv = ?").run(level, until, conv);
       this.recordCooldownNotices(conv, until);
-      return { enteredCooldown: true, operatorReset: false };
+      return { enteredCooldown: true, operatorReset: false, expiredInline };
     }
-    return { enteredCooldown: false, operatorReset: false };
+    return { enteredCooldown: false, operatorReset: false, expiredInline };
   }
   recordCooldownNotices(conv, until) {
     let targets;

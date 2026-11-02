@@ -340,11 +340,11 @@ export class HubStore {
    * Single transaction: bump seq, insert message, join sender to a room,
    * update the conversation counts (§8.5), prune retention (§8.4).
    */
-  insertMessage (m: Omit<StoredMessage, 'id' | 'seq' | 'ts' | 'human' | 'reply_author' | 'reply_ts'> & { human: boolean }): StoredMessage & { conversationKey: string; enteredCooldown: boolean; operatorReset: boolean } {
+  insertMessage (m: Omit<StoredMessage, 'id' | 'seq' | 'ts' | 'human' | 'reply_author' | 'reply_ts'> & { human: boolean }): StoredMessage & { conversationKey: string; enteredCooldown: boolean; operatorReset: boolean; expiredInline: boolean } {
     const now = Date.now()
     const conversationKey = m.scope === 'dm' ? dmPairKey(m.from, m.to[0]) : roomKey(m.room!)
     const toJson = JSON.stringify(m.to)
-    const built: StoredMessage & { conversationKey: string; enteredCooldown: boolean; operatorReset: boolean } = this.db.transaction(() => {
+    const built: StoredMessage & { conversationKey: string; enteredCooldown: boolean; operatorReset: boolean; expiredInline: boolean } = this.db.transaction(() => {
       const id = ulid(now)
       const seq = (this.db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM messages').get() as any).next as number
       // Resolve reply reference for the (re author HH:MM) label.
@@ -375,7 +375,7 @@ export class HubStore {
    * operator → immediate reset; plugin human turn → no change; automatic →
    * (1) decay on prior state, (2) count, (3) enter cooldown at T.
    */
-  private bumpConversation (conv: string, from: string, human: boolean, now: number): { enteredCooldown: boolean; operatorReset: boolean } {
+  private bumpConversation (conv: string, from: string, human: boolean, now: number): { enteredCooldown: boolean; operatorReset: boolean; expiredInline: boolean } {
     this.db.prepare('INSERT INTO conversations (conv) VALUES (?) ON CONFLICT(conv) DO NOTHING').run(conv)
     if (from === 'operator') {
       const was = this.conversationRow(conv)!
@@ -384,11 +384,12 @@ export class HubStore {
            last_cooldown_end = CASE WHEN cooling_until IS NOT NULL THEN ? ELSE last_cooldown_end END WHERE conv = ?`,
       ).run(now, conv)
       this.db.prepare('DELETE FROM cooldown_notices WHERE conv = ?').run(conv)
-      return { enteredCooldown: false, operatorReset: was.coolingUntil !== null }
+      return { enteredCooldown: false, operatorReset: was.coolingUntil !== null, expiredInline: false }
     }
-    if (human) return { enteredCooldown: false, operatorReset: false } // self-reported: neither counts nor resets
-    // A cooldown whose deadline passed but whose timer has not run yet expires first.
-    this.expireConversation(conv, now)
+    if (human) return { enteredCooldown: false, operatorReset: false, expiredInline: false } // self-reported: neither counts nor resets
+    // A cooldown whose deadline passed but whose timer has not run yet expires
+    // first; the caller must then release held rows on EVERY binding (afterCommit).
+    const expiredInline = this.expireConversation(conv, now)
     const prior = this.conversationRow(conv)!
     // (1) Decay check on PRIOR state: genuinely quiet for D (no cooldown, no wake work).
     if (prior.level > 0 && prior.coolingUntil === null && !this.hasWakeWork(conv)) {
@@ -404,9 +405,9 @@ export class HubStore {
       const until = now + Math.min(this.cfg.cooldownBaseMs * 2 ** (level - 1), this.cfg.cooldownMaxMs)
       this.db.prepare('UPDATE conversations SET level = ?, cooling_until = ? WHERE conv = ?').run(level, until, conv)
       this.recordCooldownNotices(conv, until)
-      return { enteredCooldown: true, operatorReset: false }
+      return { enteredCooldown: true, operatorReset: false, expiredInline }
     }
-    return { enteredCooldown: false, operatorReset: false }
+    return { enteredCooldown: false, operatorReset: false, expiredInline }
   }
 
   /** One notice row per binding that receives this conversation (A4 per-binding notice). */

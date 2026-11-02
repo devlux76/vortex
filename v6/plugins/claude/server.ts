@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // VORTEX v6 Claude Code plugin: stdio MCP server + channel (docs/v6-proposal.md §8.6, §8.9).
 // A minimal newline-delimited JSON-RPC MCP server (no SDK dependency): initialize, ping,
-// tools/list, tools/call. Exactly one model tool: vx_send.
+// tools/list, tools/call. Model tools: vx_send and the read-only vx_read (A5).
 import { homedir } from 'node:os'
 import { readFileSync } from 'node:fs'
 import type { Credential } from '../../client/credential.ts'
@@ -9,6 +9,7 @@ import { loadCredential } from '../../client/credential.ts'
 import { Bridge } from './bridge.ts'
 import { bindingName } from '../../client/hooksocket.ts'
 import { INSTRUCTIONS, TOOL, parseSendArgs, readStdio, stdoutWriter } from '../../client/mcp.ts'
+import { READ_TOOL, parseReadArgs, readHistory } from '../../client/read.ts'
 
 export { TOOL, parseSendArgs }
 
@@ -55,8 +56,17 @@ async function main (): Promise<void> {
     } else if (method === 'ping') {
       await reply(id, {})
     } else if (method === 'tools/list') {
-      await reply(id, { tools: [TOOL] })
+      await reply(id, { tools: [TOOL, READ_TOOL] })
     } else if (method === 'tools/call') {
+      if (params?.name === READ_TOOL.name) {
+        // A5: read-only, non-consuming history (works with or without wake/channels).
+        try {
+          await reply(id, { content: [{ type: 'text', text: await readHistory(bridge.client, parseReadArgs(params.arguments)) }] })
+        } catch (e) {
+          await reply(id, { content: [{ type: 'text', text: (e as Error).message }], isError: true })
+        }
+        return
+      }
       if (params?.name !== TOOL.name) { await fail(id, -32602, `unknown tool: ${params?.name}`); return }
       try {
         const out = await bridge.send(parseSendArgs(params.arguments))

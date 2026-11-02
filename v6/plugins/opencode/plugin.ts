@@ -8,6 +8,7 @@ import { homedir } from 'node:os'
 import { loadCredential, type Credential } from '../../client/credential.ts'
 import { VortexClient, type WireApiMessage } from '../../client/client.ts'
 import { INSTRUCTIONS, TOOL, parseSendArgs } from '../../client/mcp.ts'
+import { READ_TOOL, parseReadArgs, readHistory } from '../../client/read.ts'
 import { recentLine, type WireMessage } from '../../client/render.ts'
 import { OpenCodeBridge, type BatchStore } from './bridge.ts'
 import { checkFork, type PluginCtx, type Registration } from './host.ts'
@@ -172,6 +173,18 @@ export function createPlugin (log: (msg: string) => void = m => console.error(`[
               if (bridge.isClosed) throw new Error('VORTEX plugin is shut down')
               const out = await bridge.send(parseSendArgs(input))
               return { content: JSON.stringify(out) }
+            },
+          })
+          // A5: read-only, non-consuming history, the same session restriction as vx_send.
+          editor.add({
+            name: READ_TOOL.name,
+            description: READ_TOOL.description,
+            input: JSON.parse(JSON.stringify(READ_TOOL.inputSchema)),
+            options: { codemode: false },
+            execute: async (input, context) => {
+              if (context.sessionID !== opts.session) throw new Error('vx_read is only available in the configured VORTEX session')
+              if (bridge.isClosed) throw new Error('VORTEX plugin is shut down')
+              return { content: await readHistory(bridge.client, parseReadArgs(input)) }
             },
           })
         }))

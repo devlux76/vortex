@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs'
 import { loadCredential, type Credential } from '../../client/credential.ts'
 import { bindingName } from '../../client/hooksocket.ts'
 import { INSTRUCTIONS, TOOL, parseSendArgs, readStdio, stdoutWriter } from '../../client/mcp.ts'
+import { READ_TOOL, parseReadArgs, readHistory } from '../../client/read.ts'
 import { CodexBridge } from './bridge.ts'
 import { StdioAppServer } from './appserver.ts'
 
@@ -56,8 +57,17 @@ async function main (): Promise<void> {
     } else if (method === 'ping') {
       await reply(id, {})
     } else if (method === 'tools/list') {
-      await reply(id, { tools: [TOOL] })
+      await reply(id, { tools: [TOOL, READ_TOOL] })
     } else if (method === 'tools/call') {
+      if (params?.name === READ_TOOL.name) {
+        // A5: read-only, non-consuming history (works with or without wake/channels).
+        try {
+          await reply(id, { content: [{ type: 'text', text: await readHistory(bridge.client, parseReadArgs(params.arguments)) }] })
+        } catch (e) {
+          await reply(id, { content: [{ type: 'text', text: (e as Error).message }], isError: true })
+        }
+        return
+      }
       if (params?.name !== TOOL.name) { await fail(id, -32602, `unknown tool: ${params?.name}`); return }
       try {
         const out = await bridge.send(parseSendArgs(params.arguments))

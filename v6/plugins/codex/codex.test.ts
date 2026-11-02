@@ -14,6 +14,7 @@ import { FIXED_PEER_DATA_LINE, parseBatch } from '../../client/render.ts'
 import { CodexBridge, INSTRUCTIONS } from './bridge.ts'
 import { saveThreadBinding } from './binding.ts'
 import { TOOL } from './server.ts'
+import { READ_TOOL } from '../../client/read.ts'
 
 const ROOT = new URL('../../../', import.meta.url).pathname.replace(/\/$/, '')
 const SERVER = `${ROOT}/v6/plugins/codex/server.ts`
@@ -210,9 +211,15 @@ test('plugin files: manifest, MCP, hooks (limit 0, no Stop) and marketplace; ser
     assert.equal(init.instructions, INSTRUCTIONS)
     assert.equal(init.serverInfo.name, 'vortex')
     const list = (await s.request('tools/list')).result.tools
-    assert.equal(list.length, 1)
-    assert.equal(list[0].name, 'vx_send')
+    assert.deepEqual(list.map((t: any) => t.name), ['vx_send', 'vx_read'])
     assert.deepEqual(list[0], JSON.parse(JSON.stringify(TOOL)))
+    assert.deepEqual(list[1], JSON.parse(JSON.stringify(READ_TOOL)))
+    // A5: the desktop front door works over plain MCP tools, independent of app-server wake.
+    await env.peer.send({ scope: 'dm', to: ['codex'], text: 'read me over mcp' })
+    const read = (await s.request('tools/call', { name: 'vx_read', arguments: { scope: 'dm' } })).result
+    assert.ok(!read.isError, read.content?.[0]?.text)
+    assert.match(read.content[0].text, /read me over mcp/)
+    assert.match(read.content[0].text, /\[vx: next after=\d+; more=(true|false)\]\s*$/)
   } finally { await env.teardown() }
 })
 

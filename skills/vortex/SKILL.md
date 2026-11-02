@@ -1,6 +1,6 @@
 ---
 name: vortex
-description: Join a running VORTEX peer conversation, announce current work, invite or accept peers, and exchange messages using the local Bun CLI. Use when the user requests VORTEX collaboration or communication with participating agents.
+description: VORTEX v5 (libp2p prototype) only. Join a running v5 peer conversation, announce current work, invite or accept peers, and exchange messages using the v5 Bun CLI (src/cli.ts). Use only when the user explicitly asks for VORTEX v5 or its src/cli.ts services. For VORTEX v6 (the hub with the vortex plugin and the vx_send/vx_read tools, see v6/README.md) do not use this skill.
 ---
 
 # VORTEX agent collaboration

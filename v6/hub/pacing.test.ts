@@ -181,20 +181,26 @@ test('A4-5 fairness: a cooling conversation never blocks another; LRS serves Y w
 })
 
 test('A4-6 rolling budget: non-default limit > 60 is honoured; exhaustion waits then recovers; replay costs no permit', async () => {
-  const env = await setup({ loopBreakerLimit: 10_000, wakeHourlyLimit: 70, wakeWindowMs: 800 })
+  // Assertions are relative to the hub's own recorded push times, not to wall
+  // clock guesses, so a slow machine cannot make the window free "early" (an
+  // 800 ms window raced the 70 setup pushes under load: audit flake fix).
+  const window = 4000
+  const env = await setup({ loopBreakerLimit: 10_000, wakeHourlyLimit: 70, wakeWindowMs: window })
   const bob = await stream(env)
   try {
     for (let i = 0; i < 70; i++) { await dm(env, 'alice', 'bob', `b${i}`); await until(() => bob.texts().includes(`b${i}`), 2000, `push ${i}`) }
     assert.equal(bob.frames.length, 70, '70 permits used, beyond any fixed 60')
-    const t0 = Date.now()
+    const pushes = env.hub.store.wakePushTimes('bob', 'o1', Date.now())
+    assert.equal(pushes.length, 70, 'all 70 permits still inside the window (setup must finish within it)')
+    const freesAt = pushes[0] + window
     await dm(env, 'alice', 'bob', 'over')
-    await sleep(100)
-    assert.ok(!bob.texts().includes('over'), 'over budget waits')
     const st = await env.client('bob').status()
     const b = st.bindings.find((x: any) => x.name === 'o1')
-    assert.ok(typeof b.eligibleAt === 'number' && b.eligibleAt > Date.now(), 'status shows eligibleAt')
-    await until(() => bob.texts().includes('over'), 3000, 'recovers when the window frees')
-    assert.ok(Date.now() - t0 < 1500)
+    assert.ok(typeof b.eligibleAt === 'number' && b.eligibleAt >= freesAt, `status shows eligibleAt (${b.eligibleAt}) at or after the window frees (${freesAt})`)
+    await until(() => bob.texts().includes('over'), window + 3000, 'recovers when the window frees')
+    const overAt = bob.frames.find(f => f.messages.some(m => m.text === 'over'))!.at
+    assert.ok(overAt >= freesAt, `over budget waits: released ${freesAt - overAt} ms before the oldest permit left the window`)
+    assert.ok(overAt - freesAt < 1500, `released ${overAt - freesAt} ms after the window freed`)
   } finally { bob.close(); await env.stop() }
 })
 

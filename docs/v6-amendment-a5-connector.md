@@ -1,6 +1,10 @@
 # Amendment A5 (DRAFT for cross-review): connector front door, the Slack/Teams way
 
-Status: design draft. Claude, 2026-11-02, bug:18f6172. Codex proposed the core (vx_read); the operator asked that every host's plugin work "the way the Slack and Teams plugins work". Not normative until Claude and Codex agree.
+Status: design APPROVED by Codex review of b5c15e2, with two precision corrections recorded below. Claude, 2026-11-02, bug:18f6172. Codex proposed the core (vx_read); the operator asked that every host's plugin work "the way the Slack and Teams plugins work".
+Implementation split (agreed):
+- Codex owns the shared vx_read helper, `GET /v1/dms/mine`, and their tests.
+- Claude owns per-host wiring, manifests and bundle tests, once the shared interface is agreed.
+- Nobody duplicates the shared implementation.
 Numbering: A5 follows A4 (hub pacing). An optional TUI-surface amendment, if ever written, takes the next free number.
 
 ## What "the Slack/Teams way" is (grounded)
@@ -22,9 +26,13 @@ Conclusion: the baseline every surface can rely on is **ordinary MCP tools that 
   - Room: only rooms the principal is a member of; otherwise the same not-a-member answer as the API (no existence leak).
   - DM: only DMs where the principal is sender or sole recipient.
   - Output:
-    - one rendered `<vx …>` block per scope, using the exact §8.4 renderer, its escaping and its bounds (≤ 20 messages, ≤ 6,000 code points, ≤ 8 KiB);
-    - plus a one-line footer `[vx: next after=<seq>; more=<true|false>]`.
-    - If the next message alone does not fit the bounds, it cannot exist: §8.4 rejected it at POST.
+    - one rendered `<vx …>` block per scope, using the exact §8.4 renderer, its escaping and its payload bounds (≤ 20 messages, ≤ 6,000 code points, ≤ 8 KiB);
+    - plus a fixed ASCII cursor footer `[vx: next after=<seq>; more=<true|false>]` of at most 96 bytes, so the total tool output is ≤ 8,288 bytes.
+    - A message accepted at POST fits the payload bounds alone (§8.4), so it is always readable as the sole message of a page. A near-limit message is never skipped and never advances the cursor without being returned.
+  - Cursor (precision rule):
+    - `more` is true only if a lookahead finds at least one further readable message after the page; it is NOT inferred from page length == limit.
+    - `next` is the seq of the last message ACTUALLY returned; an empty page keeps the caller's `after`.
+    - `after`/`next` are safe integers.
   - Non-consuming: it never acknowledges, deletes or reorders pending rows; it never counts toward §8.5 or A4; it never starts a turn, creates a batch or uses a wake permit. Reading history is not delivery receipt.
   - No hidden polling: the plugin calls the hub only when the model calls the tool.
 - Instructions (≤ 200 tokens, §8.9) gain one sentence: "Use `vx_read` to catch up on a room or your DMs (pass `after` from the last footer); it does not mark anything delivered."
@@ -46,10 +54,17 @@ Conclusion: the baseline every surface can rely on is **ordinary MCP tools that 
 - **Recommendation:** ship §1–3 now (minimal, reuses reviewed plugin code), and record hub-hosted MCP as a possible later amendment. Codex: flag it if you consider it the better documented pattern.
 
 ## Tests required
-1. vx_read room: only member rooms; a non-member gets the no-leak error; `after`/`limit` cursoring; the footer's next/more is correct; output passes `measure()` bounds; escaping holds (a body containing `</vx>` cannot close the block).
+1. vx_read room:
+   - only member rooms; a non-member gets the no-leak error;
+   - `after`/`limit` cursoring;
+   - `more` comes from lookahead (page length == limit with nothing after gives more=false);
+   - `next` is the last returned seq, and an empty page keeps `after`;
+   - payload passes `measure()` and footer ≤ 96 bytes (total ≤ 8,288);
+   - a near-bound accepted message is returned alone, never skipped or passed by the cursor;
+   - escaping holds (a body containing `</vx>` cannot close the block).
 2. vx_read DM: only the caller's own DMs. Never another pair's, and never via `/v1/dms` (still 403 for non-operators).
 3. Non-consuming: before and after vx_read, pending rows, batch rows, wake_pushes, conversation counts and cooldown state are identical; no frame is pushed.
-4. Arguments: unknown keys rejected; there is no identity or human_turn argument; limit is clamped to 1..20; scope/room validation matches vx_send.
+4. Arguments: unknown keys rejected; there is no identity or human_turn argument; limit is 1..20; after is a non-negative safe integer; scope/room validation matches vx_send.
 5. Each host exposes vx_read with identical schema and behaviour (Claude MCP, Codex MCP, OpenCode tool.transform), via fake hosts. OpenCode is also checked by the real-fork conformance script.
 6. Live acceptance (later, separate): an actual desktop plugin tool call per host. A stdio test does not substitute for that (Codex).
 

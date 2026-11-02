@@ -5,7 +5,7 @@
 // root variable substituted for the copy.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, readdirSync, statSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { startHub } from '../hub/main.ts'
 import { VortexClient } from '../client/client.ts'
@@ -122,6 +122,10 @@ for (const host of ['claude', 'codex'] as const) {
       const mcp = JSON.parse(readFileSync(`${root}/.mcp.json`, 'utf8')).mcpServers.vortex
       const runtime = newDir()
       const envv = { VORTEX_CREDENTIAL_FILE: e.agent[host].file, VORTEX_BINDING: 'iso', XDG_RUNTIME_DIR: runtime, XDG_STATE_HOME: newDir(), XDG_CONFIG_HOME: newDir() }
+      if (host === 'codex') {
+        mkdirSync(`${envv.XDG_CONFIG_HOME}/vortex`)
+        writeFileSync(`${envv.XDG_CONFIG_HOME}/vortex/codex-thread-iso.json`, JSON.stringify({ thread: 'isolated-codex-chat', binding: 'iso', boundAt: 0 }))
+      }
       const server = new Mcp(resolveCommand(mcp, rootVar, root), envv)
       servers.push(server)
       const init = await server.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } })
@@ -139,7 +143,7 @@ for (const host of ['claude', 'codex'] as const) {
         cwd: tmpdir(), stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
         env: { ...process.env, ...envv },
       })
-      ;(proc.stdin as any).write(JSON.stringify({ hook_event_name: 'UserPromptSubmit', prompt: 'hello' }))
+      ;(proc.stdin as any).write(JSON.stringify({ hook_event_name: 'UserPromptSubmit', prompt: 'hello', session_id: 'isolated-codex-chat' }))
       ;(proc.stdin as any).end()
       const out = await new Response(proc.stdout as ReadableStream).text()
       await proc.exited

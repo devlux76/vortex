@@ -3,12 +3,16 @@
 // (fake-appserver.ts). Loopback + temp dirs only; the real Codex is never contacted.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { connect } from 'node:net'
+import { once } from 'node:events'
+import { createInterface } from 'node:readline'
 import { tmpdir } from 'node:os'
 import { startHub } from '../../hub/main.ts'
 import { VortexClient } from '../../client/client.ts'
 import { FIXED_PEER_DATA_LINE, parseBatch } from '../../client/render.ts'
-import { INSTRUCTIONS } from './bridge.ts'
+import { CodexBridge, INSTRUCTIONS } from './bridge.ts'
+import { saveThreadBinding } from './binding.ts'
 import { TOOL } from './server.ts'
 
 const ROOT = new URL('../../../', import.meta.url).pathname.replace(/\/$/, '')
@@ -148,7 +152,7 @@ async function runVx (env: Env, args: string[], extra: Record<string, string> = 
   return { out, err, code }
 }
 const runHook = (env: Env, event: Record<string, unknown>) =>
-  runVx(env, ['hook', 'context', '--host', 'codex'], {}, JSON.stringify(event))
+  runVx(env, ['hook', 'context', '--host', 'codex'], {}, JSON.stringify({ session_id: CHAT, ...event }))
 const bindChat = (env: Env, chat = CHAT, extra: Record<string, string> = {}) => runVx(env, ['codex', 'bind', chat], extra)
 
 function evidenceOf (env: Env, batch: string): { status: string; evidence: string | null } | undefined {
@@ -273,6 +277,114 @@ test('passive traffic starts zero turns and is delivered only via the hook (hook
     const handlers = Object.values<any>(JSON.parse(readFileSync(`${ROOT}/v6/plugins/codex/hooks/hooks.json`, 'utf8')).hooks).map(e => e[0].hooks[0])
     assert.ok(handlers.every(h => h.additionalContextLimit === 0))
   } finally { await env.teardown() }
+})
+
+test('foreign, missing and malformed hook sessions neither consume passive mail nor mark a human turn', { timeout: 40000 }, async () => {
+  const env = await setup()
+  try {
+    const server = await ready(env)
+    await env.peer.send({ text: 'only the selected chat may read this' })
+    for (const session_id of [OTHER_CHAT, undefined, '', 7]) {
+      const hook = await runHook(env, { session_id, hook_event_name: 'UserPromptSubmit', prompt: 'foreign human prompt' })
+      assert.equal(hook.code, 0)
+      assert.equal(hook.out, '')
+      const sent = await server.call({ text: 'automatic response' })
+      const row = (await env.operator.roomLog('all')).messages.find(m => m.id === sent.structuredContent.id)!
+      assert.equal(row.human, false)
+    }
+    assert.equal(existsSync(`${env.stateHome}/vortex/codex-main.batches.json`), false)
+    const right = await runHook(env, { hook_event_name: 'PostToolUse' })
+    const context = JSON.parse(right.out).hookSpecificOutput.additionalContext
+    const batch = parseBatch(context.split('\n').slice(1).join('\n'))
+    assert.deepEqual(batch.messages.map(m => m.text), ['only the selected chat may read this'])
+    await until(() => evidenceOf(env, batch.batch)?.status === 'delivered' || undefined)
+    assert.equal(evidenceOf(env, batch.batch)?.evidence, 'hook-returned')
+    assert.equal(turnStarts(env).length, 0)
+  } finally { await env.teardown() }
+})
+
+test('an unbound hook leaves passive mail available after explicit binding', { timeout: 40000 }, async () => {
+  const env = await setup()
+  try {
+    await ready(env, { bind: false })
+    await env.peer.send({ text: 'wait until a chat is selected' })
+    assert.equal((await runHook(env, { hook_event_name: 'PostToolUse' })).out, '')
+    assert.equal((await bindChat(env)).code, 0)
+    const right = await runHook(env, { hook_event_name: 'PostToolUse' })
+    assert.match(right.out, /wait until a chat is selected/)
+  } finally { await env.teardown() }
+})
+
+test('passive delivery follows a rebind and rejects the previous chat', { timeout: 40000 }, async () => {
+  const env = await setup()
+  try {
+    await ready(env)
+    assert.equal((await bindChat(env, OTHER_CHAT)).code, 0)
+    await env.peer.send({ text: 'mail for the new selected chat' })
+    assert.equal((await runHook(env, { hook_event_name: 'PostToolUse' })).out, '')
+    const right = await runHook(env, { hook_event_name: 'PostToolUse', session_id: OTHER_CHAT })
+    assert.match(right.out, /mail for the new selected chat/)
+    assert.equal(turnStarts(env).length, 0)
+  } finally { await env.teardown() }
+})
+
+test('a rebind during a passive pull prevents context from reaching the old chat', { timeout: 40000 }, async () => {
+  const previousConfig = process.env.XDG_CONFIG_HOME
+  const env = await setup()
+  let bridge: CodexBridge | undefined
+  try {
+    process.env.XDG_CONFIG_HOME = env.pluginCfg
+    saveThreadBinding('main', CHAT)
+    mkdirSync(`${env.runtime}/vortex`)
+    bridge = new CodexBridge({
+      credential: JSON.parse(readFileSync(env.codexCred, 'utf8')), binding: 'main',
+      stateFile: `${env.stateHome}/vortex/codex-main.batches.json`,
+      turnsFile: `${env.stateHome}/vortex/codex-main.turns.json`,
+      socketPath: `${env.runtime}/vortex/codex-main.sock`,
+      appServer: { request: async () => { throw new Error('passive mail must not call the host') }, close: () => {} },
+    })
+    const pull = bridge.client.pull.bind(bridge.client)
+    let rebound = false
+    bridge.client.pull = ws => {
+      if (!rebound) { rebound = true; saveThreadBinding('main', OTHER_CHAT) }
+      pull(ws)
+    }
+    await bridge.start()
+    await until(() => env.hub.delivery.openStreams().some(s => s.principal === 'codex') || undefined)
+    await env.peer.send({ text: 'the selection changed while pulling this mail' })
+    assert.equal((await runHook(env, { hook_event_name: 'PostToolUse' })).out, '')
+    assert.equal(rebound, true)
+    const right = await runHook(env, { hook_event_name: 'PostToolUse', session_id: OTHER_CHAT })
+    assert.match(right.out, /the selection changed while pulling this mail/)
+  } finally {
+    bridge?.stop()
+    await env.teardown()
+    if (previousConfig === undefined) delete process.env.XDG_CONFIG_HOME
+    else process.env.XDG_CONFIG_HOME = previousConfig
+  }
+})
+
+test('a rebind before a hook acknowledges preserves the offer for the new chat', { timeout: 40000 }, async () => {
+  const env = await setup()
+  let socket: ReturnType<typeof connect> | undefined
+  try {
+    await ready(env)
+    await env.peer.send({ text: 'pending while the selected chat changes' })
+    socket = connect(`${env.runtime}/vortex/codex-main.sock`)
+    const lines = createInterface({ input: socket })[Symbol.asyncIterator]()
+    await once(socket, 'connect')
+    socket.write(JSON.stringify({ op: 'context', event: { hook_event_name: 'PostToolUse', session_id: CHAT } }) + '\n')
+    const offer = JSON.parse((await lines.next()).value!)
+    assert.match(offer.context, /pending while the selected chat changes/)
+    assert.equal((await bindChat(env, OTHER_CHAT)).code, 0)
+    socket.write(JSON.stringify({ op: 'ack', batch: offer.batch }) + '\n')
+    const ack = JSON.parse((await lines.next()).value!)
+    assert.equal(ack.ok, false)
+    assert.ok(unresolved(env, offer.batch))
+    const right = await runHook(env, { hook_event_name: 'PostToolUse', session_id: OTHER_CHAT })
+    assert.equal(JSON.parse(right.out).hookSpecificOutput.additionalContext.includes(offer.batch), true)
+    await until(() => evidenceOf(env, offer.batch)?.status === 'delivered' || undefined)
+  } finally { socket?.destroy(); await env.teardown() }
 })
 
 test('an RPC error leaves the batch unresolved: nothing acked, failure reported with the chat id scrubbed; a restart redelivers the same batch', { timeout: 40000 }, async () => {

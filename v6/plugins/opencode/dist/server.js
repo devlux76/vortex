@@ -343,6 +343,9 @@ class BridgeBase {
   isMachineTurn(_event) {
     return false;
   }
+  acceptsHook(_event) {
+    return true;
+  }
   loadAccepted() {
     try {
       return JSON.parse(readFileSync2(this.opts.stateFile, "utf8"));
@@ -508,10 +511,19 @@ class BridgeBase {
         reply({ ok: true });
         return;
       }
+      if (!this.acceptsHook(req.event)) {
+        reply({ ok: true });
+        return;
+      }
       if (req.event?.hook_event_name === "UserPromptSubmit" && !this.isMachineTurn(req.event))
         this.humanTurn = true;
       const offer = await this.offerPassive();
       if (offer === undefined) {
+        reply({ ok: true });
+        return;
+      }
+      if (!this.acceptsHook(req.event)) {
+        this.passiveInflight.delete(offer.batch);
         reply({ ok: true });
         return;
       }
@@ -531,7 +543,7 @@ class BridgeBase {
         return;
       }
       const acked = new Promise((resolve) => {
-        sock.data.ack = { batch: offer.batch, resolve };
+        sock.data.ack = { batch: offer.batch, event: req.event, resolve };
       });
       reply({ ok: true, context, batch: offer.batch });
       const timer = setTimeout(() => sock.data.ack?.resolve(false), this.opts.hookAckMs ?? 1e4);
@@ -547,6 +559,11 @@ class BridgeBase {
         return;
       }
       sock.data.ack = undefined;
+      if (!this.acceptsHook(pending.event)) {
+        pending.resolve(false);
+        reply({ ok: false, error: "chat binding changed before acknowledgment" });
+        return;
+      }
       this.persist(req.batch);
       if (this.passive?.batch === req.batch)
         this.passive = undefined;

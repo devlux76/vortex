@@ -62,6 +62,13 @@ export async function main (argv: string[]): Promise<number> {
 
   const client = new VortexClient(cred)
   try { await client.bind(binding, ['all']) } catch (e) { evidence.error = `bind failed: ${(e as Error).message}`; return finish(1) }
+  // Only messages accepted after this run started count. The hub replays a binding's
+  // undelivered mail on (re)connect (at-least-once), so a previous run's PING/PONG/DONE
+  // can arrive first; the hub's seq head is an exact, clock-free boundary.
+  let startSeq: number
+  try { startSeq = Number((await client.status()).seq ?? 0) } catch (e) { evidence.error = `status failed: ${(e as Error).message}`; return finish(1) }
+  ;(evidence as any).startSeq = startSeq
+  let stale = 0
 
   // Every PONG from the peer is buffered: a reply may arrive before our own send's HTTP response returns.
   const pongs: WireApiMessage[] = []
@@ -83,6 +90,7 @@ export async function main (argv: string[]): Promise<number> {
           if (m.from !== peer) continue
           const p = parse(m.text)
           if (p === undefined) continue
+          if (m.seq <= startSeq) { stale++; (evidence as any).staleIgnored = stale; continue }
           seenHost(p.host)
           if (role === 'respond' && p.kind === 'PING') {
             const reply = m.scope === 'dm'

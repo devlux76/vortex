@@ -20,10 +20,15 @@ export interface HubConfig {
   wakeCoalesceMs: number         // 2000
   wakeMinIntervalMs: number      // 10000
   wakeHourlyLimit: number        // 60
+  wakeWindowMs: number           // 1 h rolling window for wakeHourlyLimit (A4; test seam)
   // send rate (§8.5)
   sendPerMinute: number          // 30
   // loop breaker (§8.5)
   loopBreakerLimit: number       // 12
+  // automatic cooldown (A4, docs/v6-amendment-a4-pacing.md)
+  cooldownBaseMs: number         // 10 min
+  cooldownMaxMs: number          // 2 h
+  cooldownDecayMs: number        // 2 h of genuine quiet resets the backoff level
   // pending queue overflow (§8.4)
   pendingMaxMessages: number     // 1000
   pendingMaxBytes: number        // 4 MiB
@@ -49,8 +54,12 @@ export const DEFAULT_CONFIG: HubConfig = {
   wakeCoalesceMs: 2000,
   wakeMinIntervalMs: 10000,
   wakeHourlyLimit: 60,
+  wakeWindowMs: 3_600_000,
   sendPerMinute: 30,
   loopBreakerLimit: 12,
+  cooldownBaseMs: 10 * 60_000,
+  cooldownMaxMs: 2 * 3_600_000,
+  cooldownDecayMs: 2 * 3_600_000,
   pendingMaxMessages: 1000,
   pendingMaxBytes: 4 * 1024 * 1024,
   roomMaxMessages: 10000,

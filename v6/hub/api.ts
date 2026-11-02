@@ -189,6 +189,7 @@ export class Api {
       return { stored, wakes }
     })
     this.deps.delivery.armWakes(wakes)
+    this.deps.delivery.afterCommit(stored)
     return json({ id: stored.id, seq: stored.seq }, 200)
   }
 
@@ -286,7 +287,9 @@ export class Api {
     const operator = principal === 'operator'
     const bindings = this.deps.store.allBindings().filter(b => operator || b.principal === principal)
     const openStreams = this.deps.delivery.openStreams().filter(s => operator || s.principal === principal)
-    const conversations = this.deps.store.pausedConversations().filter(c => operator || !c.conv.includes('|'))
+    const now = Date.now()
+    // DM conversation keys name both principals: only the operator sees others' DMs.
+    const cooling = this.deps.store.coolingConversations(now).filter(c => operator || !c.conv.includes('|') || c.conv.slice(3).split('|').includes(principal))
     const payload = {
       seq: this.deps.store.seqHead(),
       bindings: bindings.map(b => {
@@ -297,12 +300,13 @@ export class Api {
           rooms: b.rooms,
           pending: counts,
           waitingWake: this.deps.delivery.waitingWake(b.principal, b.name),
+          eligibleAt: this.deps.delivery.eligibleAt(b.principal, b.name, now),
           open: openStreams.some(s => s.principal === b.principal && s.name === b.name),
           lastError: this.deps.delivery.lastError(b.principal, b.name),
         }
       }),
       streams: openStreams.length,
-      pausedConversations: conversations,
+      cooling,
     }
     return json(payload, 200)
   }

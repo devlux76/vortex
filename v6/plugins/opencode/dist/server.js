@@ -627,6 +627,24 @@ class BridgeBase {
 }
 
 // v6/plugins/opencode/bridge.ts
+function describeError(e) {
+  if (e instanceof Error && e.message.length > 0)
+    return e.message;
+  if (typeof e === "object" && e !== null) {
+    const o = e;
+    const tag = typeof o._tag === "string" ? o._tag : typeof o.name === "string" && o.name !== "Error" ? o.name : undefined;
+    const msg = typeof o.message === "string" && o.message.length > 0 ? o.message : undefined;
+    if (tag !== undefined || msg !== undefined)
+      return [tag, msg].filter(Boolean).join(": ");
+    try {
+      const j = JSON.stringify(e);
+      if (j !== undefined && j !== "{}")
+        return j;
+    } catch {}
+  }
+  const str = String(e);
+  return str.length > 0 ? str : "unknown error";
+}
 function batchMessageId(batch) {
   return `msg_vx_${batch}`;
 }
@@ -727,7 +745,7 @@ class OpenCodeBridge extends BridgeBase {
       try {
         await this.oopts.session.wait({ sessionID });
       } catch (e) {
-        this.failDelivery(batch, `session.wait failed: ${e.message}`);
+        this.failDelivery(batch, `session.wait failed: ${describeError(e)}`);
         return;
       }
       if (this.closed)
@@ -745,7 +763,7 @@ class OpenCodeBridge extends BridgeBase {
         ...wake ? {} : { resume: false }
       });
     } catch (e) {
-      this.failDelivery(batch, `session.synthetic failed: ${e.message}`);
+      this.failDelivery(batch, `session.synthetic failed: ${describeError(e)}`);
       return;
     }
     if (admitted?.id !== id) {

@@ -11,6 +11,20 @@ import type { SyntheticInput } from './host.ts'
 
 export { INSTRUCTIONS, type SendArgs } from '../../client/mcp.ts'
 
+/** Host errors (Effect-style) may carry an empty message; keep the tag/name so failures stay diagnosable. */
+export function describeError (e: unknown): string {
+  if (e instanceof Error && e.message.length > 0) return e.message
+  if (typeof e === 'object' && e !== null) {
+    const o = e as Record<string, unknown>
+    const tag = typeof o._tag === 'string' ? o._tag : (typeof o.name === 'string' && o.name !== 'Error' ? o.name : undefined)
+    const msg = typeof o.message === 'string' && o.message.length > 0 ? o.message : undefined
+    if (tag !== undefined || msg !== undefined) return [tag, msg].filter(Boolean).join(': ')
+    try { const j = JSON.stringify(e); if (j !== undefined && j !== '{}') return j } catch { /* cyclic */ }
+  }
+  const str = String(e)
+  return str.length > 0 ? str : 'unknown error'
+}
+
 /** Stable host message id for a batch (§8.8): the inbox reconciles repeats of it. */
 export function batchMessageId (batch: string): string {
   return `msg_vx_${batch}`
@@ -120,7 +134,7 @@ export class OpenCodeBridge extends BridgeBase {
     if (wake) {
       // Flush at the fork's idle boundary; "queue" below makes the remaining race safe.
       try { await this.oopts.session.wait({ sessionID }) } catch (e) {
-        this.failDelivery(batch, `session.wait failed: ${(e as Error).message}`)
+        this.failDelivery(batch, `session.wait failed: ${describeError(e)}`)
         return
       }
       if (this.closed) return
@@ -137,7 +151,7 @@ export class OpenCodeBridge extends BridgeBase {
         ...(wake ? {} : { resume: false }),
       })
     } catch (e) {
-      this.failDelivery(batch, `session.synthetic failed: ${(e as Error).message}`)
+      this.failDelivery(batch, `session.synthetic failed: ${describeError(e)}`)
       return
     }
     // Only a response naming the matching id is host-accepted evidence (§8.8).

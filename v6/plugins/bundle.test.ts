@@ -119,7 +119,7 @@ for (const host of ['claude', 'codex'] as const) {
           assert.ok(m[2].startsWith('/dist/'))
         }
       }
-      const mcp = JSON.parse(readFileSync(`${root}/.mcp.json`, 'utf8')).mcpServers.vortex
+      const mcp = JSON.parse(readFileSync(`${root}/${host === 'codex' ? 'mcp.json' : '.mcp.json'}`, 'utf8')).mcpServers.vortex
       const runtime = newDir()
       const envv = { VORTEX_CREDENTIAL_FILE: e.agent[host].file, VORTEX_BINDING: 'iso', XDG_RUNTIME_DIR: runtime, XDG_STATE_HOME: newDir(), XDG_CONFIG_HOME: newDir() }
       if (host === 'codex') {

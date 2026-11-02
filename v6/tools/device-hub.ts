@@ -1,7 +1,9 @@
 // Starts a VORTEX v6 hub for the two-device acceptance (peer-check.ts) with its
 // TLS listener on a reachable address, enrolls two principals and writes their
 // pinned wss:// credentials. Hub state lives under --dir (kept between runs).
-//   bun device-hub.ts --dir <state dir> --tls <ip:port> [--a dev-a] [--b dev-b]
+//   bun device-hub.ts --dir <state dir> --tls <ip:port> [--a dev-a] [--b dev-b] [--loop-limit N] [--wake-hourly-limit N]
+// --loop-limit / --wake-hourly-limit raise the §8.5/A4 loop breaker and the A4 per-binding
+// hourly wake budget for transport-only runs, so pacing does not mask network behaviour (defaults unchanged).
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import { startHub } from '../hub/main.ts'
 
@@ -11,7 +13,12 @@ for (let i = 0; i < argv.length; i++) if (argv[i].startsWith('--') && argv[i + 1
 const dir = f.get('dir'); const tls = f.get('tls')
 if (dir === undefined || tls === undefined || !/^[0-9.]+:[0-9]+$/.test(tls)) { console.error('usage: device-hub --dir <dir> --tls <ip:port> [--a dev-a] [--b dev-b]'); process.exit(2) }
 mkdirSync(dir, { recursive: true, mode: 0o700 })
-const hub = await startHub({ stateDir: `${dir}/state`, configDir: `${dir}/config`, cfg: { listen: '127.0.0.1:0', tlsListen: tls } as any })
+const loop = f.get('loop-limit')
+const wakeHourly = f.get('wake-hourly-limit')
+for (const [k, v] of [['loop-limit', loop], ['wake-hourly-limit', wakeHourly]] as const) {
+  if (v !== undefined && !/^[1-9][0-9]{0,6}$/.test(v)) { console.error(`device-hub: --${k} must be a positive integer`); process.exit(2) }
+}
+const hub = await startHub({ stateDir: `${dir}/state`, configDir: `${dir}/config`, cfg: { listen: '127.0.0.1:0', tlsListen: tls, ...(loop !== undefined ? { loopBreakerLimit: Number(loop) } : {}), ...(wakeHourly !== undefined ? { wakeHourlyLimit: Number(wakeHourly) } : {}) } as any })
 const host = tls.split(':')[0]
 for (const name of [f.get('a') ?? 'dev-a', f.get('b') ?? 'dev-b']) {
   const file = `${dir}/${name}.json`
@@ -30,5 +37,5 @@ for (const name of [f.get('a') ?? 'dev-a', f.get('b') ?? 'dev-b']) {
   try { token = hub.store.createPrincipal(name).token } catch (e) { console.error(`device-hub: cannot enroll ${name}: ${(e as Error).message} (an existing principal without its credential file needs a fresh --dir)`); process.exit(1) }
   writeFileSync(file, JSON.stringify({ principal: name, token, hub: url, fingerprint: hub.fingerprint }, null, 2) + '\n', { mode: 0o600 })
 }
-console.error(`device-hub: TLS wss://${host}:${hub.tlsPort} fingerprint ${hub.fingerprint}; credentials in ${dir}`)
+console.error(`device-hub: TLS wss://${host}:${hub.tlsPort} fingerprint ${hub.fingerprint}; loopBreakerLimit ${hub.cfg.loopBreakerLimit}; wakeHourlyLimit ${hub.cfg.wakeHourlyLimit}; credentials in ${dir}`)
 setInterval(() => {}, 1 << 30)

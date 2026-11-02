@@ -125,8 +125,9 @@ test('one configured wake session: every admission targets it; other Locations a
     const host = new FakeHost()
     await load(env, host)
     await streamOpen(env)
-    assert.deepEqual([...host.tools.keys()], ['vx_send'])
+    assert.deepEqual([...host.tools.keys()], ['vx_send', 'vx_read'])
     assert.equal(host.tools.get('vx_send')!.options?.codemode, false)
+    assert.equal(host.tools.get('vx_read')!.options?.codemode, false)
     assert.deepEqual([...host.commands.keys()].sort(), ['vx-recent', 'vx-reply', 'vx-room'])
     await env.peer.send({ text: 'one', to: ['opencode'] })
     await until(() => host.synthetics.length >= 1 || undefined, 5000, 'admission')
@@ -136,6 +137,15 @@ test('one configured wake session: every admission targets it; other Locations a
     await assert.rejects(tool.execute({ text: 'x' }, { sessionID: 'ses_other' }), /configured VORTEX session/)
     const sent = JSON.parse((await tool.execute({ text: 'from model', to: ['peer'] }, { sessionID: 'ses_wake' })).content!)
     assert.match(sent.id, /^[0-9A-Z]{26}$/)
+    // A5 vx_read: same session restriction; non-consuming read of own DMs
+    const read = host.tools.get('vx_read')!
+    await assert.rejects(read.execute({ scope: 'dm' }, { sessionID: 'ses_other' }), /configured VORTEX session/)
+    await env.peer.send({ scope: 'dm', to: ['opencode'], text: 'history for opencode' })
+    const before = env.hub.store.pendingCountByKind('opencode', 'opencode')
+    const text = (await read.execute({ scope: 'dm' }, { sessionID: 'ses_wake' })).content!
+    assert.match(text, /history for opencode/)
+    assert.match(text, /\[vx: next after=\d+; more=(true|false)\]\s*$/)
+    assert.deepEqual(env.hub.store.pendingCountByKind('opencode', 'opencode'), before, 'non-consuming')
   })
 })
 

@@ -10,6 +10,7 @@ import { VortexClient } from '../../client/client.ts'
 import { FIXED_PEER_DATA_LINE, parseBatch } from '../../client/render.ts'
 import { INSTRUCTIONS } from './bridge.ts'
 import { TOOL } from './server.ts'
+import { READ_TOOL } from '../../client/read.ts'
 
 const ROOT = new URL('../../../', import.meta.url).pathname.replace(/\/$/, '')
 const SERVER = `${ROOT}/v6/plugins/claude/server.ts`
@@ -158,10 +159,10 @@ test('server advertises channel capability, fixed instructions, and exactly one 
     assert.equal(init.instructions, INSTRUCTIONS)
     assert.equal(init.serverInfo.name, 'vortex')
     const list = (await s.request('tools/list')).result.tools
-    assert.equal(list.length, 1)
-    assert.equal(list[0].name, 'vx_send')
+    assert.deepEqual(list.map((t: any) => t.name), ['vx_send', 'vx_read'])
     assert.deepEqual(Object.keys(list[0].inputSchema.properties).sort(), ['room', 'scope', 'text', 'to'])
     assert.deepEqual(list[0], JSON.parse(JSON.stringify(TOOL)))
+    assert.deepEqual(list[1], JSON.parse(JSON.stringify(READ_TOOL)))
   } finally { await env.teardown() }
 })
 
@@ -427,5 +428,27 @@ test('A2: a plugin-reported fault (pull timeout) appears as lastError in vx stat
     const viaApi = (await env.operator.status()).bindings.find((x: any) => x.name === 'probe')
     assert.match(viaApi.lastError, /pull timed out/)
     ws.close()
+  } finally { await env.teardown() }
+})
+
+
+test('A5 vx_read: room and own-DM history with cursor footer; non-consuming; works without channels', async () => {
+  const env = await setup()
+  try {
+    const s = await ready(env)
+    await env.codex.send({ scope: 'room', room: 'all', text: 'hello history' })
+    await env.codex.send({ scope: 'dm', to: ['claude'], text: 'private to claude' })
+    await new Promise(r => setTimeout(r, 300))
+    const before = env.hub.store.pendingCountByKind('claude', 'main')
+    const room = (await s.request('tools/call', { name: 'vx_read', arguments: { limit: 20 } })).result
+    assert.ok(!room.isError, room.content?.[0]?.text)
+    assert.match(room.content[0].text, /hello history/)
+    assert.doesNotMatch(room.content[0].text, /private to claude/, 'room read never includes DMs')
+    assert.match(room.content[0].text, /\[vx: next after=\d+; more=(true|false)\]\s*$/)
+    const dms = (await s.request('tools/call', { name: 'vx_read', arguments: { scope: 'dm' } })).result
+    assert.match(dms.content[0].text, /private to claude/)
+    assert.deepEqual(env.hub.store.pendingCountByKind('claude', 'main'), before, 'non-consuming')
+    const bad = (await s.request('tools/call', { name: 'vx_read', arguments: { from: 'operator' } })).result
+    assert.equal(bad.isError, true, 'unknown/identity arguments rejected')
   } finally { await env.teardown() }
 })

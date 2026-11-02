@@ -11,6 +11,27 @@ import type { SyntheticInput } from './host.ts'
 
 export { INSTRUCTIONS, type SendArgs } from '../../client/mcp.ts'
 
+/**
+ * Host errors (Effect-style) may carry an empty message. Keep only allowlisted
+ * fields (tag, name, message, scalar code) so failure reasons stay diagnosable
+ * without ever serializing nested host data (requests, headers, causes).
+ */
+export function describeError (e: unknown): string {
+  const MAX = 300
+  const clip = (s: string): string => (s.length > MAX ? `${s.slice(0, MAX)}…` : s)
+  if (typeof e === 'string') return e.length > 0 ? clip(e) : 'unknown error'
+  if (typeof e !== 'object' || e === null) return e === undefined || e === null ? 'unknown error' : clip(String(e))
+  const o = e as Record<string, unknown>
+  const str = (v: unknown): string | undefined => (typeof v === 'string' && v.length > 0 ? v : undefined)
+  const tag = str(o._tag) ?? (str(o.name) !== 'Error' ? str(o.name) : undefined)
+  const msg = str(o.message)
+  const code = typeof o.code === 'string' || typeof o.code === 'number' ? String(o.code) : undefined
+  const parts = [tag, msg].filter((x): x is string => x !== undefined)
+  if (code !== undefined) parts.push(`code ${code}`)
+  if (parts.length > 0) return clip(parts.join(': '))
+  return o instanceof Error ? 'Error' : 'unknown error (non-standard host error)'
+}
+
 /** Stable host message id for a batch (§8.8): the inbox reconciles repeats of it. */
 export function batchMessageId (batch: string): string {
   return `msg_vx_${batch}`
@@ -120,7 +141,7 @@ export class OpenCodeBridge extends BridgeBase {
     if (wake) {
       // Flush at the fork's idle boundary; "queue" below makes the remaining race safe.
       try { await this.oopts.session.wait({ sessionID }) } catch (e) {
-        this.failDelivery(batch, `session.wait failed: ${(e as Error).message}`)
+        this.failDelivery(batch, `session.wait failed: ${describeError(e)}`)
         return
       }
       if (this.closed) return
@@ -137,7 +158,7 @@ export class OpenCodeBridge extends BridgeBase {
         ...(wake ? {} : { resume: false }),
       })
     } catch (e) {
-      this.failDelivery(batch, `session.synthetic failed: ${(e as Error).message}`)
+      this.failDelivery(batch, `session.synthetic failed: ${describeError(e)}`)
       return
     }
     // Only a response naming the matching id is host-accepted evidence (§8.8).

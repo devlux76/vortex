@@ -51,6 +51,12 @@ export class CodexBridge extends BridgeBase {
     writeFileSync(this.copts.turnsFile, JSON.stringify(this.turns), { mode: 0o600 })
   }
 
+  /** Only the selected chat may consume passive context or record a human turn. */
+  protected override acceptsHook (event: Record<string, unknown>): boolean {
+    const session = event.session_id
+    return typeof session === 'string' && session.length > 0 && loadThreadBinding(this.opts.binding)?.thread === session
+  }
+
   /** §8.5: a tool-output wake or an empty prompt is never a human prompt. */
   protected override isMachineTurn (event: Record<string, unknown>): boolean {
     const prompt = typeof event.prompt === 'string' ? event.prompt : ''

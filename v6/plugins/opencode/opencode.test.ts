@@ -465,3 +465,20 @@ test('viewing, dismissing or ignoring mail sends nothing and never blocks agent-
     assert.ok(!authors().includes('operator'))
   })
 })
+
+test('describeError keeps tag/name when a host error has an empty message', async () => {
+  const { describeError } = await import('./bridge.ts')
+  assert.equal(describeError(new Error('boom')), 'boom')
+  assert.equal(describeError({ _tag: 'SessionNotFound', message: '' }), 'SessionNotFound')
+  assert.equal(describeError({ _tag: 'NotFound', message: 'ses_x' }), 'NotFound: ses_x')
+  const named = new Error(''); named.name = 'HttpError'
+  assert.equal(describeError(named), 'HttpError')
+  assert.equal(describeError({ code: 404 }), 'code 404')
+  const marker = 'LOCAL-ONLY-AUTH-SENTINEL'
+  const leaky = describeError({ request: { headers: { authorization: `Bearer ${marker}` } }, cause: { secret: marker }, code: 500 })
+  assert.ok(!leaky.includes(marker), 'no nested host data in failure reasons')
+  assert.equal(leaky, 'code 500')
+  assert.equal(describeError({ request: { headers: { authorization: marker } } }), 'unknown error (non-standard host error)')
+  assert.ok(describeError(new Error('x'.repeat(1000))).length <= 301, 'clipped')
+  assert.equal(describeError(''), 'unknown error')
+})

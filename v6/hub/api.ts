@@ -179,8 +179,16 @@ export class Api {
     // wrapper incl. the fixed peer-data line; 413 before storage/seq advance.
     const fit = fitSingle({ id: 'x', seq: 0, ts: 0, from: principal, scope, room, to, text: body.text, human, reply_author, reply_ts }, this.bounds())
     if (!fit.fits) return json({ error: `rendered batch exceeds bounds (${fit.bytes} bytes / ${fit.codePoints} code points)` }, 413)
-    const stored = this.deps.store.insertMessage({ from: principal, scope, room, to, text: body.text, reply_to, human })
-    this.deps.delivery.onMessageStored(this.deps.store.getMessage(stored.id)!)
+    // Crash-atomic outbox: the message row and every recipient's pending row
+    // commit together, so a crash can never leave a logged message with no
+    // deliveries. Wake timers are armed only after the commit.
+    const text: string = body.text
+    const { stored, wakes } = this.deps.store.atomic(() => {
+      const stored = this.deps.store.insertMessage({ from: principal, scope, room, to, text, reply_to, human })
+      const wakes = this.deps.delivery.routeStored(this.deps.store.getMessage(stored.id)!)
+      return { stored, wakes }
+    })
+    this.deps.delivery.armWakes(wakes)
     return json({ id: stored.id, seq: stored.seq }, 200)
   }
 

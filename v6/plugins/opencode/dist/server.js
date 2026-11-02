@@ -343,6 +343,9 @@ class BridgeBase {
   isMachineTurn(_event) {
     return false;
   }
+  acceptsHook(_event) {
+    return true;
+  }
   loadAccepted() {
     try {
       return JSON.parse(readFileSync2(this.opts.stateFile, "utf8"));
@@ -508,10 +511,19 @@ class BridgeBase {
         reply({ ok: true });
         return;
       }
+      if (!this.acceptsHook(req.event)) {
+        reply({ ok: true });
+        return;
+      }
       if (req.event?.hook_event_name === "UserPromptSubmit" && !this.isMachineTurn(req.event))
         this.humanTurn = true;
       const offer = await this.offerPassive();
       if (offer === undefined) {
+        reply({ ok: true });
+        return;
+      }
+      if (!this.acceptsHook(req.event)) {
+        this.passiveInflight.delete(offer.batch);
         reply({ ok: true });
         return;
       }
@@ -531,7 +543,7 @@ class BridgeBase {
         return;
       }
       const acked = new Promise((resolve) => {
-        sock.data.ack = { batch: offer.batch, resolve };
+        sock.data.ack = { batch: offer.batch, event: req.event, resolve };
       });
       reply({ ok: true, context, batch: offer.batch });
       const timer = setTimeout(() => sock.data.ack?.resolve(false), this.opts.hookAckMs ?? 1e4);
@@ -547,6 +559,11 @@ class BridgeBase {
         return;
       }
       sock.data.ack = undefined;
+      if (!this.acceptsHook(pending.event)) {
+        pending.resolve(false);
+        reply({ ok: false, error: "chat binding changed before acknowledgment" });
+        return;
+      }
       this.persist(req.batch);
       if (this.passive?.batch === req.batch)
         this.passive = undefined;
@@ -610,6 +627,25 @@ class BridgeBase {
 }
 
 // v6/plugins/opencode/bridge.ts
+function describeError(e) {
+  const MAX = 300;
+  const clip = (s) => s.length > MAX ? `${s.slice(0, MAX)}\u2026` : s;
+  if (typeof e === "string")
+    return e.length > 0 ? clip(e) : "unknown error";
+  if (typeof e !== "object" || e === null)
+    return e === undefined || e === null ? "unknown error" : clip(String(e));
+  const o = e;
+  const str = (v) => typeof v === "string" && v.length > 0 ? v : undefined;
+  const tag = str(o._tag) ?? (str(o.name) !== "Error" ? str(o.name) : undefined);
+  const msg = str(o.message);
+  const code = typeof o.code === "string" || typeof o.code === "number" ? String(o.code) : undefined;
+  const parts = [tag, msg].filter((x) => x !== undefined);
+  if (code !== undefined)
+    parts.push(`code ${code}`);
+  if (parts.length > 0)
+    return clip(parts.join(": "));
+  return o instanceof Error ? "Error" : "unknown error (non-standard host error)";
+}
 function batchMessageId(batch) {
   return `msg_vx_${batch}`;
 }
@@ -710,7 +746,7 @@ class OpenCodeBridge extends BridgeBase {
       try {
         await this.oopts.session.wait({ sessionID });
       } catch (e) {
-        this.failDelivery(batch, `session.wait failed: ${e.message}`);
+        this.failDelivery(batch, `session.wait failed: ${describeError(e)}`);
         return;
       }
       if (this.closed)
@@ -728,7 +764,7 @@ class OpenCodeBridge extends BridgeBase {
         ...wake ? {} : { resume: false }
       });
     } catch (e) {
-      this.failDelivery(batch, `session.synthetic failed: ${e.message}`);
+      this.failDelivery(batch, `session.synthetic failed: ${describeError(e)}`);
       return;
     }
     if (admitted?.id !== id) {

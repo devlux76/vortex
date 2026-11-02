@@ -447,6 +447,9 @@ class HubStore {
       reply_ts: row.reply_ts === null ? undefined : row.reply_ts
     };
   }
+  atomic(fn) {
+    return this.db.transaction(fn)();
+  }
   insertMessage(m) {
     const now = Date.now();
     const conversationKey = m.scope === "dm" ? dmPairKey(m.from, m.to[0]) : roomKey(m.room);

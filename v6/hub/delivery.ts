@@ -72,20 +72,38 @@ export class Delivery {
   // routing (§8.2 recipients, §8.4/§8.5 wake vs passive)
   // ------------------------------------------------------------------
 
-  /** Route one freshly stored message to the deliverable bindings. */
+  /**
+   * Route one freshly stored message to the deliverable bindings and arm wake
+   * timers. Prefer `routeStored` inside the insert transaction plus
+   * `armWakes` after commit (crash-atomic outbox; see Api.send).
+   */
   onMessageStored (m: StoredMessage): void {
-    if (m.scope === 'dm') {
-      // §8.2: only the single recipient's bindings receive a DM; never room members.
-      for (const b of this.store.bindingsOf(m.to[0])) this.enqueue(m, b.principal, b.name)
-      return
-    }
-    const room = m.room!
-    for (const b of this.store.deliverableBindingsForRoom(room, m.from)) {
-      this.enqueue(m, b.principal, b.name)
-    }
+    this.armWakes(this.routeStored(m))
   }
 
-  private enqueue (m: StoredMessage, principal: string, name: string): void {
+  /**
+   * Enqueue `m` for every deliverable binding (DB writes only, no timers), so
+   * a caller can run it in the same transaction as the message insert.
+   * Returns the bindings that received a wake-eligible row.
+   */
+  routeStored (m: StoredMessage): Array<{ principal: string; name: string }> {
+    const wakes: Array<{ principal: string; name: string }> = []
+    const targets = m.scope === 'dm'
+      // §8.2: only the single recipient's bindings receive a DM; never room members.
+      ? this.store.bindingsOf(m.to[0])
+      : this.store.deliverableBindingsForRoom(m.room!, m.from)
+    for (const b of targets) {
+      if (this.enqueue(m, b.principal, b.name) === 'wake') wakes.push({ principal: b.principal, name: b.name })
+    }
+    return wakes
+  }
+
+  /** Arm coalesce timers for bindings that got wake rows (after commit). */
+  armWakes (wakes: Array<{ principal: string; name: string }>): void {
+    for (const w of wakes) this.scheduleCoalesce(w.principal, w.name)
+  }
+
+  private enqueue (m: StoredMessage, principal: string, name: string): 'wake' | 'passive' {
     const paused = m.scope === 'dm'
       ? this.store.conversationState(dmPairKey(m.from, m.to[0])).paused
       : this.store.conversationState(`room:${m.room!}`).paused
@@ -94,7 +112,7 @@ export class Delivery {
     const wakeEligible = (namesMe || operatorNoTarget) && !paused
     const kind: 'wake' | 'passive' = wakeEligible ? 'wake' : 'passive'
     this.store.enqueuePending(principal, name, m, kind)
-    if (kind === 'wake') this.scheduleCoalesce(principal, name)
+    return kind
   }
 
   // ------------------------------------------------------------------

@@ -7,7 +7,7 @@ const ROOT = new URL('./', import.meta.url).pathname.replace(/\/$/, '')
 const targets: Array<{ plugin: string; entries: Record<string, string> }> = [
   { plugin: 'claude', entries: { 'server.js': 'plugins/claude/server.ts', 'vx.js': 'cli/vx.ts' } },
   { plugin: 'codex', entries: { 'server.js': 'plugins/codex/server.ts', 'vx.js': 'cli/vx.ts' } },
-  { plugin: 'opencode', entries: { 'server.js': 'plugins/opencode/server.ts' } },
+  { plugin: 'opencode', entries: { 'server.js': 'plugins/opencode/server.ts', 'ready.js': 'plugins/opencode/ready.ts' } },
 ]
 
 let failed = false

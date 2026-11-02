@@ -96,6 +96,25 @@ CREATE TABLE IF NOT EXISTS pending (
   PRIMARY KEY (binding_principal, binding_name, msg_id)
 );
 CREATE INDEX IF NOT EXISTS pending_order ON pending(binding_principal, binding_name, kind, enqueued);
+CREATE TABLE IF NOT EXISTS wake_pushes (
+  binding_principal TEXT NOT NULL,
+  binding_name TEXT NOT NULL,
+  conv TEXT NOT NULL,
+  batch_id TEXT NOT NULL,
+  ts INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS wake_pushes_binding ON wake_pushes(binding_principal, binding_name, ts);
+CREATE TABLE IF NOT EXISTS cooldown_notices (
+  conv TEXT NOT NULL,
+  binding_principal TEXT NOT NULL,
+  binding_name TEXT NOT NULL,
+  cooling_until INTEGER NOT NULL,
+  PRIMARY KEY (conv, binding_principal, binding_name)
+);
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS deliveries (
   id TEXT PRIMARY KEY,
   binding_principal TEXT NOT NULL,
@@ -112,6 +131,19 @@ CREATE TABLE IF NOT EXISTS deliveries (
 
 export const dmPairKey = (a: string, b: string): string => `dm:${[a, b].sort().join('|')}`
 export const roomKey = (room: string): string => `room:${room}`
+/** The §8.5 conversation of a message: the room, or the unordered DM pair. */
+export const convKeyOf = (m: { scope: 'room' | 'dm'; room?: string; from: string; to: string[] }): string =>
+  m.scope === 'dm' ? dmPairKey(m.from, m.to[0]) : roomKey(m.room!)
+
+export interface ConversationRow {
+  conv: string
+  count: number
+  level: number
+  coolingUntil: number | null
+  lastAutoTs: number | null
+  lastCooldownEnd: number | null
+  lastDrainTs: number | null
+}
 
 export class DuplicateBinding extends Error { constructor () { super('binding busy'); this.name = 'DuplicateBinding' } }
 export function tokenHash (token: string): string {
@@ -129,6 +161,33 @@ export class HubStore {
     this.db.exec('PRAGMA journal_mode = WAL;')
     this.db.exec('PRAGMA busy_timeout = 5000;')
     this.db.exec(SCHEMA)
+    this.migrate()
+  }
+
+  /**
+   * A4 schema (idempotent): conversation cooldown columns, pending.conv, and the
+   * one-time conversion of legacy `paused=1` rows into cooldowns. Re-running is a
+   * no-op: added columns are detected, and migrated rows no longer have paused=1.
+   */
+  private migrate (): void {
+    this.db.transaction(() => {
+      const cols = (t: string) => new Set((this.db.prepare(`PRAGMA table_info(${t})`).all() as any[]).map(c => c.name))
+      const conv = cols('conversations')
+      for (const [c, ddl] of [
+        ['cooling_until', 'INTEGER'], ['level', 'INTEGER NOT NULL DEFAULT 0'], ['last_auto_ts', 'INTEGER'],
+        ['last_cooldown_end', 'INTEGER'], ['last_drain_ts', 'INTEGER'],
+      ] as const) if (!conv.has(c)) this.db.exec(`ALTER TABLE conversations ADD COLUMN ${c} ${ddl}`)
+      if (!cols('pending').has('conv')) {
+        this.db.exec('ALTER TABLE pending ADD COLUMN conv TEXT')
+        const rows = this.db.prepare('SELECT p.rowid AS rid, m.scope, m.room, m.fromp, m.to_json FROM pending p JOIN messages m ON m.id = p.msg_id').all() as any[]
+        const upd = this.db.prepare('UPDATE pending SET conv = ? WHERE rowid = ?')
+        for (const r of rows) upd.run(convKeyOf({ scope: r.scope, room: r.room ?? undefined, from: r.fromp, to: JSON.parse(r.to_json) }), r.rid)
+      }
+      this.db.exec('CREATE INDEX IF NOT EXISTS pending_conv ON pending(conv, kind)')
+      this.db.prepare('UPDATE conversations SET cooling_until = ?, level = 1, paused = 0, notice_pending = 0 WHERE paused = 1')
+        .run(Date.now() + this.cfg.cooldownBaseMs)
+      this.db.prepare("INSERT INTO meta (key, value) VALUES ('schema', 'a4') ON CONFLICT(key) DO UPDATE SET value = excluded.value").run()
+    })()
   }
 
   close (): void {
@@ -281,84 +340,195 @@ export class HubStore {
    * Single transaction: bump seq, insert message, join sender to a room,
    * update the conversation counts (§8.5), prune retention (§8.4).
    */
-  insertMessage (m: Omit<StoredMessage, 'id' | 'seq' | 'ts' | 'human' | 'reply_author' | 'reply_ts'> & { human: boolean }): StoredMessage & { conversationKey: string; pausedNotice: boolean } {
+  insertMessage (m: Omit<StoredMessage, 'id' | 'seq' | 'ts' | 'human' | 'reply_author' | 'reply_ts'> & { human: boolean }): StoredMessage & { conversationKey: string; enteredCooldown: boolean; operatorReset: boolean; expiredInline: boolean; resetConvs: string[] } {
     const now = Date.now()
     const conversationKey = m.scope === 'dm' ? dmPairKey(m.from, m.to[0]) : roomKey(m.room!)
     const toJson = JSON.stringify(m.to)
-    const built: StoredMessage & { conversationKey: string; pausedNotice: boolean } = this.db.transaction(() => {
+    const built: StoredMessage & { conversationKey: string; enteredCooldown: boolean; operatorReset: boolean; expiredInline: boolean; resetConvs: string[] } = this.db.transaction(() => {
       const id = ulid(now)
       const seq = (this.db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM messages').get() as any).next as number
       // Resolve reply reference for the (re author HH:MM) label.
       let reply_author: string | undefined = undefined
       let reply_ts: number | undefined = undefined
+      let referenced: StoredMessage | undefined
       if (m.reply_to !== undefined) {
-        const r = this.getMessage(m.reply_to)
-        reply_author = r?.from
-        reply_ts = r?.ts
+        referenced = this.getMessage(m.reply_to)
+        reply_author = referenced?.from
+        reply_ts = referenced?.ts
       }
       this.db.prepare(
         `INSERT INTO messages (id, seq, ts, scope, room, to_json, fromp, text, reply_to, human, reply_author, reply_ts)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(id, seq, now, m.scope, m.room ?? null, toJson, m.from, m.text, m.reply_to ?? null, m.human ? 1 : 0, reply_author ?? null, reply_ts ?? null)
       if (m.scope === 'room') this.addMember(m.room!, m.from)
-      const pausedNotice = this.bumpConversation(conversationKey, m.from, m.human)
+      // A4: decay is evaluated on PRIOR state here, before this message is
+      // enqueued (the caller enqueues after insertMessage, in the same txn).
+      const bump = this.bumpConversation(conversationKey, m.from, m.human, now)
+      const resetConvs: string[] = bump.operatorReset ? [conversationKey] : []
+      // §8.5 (retained by A4): an operator DM reply also resets exactly its
+      // REFERENCED direct conversation; never unrelated pairs, never via a peer.
+      if (m.from === 'operator' && m.scope === 'dm' && referenced !== undefined && referenced.scope === 'dm') {
+        const refConv = dmPairKey(referenced.from, referenced.to[0])
+        if (refConv !== conversationKey && this.operatorResetConversation(refConv, now)) resetConvs.push(refConv)
+      }
       const msg: StoredMessage = { id, seq, ts: now, scope: m.scope, room: m.room, to: m.to, from: m.from, text: m.text, reply_to: m.reply_to, human: m.human, reply_author, reply_ts }
       this.pruneRetention(msg)
-      return { ...msg, conversationKey, pausedNotice }
+      return { ...msg, conversationKey, ...bump, resetConvs }
     })()
     return built
   }
 
-  private bumpConversation (conv: string, from: string, human: boolean): boolean {
+  /**
+   * A4 conversation bookkeeping, inside the message-insert transaction:
+   * operator → immediate reset; plugin human turn → no change; automatic →
+   * (1) decay on prior state, (2) count, (3) enter cooldown at T.
+   */
+  private bumpConversation (conv: string, from: string, human: boolean, now: number): { enteredCooldown: boolean; operatorReset: boolean; expiredInline: boolean } {
+    this.db.prepare('INSERT INTO conversations (conv) VALUES (?) ON CONFLICT(conv) DO NOTHING').run(conv)
     if (from === 'operator') {
-      // Operator message resets the count and lifts the pause (§8.5).
-      this.db.prepare(
-        `INSERT INTO conversations (conv, auto_count, paused, notice_pending) VALUES (?, 0, 0, 0)
-         ON CONFLICT(conv) DO UPDATE SET auto_count = 0, paused = 0`,
-      ).run(conv)
-      return false
+      return { enteredCooldown: false, operatorReset: this.operatorResetConversation(conv, now), expiredInline: false }
     }
-    if (human) {
-      // A plugin-reported human turn neither increments nor resets (§8.5).
-      this.db.prepare('INSERT INTO conversations (conv) VALUES (?) ON CONFLICT(conv) DO NOTHING').run(conv)
-      return false
+    if (human) return { enteredCooldown: false, operatorReset: false, expiredInline: false } // self-reported: neither counts nor resets
+    // A cooldown whose deadline passed but whose timer has not run yet expires
+    // first; the caller must then release held rows on EVERY binding (afterCommit).
+    const expiredInline = this.expireConversation(conv, now)
+    const prior = this.conversationRow(conv)!
+    // (1) Decay check on PRIOR state: genuinely quiet for D (no cooldown, no wake work).
+    if (prior.level > 0 && prior.coolingUntil === null && !this.hasWakeWork(conv)) {
+      const quietSince = Math.max(prior.lastAutoTs ?? 0, prior.lastCooldownEnd ?? 0, prior.lastDrainTs ?? 0)
+      if (now - quietSince >= this.cfg.cooldownDecayMs) this.db.prepare('UPDATE conversations SET level = 0 WHERE conv = ?').run(conv)
     }
-    const row = this.db.prepare('SELECT auto_count, paused FROM conversations WHERE conv = ?').get(conv) as any
-    const prevCount = row?.auto_count ?? 0
-    const prevPaused = row?.paused === 1
-    const count = prevCount + 1
+    // (2) Count.
+    this.db.prepare('UPDATE conversations SET auto_count = auto_count + 1, last_auto_ts = ? WHERE conv = ?').run(now, conv)
+    const cur = this.conversationRow(conv)!
+    // (3) Threshold: level := level + 1, cooling_until = now + C(level).
+    if (cur.coolingUntil === null && cur.count >= this.cfg.loopBreakerLimit) {
+      const level = cur.level + 1
+      const until = now + Math.min(this.cfg.cooldownBaseMs * 2 ** (level - 1), this.cfg.cooldownMaxMs)
+      this.db.prepare('UPDATE conversations SET level = ?, cooling_until = ? WHERE conv = ?').run(level, until, conv)
+      this.recordCooldownNotices(conv, until)
+      return { enteredCooldown: true, operatorReset: false, expiredInline }
+    }
+    return { enteredCooldown: false, operatorReset: false, expiredInline }
+  }
+
+  /** Operator override (A4): end any cooldown, reset count/level. Returns whether it was cooling. */
+  private operatorResetConversation (conv: string, now: number): boolean {
+    this.db.prepare('INSERT INTO conversations (conv) VALUES (?) ON CONFLICT(conv) DO NOTHING').run(conv)
+    const was = this.conversationRow(conv)!
     this.db.prepare(
-      `INSERT INTO conversations (conv, auto_count, paused, notice_pending) VALUES (?, ?, 0, 0)
-       ON CONFLICT(conv) DO UPDATE SET auto_count = excluded.auto_count`,
-    ).run(conv, count)
-    if (!prevPaused && count >= this.cfg.loopBreakerLimit) {
-      this.db.prepare('UPDATE conversations SET paused = 1, notice_pending = 1 WHERE conv = ?').run(conv)
-      return true
+      `UPDATE conversations SET auto_count = 0, level = 0, cooling_until = NULL, paused = 0,
+         last_cooldown_end = CASE WHEN cooling_until IS NOT NULL THEN ? ELSE last_cooldown_end END WHERE conv = ?`,
+    ).run(now, conv)
+    this.db.prepare('DELETE FROM cooldown_notices WHERE conv = ?').run(conv)
+    return was.coolingUntil !== null
+  }
+
+  /** One notice row per binding that receives this conversation (A4 per-binding notice). */
+  recordCooldownNotices (conv: string, until: number): void {
+    let targets: BindingRow[]
+    if (conv.startsWith('dm:')) {
+      const [a, b] = conv.slice(3).split('|')
+      targets = [...this.bindingsOf(a), ...this.bindingsOf(b)]
+    } else {
+      targets = this.deliverableBindingsForRoom(conv.slice(5), '')
     }
-    return false
+    const stmt = this.db.prepare(
+      `INSERT INTO cooldown_notices (conv, binding_principal, binding_name, cooling_until) VALUES (?, ?, ?, ?)
+       ON CONFLICT(conv, binding_principal, binding_name) DO UPDATE SET cooling_until = excluded.cooling_until`,
+    )
+    for (const t of targets) stmt.run(conv, t.principal, t.name, until)
   }
 
-  conversationState (conv: string): { autoCount: number; paused: boolean; noticePending: boolean } {
-    const row = this.db.prepare('SELECT auto_count, paused, notice_pending FROM conversations WHERE conv = ?').get(conv) as any
-    return { autoCount: row?.auto_count ?? 0, paused: row?.paused === 1, noticePending: row?.notice_pending === 1 }
+  conversationRow (conv: string): ConversationRow | undefined {
+    const r = this.db.prepare('SELECT * FROM conversations WHERE conv = ?').get(conv) as any
+    if (r == null) return undefined
+    return { conv: r.conv, count: r.auto_count, level: r.level, coolingUntil: r.cooling_until, lastAutoTs: r.last_auto_ts, lastCooldownEnd: r.last_cooldown_end, lastDrainTs: r.last_drain_ts }
   }
 
-  pausedConversations (): Array<{ conv: string; autoCount: number; noticePending: boolean }> {
-    return (this.db.prepare('SELECT conv, auto_count, notice_pending FROM conversations WHERE paused = 1 ORDER BY conv').all() as any[])
-      .map(r => ({ conv: r.conv, autoCount: r.auto_count, noticePending: r.notice_pending === 1 }))
+  isCooling (conv: string, now: number): boolean {
+    const r = this.db.prepare('SELECT cooling_until FROM conversations WHERE conv = ?').get(conv) as any
+    return r != null && r.cooling_until !== null && r.cooling_until > now
   }
 
-  /** Take a paused-notice marker for render-time addition, once per conversation. */
-  peekConversationNotice (conv: string): string | undefined {
-    const row = this.db.prepare('SELECT notice_pending FROM conversations WHERE conv = ?').get(conv) as any
-    if (row == null || row.notice_pending !== 1) return undefined
-    return `[vx: conversation paused after ${this.cfg.loopBreakerLimit} automatic messages; operator message resumes]`
+  /** Any held, pending or outstanding wake row of the conversation (outstanding rows stay in pending until delivered). */
+  hasWakeWork (conv: string): boolean {
+    return this.db.prepare("SELECT 1 FROM pending WHERE conv = ? AND kind = 'wake' LIMIT 1").get(conv) != null
   }
 
-  takeConversationNotice (conv: string): string | undefined {
-    const text = this.peekConversationNotice(conv)
-    if (text !== undefined) this.db.prepare('UPDATE conversations SET notice_pending = 0 WHERE conv = ?').run(conv)
-    return text
+  private expireConversation (conv: string, now: number): boolean {
+    const r = this.db.prepare(
+      'UPDATE conversations SET auto_count = 0, last_cooldown_end = cooling_until, cooling_until = NULL WHERE conv = ? AND cooling_until IS NOT NULL AND cooling_until <= ?',
+    ).run(conv, now)
+    return r.changes > 0
+  }
+
+  /** Expire every cooldown whose deadline passed; returns the expired conversations. */
+  expireCooldowns (now: number): string[] {
+    return this.db.transaction(() => {
+      const due = (this.db.prepare('SELECT conv FROM conversations WHERE cooling_until IS NOT NULL AND cooling_until <= ?').all(now) as any[]).map(r => r.conv as string)
+      for (const c of due) this.expireConversation(c, now)
+      return due
+    })()
+  }
+
+  nextCoolingExpiry (): number | undefined {
+    const r = this.db.prepare('SELECT MIN(cooling_until) AS t FROM conversations WHERE cooling_until IS NOT NULL').get() as any
+    return r?.t ?? undefined
+  }
+
+  /** Bindings holding wake rows of a conversation (to arm coalesce on release). */
+  bindingsHoldingWake (conv: string): Array<{ principal: string; name: string }> {
+    return (this.db.prepare("SELECT DISTINCT binding_principal AS p, binding_name AS n FROM pending WHERE conv = ? AND kind = 'wake'").all(conv) as any[])
+      .map(r => ({ principal: r.p, name: r.n }))
+  }
+
+  /** Status view (A4): cooling conversations with deadline, level and held wake rows per binding. */
+  coolingConversations (now: number): Array<{ conv: string; until: number; level: number; held: Record<string, number> }> {
+    const rows = this.db.prepare('SELECT conv, cooling_until, level FROM conversations WHERE cooling_until IS NOT NULL AND cooling_until > ? ORDER BY conv').all(now) as any[]
+    return rows.map(r => {
+      const held: Record<string, number> = {}
+      for (const h of this.db.prepare("SELECT binding_principal AS p, binding_name AS n, COUNT(*) AS c FROM pending WHERE conv = ? AND kind = 'wake' GROUP BY p, n").all(r.conv) as any[]) held[`${h.p}/${h.n}`] = h.c
+      return { conv: r.conv, until: r.cooling_until, level: r.level, held }
+    })
+  }
+
+  peekCooldownNotice (conv: string, principal: string, binding: string): string | undefined {
+    const r = this.db.prepare('SELECT cooling_until FROM cooldown_notices WHERE conv = ? AND binding_principal = ? AND binding_name = ?').get(conv, principal, binding) as any
+    if (r == null) return undefined
+    const d = new Date(r.cooling_until)
+    const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+    return `[vx: conversation cooled down after ${this.cfg.loopBreakerLimit} automatic messages until ${hhmm}]`
+  }
+
+  takeCooldownNotice (conv: string, principal: string, binding: string): void {
+    this.db.prepare('DELETE FROM cooldown_notices WHERE conv = ? AND binding_principal = ? AND binding_name = ?').run(conv, principal, binding)
+  }
+
+  // ---- persistent rolling wake budget (A4 §3) ----
+
+  recordWakePush (principal: string, binding: string, conv: string, batchId: string, ts: number): void {
+    this.db.prepare('INSERT INTO wake_pushes (binding_principal, binding_name, conv, batch_id, ts) VALUES (?, ?, ?, ?, ?)').run(principal, binding, conv, batchId, ts)
+    this.db.prepare('DELETE FROM wake_pushes WHERE binding_principal = ? AND binding_name = ? AND ts <= ?').run(principal, binding, ts - this.cfg.wakeWindowMs)
+  }
+
+  /** Wake push timestamps in the rolling window ending at `now`, ascending. */
+  wakePushTimes (principal: string, binding: string, now: number): number[] {
+    return (this.db.prepare('SELECT ts FROM wake_pushes WHERE binding_principal = ? AND binding_name = ? AND ts > ? ORDER BY ts').all(principal, binding, now - this.cfg.wakeWindowMs) as any[]).map(r => r.ts)
+  }
+
+  wakePushCount (principal: string, binding: string, since: number): number {
+    return (this.db.prepare('SELECT COUNT(*) AS c FROM wake_pushes WHERE binding_principal = ? AND binding_name = ? AND ts > ?').get(principal, binding, since) as any).c
+  }
+
+  lastWakePush (principal: string, binding: string): number {
+    return (this.db.prepare('SELECT MAX(ts) AS t FROM wake_pushes WHERE binding_principal = ? AND binding_name = ?').get(principal, binding) as any)?.t ?? 0
+  }
+
+  /** LRS: last wake push time per conversation for this binding (within retained history). */
+  lastServed (principal: string, binding: string): Map<string, number> {
+    const rows = this.db.prepare('SELECT conv, MAX(ts) AS t FROM wake_pushes WHERE binding_principal = ? AND binding_name = ? GROUP BY conv').all(principal, binding) as any[]
+    return new Map(rows.map(r => [r.conv as string, r.t as number]))
   }
 
   // Retention (§8.4): pending rows are never pruned; only delivered/free msgs.
@@ -445,9 +615,9 @@ export class HubStore {
     const bytes = utf8Count(m.text)
     this.db.transaction(() => {
       this.db.prepare(
-        `INSERT INTO pending (binding_principal, binding_name, msg_id, kind, enqueued, message_bytes)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      ).run(principal, binding, m.id, kind, ulid(Date.now()), bytes)
+        `INSERT INTO pending (binding_principal, binding_name, msg_id, kind, enqueued, message_bytes, conv)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(principal, binding, m.id, kind, ulid(Date.now()), bytes, convKeyOf(m))
       const stats = this.pendingStats(principal, binding)
       while (stats.count > this.cfg.pendingMaxMessages || stats.bytes > this.cfg.pendingMaxBytes) {
         const oldest = this.db.prepare(
@@ -548,7 +718,11 @@ export class HubStore {
     this.db.transaction(() => {
       const row = this.getBatch(id)
       if (row != null) {
+        const convs = new Set((this.db.prepare(`SELECT DISTINCT conv FROM pending WHERE binding_principal = ? AND binding_name = ? AND msg_id IN (${row.msgIds.map(() => '?').join(',') || "''"})`)
+          .all(row.principal, row.binding, ...row.msgIds) as any[]).map(r => r.conv as string))
         this.deletePending(row.principal, row.binding, row.msgIds)
+        const now = Date.now()
+        for (const c of convs) if (c !== null && !this.hasWakeWork(c)) this.db.prepare('UPDATE conversations SET last_drain_ts = ? WHERE conv = ?').run(now, c)
         this.db.prepare(
           `UPDATE deliveries SET status = 'delivered', evidence = ? WHERE id = ?`,
         ).run(evidence, id)

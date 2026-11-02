@@ -32,6 +32,7 @@ export async function startHub (over: { cfg?: Partial<HubConfig>; stateDir?: str
   }
   const store = new HubStore(roots.db, cfg)
   const delivery = new Delivery(store, cfg)
+  delivery.start() // A4: expire cooldowns that passed while down; arm the next expiry
   const api = new Api({ cfg, store, delivery })
 
   // Operator credential (§8.10): created by hub initialization, mode 0600,

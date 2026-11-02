@@ -206,8 +206,12 @@ var DEFAULT_CONFIG = {
   wakeCoalesceMs: 2000,
   wakeMinIntervalMs: 1e4,
   wakeHourlyLimit: 60,
+  wakeWindowMs: 3600000,
   sendPerMinute: 30,
   loopBreakerLimit: 12,
+  cooldownBaseMs: 10 * 60000,
+  cooldownMaxMs: 2 * 3600000,
+  cooldownDecayMs: 2 * 3600000,
   pendingMaxMessages: 1000,
   pendingMaxBytes: 4 * 1024 * 1024,
   roomMaxMessages: 1e4,
@@ -317,6 +321,25 @@ CREATE TABLE IF NOT EXISTS pending (
   PRIMARY KEY (binding_principal, binding_name, msg_id)
 );
 CREATE INDEX IF NOT EXISTS pending_order ON pending(binding_principal, binding_name, kind, enqueued);
+CREATE TABLE IF NOT EXISTS wake_pushes (
+  binding_principal TEXT NOT NULL,
+  binding_name TEXT NOT NULL,
+  conv TEXT NOT NULL,
+  batch_id TEXT NOT NULL,
+  ts INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS wake_pushes_binding ON wake_pushes(binding_principal, binding_name, ts);
+CREATE TABLE IF NOT EXISTS cooldown_notices (
+  conv TEXT NOT NULL,
+  binding_principal TEXT NOT NULL,
+  binding_name TEXT NOT NULL,
+  cooling_until INTEGER NOT NULL,
+  PRIMARY KEY (conv, binding_principal, binding_name)
+);
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS deliveries (
   id TEXT PRIMARY KEY,
   binding_principal TEXT NOT NULL,
@@ -332,6 +355,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
 `;
 var dmPairKey = (a, b) => `dm:${[a, b].sort().join("|")}`;
 var roomKey = (room) => `room:${room}`;
+var convKeyOf = (m) => m.scope === "dm" ? dmPairKey(m.from, m.to[0]) : roomKey(m.room);
 class HubStore {
   db;
   cfg;
@@ -342,6 +366,32 @@ class HubStore {
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+  migrate() {
+    this.db.transaction(() => {
+      const cols = (t) => new Set(this.db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name));
+      const conv = cols("conversations");
+      for (const [c, ddl] of [
+        ["cooling_until", "INTEGER"],
+        ["level", "INTEGER NOT NULL DEFAULT 0"],
+        ["last_auto_ts", "INTEGER"],
+        ["last_cooldown_end", "INTEGER"],
+        ["last_drain_ts", "INTEGER"]
+      ])
+        if (!conv.has(c))
+          this.db.exec(`ALTER TABLE conversations ADD COLUMN ${c} ${ddl}`);
+      if (!cols("pending").has("conv")) {
+        this.db.exec("ALTER TABLE pending ADD COLUMN conv TEXT");
+        const rows = this.db.prepare("SELECT p.rowid AS rid, m.scope, m.room, m.fromp, m.to_json FROM pending p JOIN messages m ON m.id = p.msg_id").all();
+        const upd = this.db.prepare("UPDATE pending SET conv = ? WHERE rowid = ?");
+        for (const r of rows)
+          upd.run(convKeyOf({ scope: r.scope, room: r.room ?? undefined, from: r.fromp, to: JSON.parse(r.to_json) }), r.rid);
+      }
+      this.db.exec("CREATE INDEX IF NOT EXISTS pending_conv ON pending(conv, kind)");
+      this.db.prepare("UPDATE conversations SET cooling_until = ?, level = 1, paused = 0, notice_pending = 0 WHERE paused = 1").run(Date.now() + this.cfg.cooldownBaseMs);
+      this.db.prepare("INSERT INTO meta (key, value) VALUES ('schema', 'a4') ON CONFLICT(key) DO UPDATE SET value = excluded.value").run();
+    })();
   }
   close() {
     this.db.close();
@@ -459,62 +509,143 @@ class HubStore {
       const seq = this.db.prepare("SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM messages").get().next;
       let reply_author = undefined;
       let reply_ts = undefined;
+      let referenced;
       if (m.reply_to !== undefined) {
-        const r = this.getMessage(m.reply_to);
-        reply_author = r?.from;
-        reply_ts = r?.ts;
+        referenced = this.getMessage(m.reply_to);
+        reply_author = referenced?.from;
+        reply_ts = referenced?.ts;
       }
       this.db.prepare(`INSERT INTO messages (id, seq, ts, scope, room, to_json, fromp, text, reply_to, human, reply_author, reply_ts)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, seq, now, m.scope, m.room ?? null, toJson, m.from, m.text, m.reply_to ?? null, m.human ? 1 : 0, reply_author ?? null, reply_ts ?? null);
       if (m.scope === "room")
         this.addMember(m.room, m.from);
-      const pausedNotice = this.bumpConversation(conversationKey, m.from, m.human);
+      const bump = this.bumpConversation(conversationKey, m.from, m.human, now);
+      const resetConvs = bump.operatorReset ? [conversationKey] : [];
+      if (m.from === "operator" && m.scope === "dm" && referenced !== undefined && referenced.scope === "dm") {
+        const refConv = dmPairKey(referenced.from, referenced.to[0]);
+        if (refConv !== conversationKey && this.operatorResetConversation(refConv, now))
+          resetConvs.push(refConv);
+      }
       const msg = { id, seq, ts: now, scope: m.scope, room: m.room, to: m.to, from: m.from, text: m.text, reply_to: m.reply_to, human: m.human, reply_author, reply_ts };
       this.pruneRetention(msg);
-      return { ...msg, conversationKey, pausedNotice };
+      return { ...msg, conversationKey, ...bump, resetConvs };
     })();
     return built;
   }
-  bumpConversation(conv, from, human) {
+  bumpConversation(conv, from, human, now) {
+    this.db.prepare("INSERT INTO conversations (conv) VALUES (?) ON CONFLICT(conv) DO NOTHING").run(conv);
     if (from === "operator") {
-      this.db.prepare(`INSERT INTO conversations (conv, auto_count, paused, notice_pending) VALUES (?, 0, 0, 0)
-         ON CONFLICT(conv) DO UPDATE SET auto_count = 0, paused = 0`).run(conv);
-      return false;
+      return { enteredCooldown: false, operatorReset: this.operatorResetConversation(conv, now), expiredInline: false };
     }
-    if (human) {
-      this.db.prepare("INSERT INTO conversations (conv) VALUES (?) ON CONFLICT(conv) DO NOTHING").run(conv);
-      return false;
+    if (human)
+      return { enteredCooldown: false, operatorReset: false, expiredInline: false };
+    const expiredInline = this.expireConversation(conv, now);
+    const prior = this.conversationRow(conv);
+    if (prior.level > 0 && prior.coolingUntil === null && !this.hasWakeWork(conv)) {
+      const quietSince = Math.max(prior.lastAutoTs ?? 0, prior.lastCooldownEnd ?? 0, prior.lastDrainTs ?? 0);
+      if (now - quietSince >= this.cfg.cooldownDecayMs)
+        this.db.prepare("UPDATE conversations SET level = 0 WHERE conv = ?").run(conv);
     }
-    const row = this.db.prepare("SELECT auto_count, paused FROM conversations WHERE conv = ?").get(conv);
-    const prevCount = row?.auto_count ?? 0;
-    const prevPaused = row?.paused === 1;
-    const count = prevCount + 1;
-    this.db.prepare(`INSERT INTO conversations (conv, auto_count, paused, notice_pending) VALUES (?, ?, 0, 0)
-       ON CONFLICT(conv) DO UPDATE SET auto_count = excluded.auto_count`).run(conv, count);
-    if (!prevPaused && count >= this.cfg.loopBreakerLimit) {
-      this.db.prepare("UPDATE conversations SET paused = 1, notice_pending = 1 WHERE conv = ?").run(conv);
-      return true;
+    this.db.prepare("UPDATE conversations SET auto_count = auto_count + 1, last_auto_ts = ? WHERE conv = ?").run(now, conv);
+    const cur = this.conversationRow(conv);
+    if (cur.coolingUntil === null && cur.count >= this.cfg.loopBreakerLimit) {
+      const level = cur.level + 1;
+      const until = now + Math.min(this.cfg.cooldownBaseMs * 2 ** (level - 1), this.cfg.cooldownMaxMs);
+      this.db.prepare("UPDATE conversations SET level = ?, cooling_until = ? WHERE conv = ?").run(level, until, conv);
+      this.recordCooldownNotices(conv, until);
+      return { enteredCooldown: true, operatorReset: false, expiredInline };
     }
-    return false;
+    return { enteredCooldown: false, operatorReset: false, expiredInline };
   }
-  conversationState(conv) {
-    const row = this.db.prepare("SELECT auto_count, paused, notice_pending FROM conversations WHERE conv = ?").get(conv);
-    return { autoCount: row?.auto_count ?? 0, paused: row?.paused === 1, noticePending: row?.notice_pending === 1 };
+  operatorResetConversation(conv, now) {
+    this.db.prepare("INSERT INTO conversations (conv) VALUES (?) ON CONFLICT(conv) DO NOTHING").run(conv);
+    const was = this.conversationRow(conv);
+    this.db.prepare(`UPDATE conversations SET auto_count = 0, level = 0, cooling_until = NULL, paused = 0,
+         last_cooldown_end = CASE WHEN cooling_until IS NOT NULL THEN ? ELSE last_cooldown_end END WHERE conv = ?`).run(now, conv);
+    this.db.prepare("DELETE FROM cooldown_notices WHERE conv = ?").run(conv);
+    return was.coolingUntil !== null;
   }
-  pausedConversations() {
-    return this.db.prepare("SELECT conv, auto_count, notice_pending FROM conversations WHERE paused = 1 ORDER BY conv").all().map((r) => ({ conv: r.conv, autoCount: r.auto_count, noticePending: r.notice_pending === 1 }));
+  recordCooldownNotices(conv, until) {
+    let targets;
+    if (conv.startsWith("dm:")) {
+      const [a, b] = conv.slice(3).split("|");
+      targets = [...this.bindingsOf(a), ...this.bindingsOf(b)];
+    } else {
+      targets = this.deliverableBindingsForRoom(conv.slice(5), "");
+    }
+    const stmt = this.db.prepare(`INSERT INTO cooldown_notices (conv, binding_principal, binding_name, cooling_until) VALUES (?, ?, ?, ?)
+       ON CONFLICT(conv, binding_principal, binding_name) DO UPDATE SET cooling_until = excluded.cooling_until`);
+    for (const t of targets)
+      stmt.run(conv, t.principal, t.name, until);
   }
-  peekConversationNotice(conv) {
-    const row = this.db.prepare("SELECT notice_pending FROM conversations WHERE conv = ?").get(conv);
-    if (row == null || row.notice_pending !== 1)
+  conversationRow(conv) {
+    const r = this.db.prepare("SELECT * FROM conversations WHERE conv = ?").get(conv);
+    if (r == null)
       return;
-    return `[vx: conversation paused after ${this.cfg.loopBreakerLimit} automatic messages; operator message resumes]`;
+    return { conv: r.conv, count: r.auto_count, level: r.level, coolingUntil: r.cooling_until, lastAutoTs: r.last_auto_ts, lastCooldownEnd: r.last_cooldown_end, lastDrainTs: r.last_drain_ts };
   }
-  takeConversationNotice(conv) {
-    const text = this.peekConversationNotice(conv);
-    if (text !== undefined)
-      this.db.prepare("UPDATE conversations SET notice_pending = 0 WHERE conv = ?").run(conv);
-    return text;
+  isCooling(conv, now) {
+    const r = this.db.prepare("SELECT cooling_until FROM conversations WHERE conv = ?").get(conv);
+    return r != null && r.cooling_until !== null && r.cooling_until > now;
+  }
+  hasWakeWork(conv) {
+    return this.db.prepare("SELECT 1 FROM pending WHERE conv = ? AND kind = 'wake' LIMIT 1").get(conv) != null;
+  }
+  expireConversation(conv, now) {
+    const r = this.db.prepare("UPDATE conversations SET auto_count = 0, last_cooldown_end = cooling_until, cooling_until = NULL WHERE conv = ? AND cooling_until IS NOT NULL AND cooling_until <= ?").run(conv, now);
+    return r.changes > 0;
+  }
+  expireCooldowns(now) {
+    return this.db.transaction(() => {
+      const due = this.db.prepare("SELECT conv FROM conversations WHERE cooling_until IS NOT NULL AND cooling_until <= ?").all(now).map((r) => r.conv);
+      for (const c of due)
+        this.expireConversation(c, now);
+      return due;
+    })();
+  }
+  nextCoolingExpiry() {
+    const r = this.db.prepare("SELECT MIN(cooling_until) AS t FROM conversations WHERE cooling_until IS NOT NULL").get();
+    return r?.t ?? undefined;
+  }
+  bindingsHoldingWake(conv) {
+    return this.db.prepare("SELECT DISTINCT binding_principal AS p, binding_name AS n FROM pending WHERE conv = ? AND kind = 'wake'").all(conv).map((r) => ({ principal: r.p, name: r.n }));
+  }
+  coolingConversations(now) {
+    const rows = this.db.prepare("SELECT conv, cooling_until, level FROM conversations WHERE cooling_until IS NOT NULL AND cooling_until > ? ORDER BY conv").all(now);
+    return rows.map((r) => {
+      const held = {};
+      for (const h of this.db.prepare("SELECT binding_principal AS p, binding_name AS n, COUNT(*) AS c FROM pending WHERE conv = ? AND kind = 'wake' GROUP BY p, n").all(r.conv))
+        held[`${h.p}/${h.n}`] = h.c;
+      return { conv: r.conv, until: r.cooling_until, level: r.level, held };
+    });
+  }
+  peekCooldownNotice(conv, principal, binding) {
+    const r = this.db.prepare("SELECT cooling_until FROM cooldown_notices WHERE conv = ? AND binding_principal = ? AND binding_name = ?").get(conv, principal, binding);
+    if (r == null)
+      return;
+    const d = new Date(r.cooling_until);
+    const hhmm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    return `[vx: conversation cooled down after ${this.cfg.loopBreakerLimit} automatic messages until ${hhmm}]`;
+  }
+  takeCooldownNotice(conv, principal, binding) {
+    this.db.prepare("DELETE FROM cooldown_notices WHERE conv = ? AND binding_principal = ? AND binding_name = ?").run(conv, principal, binding);
+  }
+  recordWakePush(principal, binding, conv, batchId, ts) {
+    this.db.prepare("INSERT INTO wake_pushes (binding_principal, binding_name, conv, batch_id, ts) VALUES (?, ?, ?, ?, ?)").run(principal, binding, conv, batchId, ts);
+    this.db.prepare("DELETE FROM wake_pushes WHERE binding_principal = ? AND binding_name = ? AND ts <= ?").run(principal, binding, ts - this.cfg.wakeWindowMs);
+  }
+  wakePushTimes(principal, binding, now) {
+    return this.db.prepare("SELECT ts FROM wake_pushes WHERE binding_principal = ? AND binding_name = ? AND ts > ? ORDER BY ts").all(principal, binding, now - this.cfg.wakeWindowMs).map((r) => r.ts);
+  }
+  wakePushCount(principal, binding, since) {
+    return this.db.prepare("SELECT COUNT(*) AS c FROM wake_pushes WHERE binding_principal = ? AND binding_name = ? AND ts > ?").get(principal, binding, since).c;
+  }
+  lastWakePush(principal, binding) {
+    return this.db.prepare("SELECT MAX(ts) AS t FROM wake_pushes WHERE binding_principal = ? AND binding_name = ?").get(principal, binding)?.t ?? 0;
+  }
+  lastServed(principal, binding) {
+    const rows = this.db.prepare("SELECT conv, MAX(ts) AS t FROM wake_pushes WHERE binding_principal = ? AND binding_name = ? GROUP BY conv").all(principal, binding);
+    return new Map(rows.map((r) => [r.conv, r.t]));
   }
   pruneRetention(m) {
     if (m.scope === "room") {
@@ -564,8 +695,8 @@ class HubStore {
     let nowOverBoundary = false;
     const bytes = utf8Count(m.text);
     this.db.transaction(() => {
-      this.db.prepare(`INSERT INTO pending (binding_principal, binding_name, msg_id, kind, enqueued, message_bytes)
-         VALUES (?, ?, ?, ?, ?, ?)`).run(principal, binding, m.id, kind, ulid(Date.now()), bytes);
+      this.db.prepare(`INSERT INTO pending (binding_principal, binding_name, msg_id, kind, enqueued, message_bytes, conv)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`).run(principal, binding, m.id, kind, ulid(Date.now()), bytes, convKeyOf(m));
       const stats = this.pendingStats(principal, binding);
       while (stats.count > this.cfg.pendingMaxMessages || stats.bytes > this.cfg.pendingMaxBytes) {
         const oldest = this.db.prepare(`SELECT msg_id FROM pending WHERE binding_principal = ? AND binding_name = ? ORDER BY rowid LIMIT 1`).get(principal, binding);
@@ -651,7 +782,12 @@ class HubStore {
     this.db.transaction(() => {
       const row = this.getBatch(id);
       if (row != null) {
+        const convs = new Set(this.db.prepare(`SELECT DISTINCT conv FROM pending WHERE binding_principal = ? AND binding_name = ? AND msg_id IN (${row.msgIds.map(() => "?").join(",") || "''"})`).all(row.principal, row.binding, ...row.msgIds).map((r) => r.conv));
         this.deletePending(row.principal, row.binding, row.msgIds);
+        const now = Date.now();
+        for (const c of convs)
+          if (c !== null && !this.hasWakeWork(c))
+            this.db.prepare("UPDATE conversations SET last_drain_ts = ? WHERE conv = ?").run(now, c);
         this.db.prepare(`UPDATE deliveries SET status = 'delivered', evidence = ? WHERE id = ?`).run(evidence, id);
         this.db.prepare(`DELETE FROM deliveries
            WHERE binding_principal = ? AND binding_name = ? AND status = 'delivered' AND id != ?`).run(row.principal, row.binding, id);

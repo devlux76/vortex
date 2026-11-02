@@ -236,7 +236,7 @@ test('batch limits: max 20 messages per batch', async t => {
   await teardown()
 });
 
-test('loop breaker pauses after limit and resumes on operator message', async t => {
+test('loop breaker cools down after limit (A4) and the operator message ends it', async t => {
   await setup()
   const client = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: aliceToken })
   const binding = 'loop'
@@ -245,16 +245,15 @@ test('loop breaker pauses after limit and resumes on operator message', async t 
   // send enough automatic messages to hit loopBreakerLimit (2)
   await client.send({ text: 'a' })
   await client.send({ text: 'b' })
-  // next automatic message should be paused; status API should show paused conversation
+  // the room conversation is now cooling; status shows the deadline and level
   const status = await client.status()
-  const paused = status.pausedConversations.find((c:any) => c.conv.includes('room:all'))
-  assert.ok(paused, 'conversation paused')
-  // send operator message to resume
+  const cooling = status.cooling.find((c:any) => c.conv === 'room:all')
+  assert.ok(cooling && cooling.until > Date.now() && cooling.level === 1, 'conversation cooling')
+  // operator message ends the cooldown at once
   const opClient = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: operatorToken })
   await opClient.send({ text: 'operator resume', scope: 'room', room: 'all' })
   const status2 = await client.status()
-  const paused2 = status2.pausedConversations.find((c:any) => c.conv.includes('room:all'))
-  assert.ok(!paused2, 'conversation resumed')
+  assert.ok(!status2.cooling.find((c:any) => c.conv === 'room:all'), 'cooldown ended by operator')
   ws.close()
   await teardown()
 })

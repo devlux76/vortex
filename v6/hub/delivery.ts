@@ -5,7 +5,7 @@
 import type { HubStore as Store } from './store.ts'
 import type { HubConfig } from './config.ts'
 import type { StoredMessage, BatchRow } from './store.ts'
-import { dmPairKey } from './store.ts'
+import { convKeyOf } from './store.ts'
 import { ulid } from '../client/ulid.ts'
 import { measure, PLACEHOLDER_BATCH, type Bounds } from '../client/render.ts'
 
@@ -30,8 +30,6 @@ interface BindingRuntime {
   gen: number
   coalesceTimer?: ReturnType<typeof setTimeout>
   deferTimer?: ReturnType<typeof setTimeout>
-  lastWakePush: number
-  wakePushes: number[]
   lastError?: string
 }
 
@@ -54,7 +52,7 @@ export class Delivery {
     const key = Delivery.keyOf(principal, name)
     let r = this.runtimes.get(key)
     if (r === undefined) {
-      r = { principal, name, gen: 0, lastWakePush: 0, wakePushes: [] }
+      r = { principal, name, gen: 0 }
       this.runtimes.set(key, r)
     }
     return r
@@ -103,20 +101,63 @@ export class Delivery {
     for (const w of wakes) this.scheduleCoalesce(w.principal, w.name)
   }
 
+  /**
+   * A4: addressed mail is always a WAKE row, even while its conversation cools;
+   * cooling only holds it at selection time (never converted to passive).
+   */
   private enqueue (m: StoredMessage, principal: string, name: string): 'wake' | 'passive' {
-    const paused = m.scope === 'dm'
-      ? this.store.conversationState(dmPairKey(m.from, m.to[0])).paused
-      : this.store.conversationState(`room:${m.room!}`).paused
     const namesMe = m.to.includes(principal)
     const operatorNoTarget = m.from === 'operator' && m.to.length === 0
-    const wakeEligible = (namesMe || operatorNoTarget) && !paused
+    const wakeEligible = namesMe || operatorNoTarget
     const kind: 'wake' | 'passive' = wakeEligible ? 'wake' : 'passive'
     this.store.enqueuePending(principal, name, m, kind)
     return kind
   }
 
   // ------------------------------------------------------------------
-  // wake pacing (§8.4): coalesce 2 s; ≤1 wake/10 s; ≤60/h per binding
+  // A4 cooldown timers: one timer for the earliest cooling_until
+  // ------------------------------------------------------------------
+
+  private coolingTimer?: ReturnType<typeof setTimeout>
+  private coolingAt?: number
+
+  /** Startup (A4 §4): expire cooldowns that passed while down, then arm the next expiry. */
+  start (): void {
+    this.onCoolingDue()
+  }
+
+  /** After a send commits: arm the expiry timer for a new cooldown; release at once on operator reset. */
+  afterCommit (info: { conversationKey: string; enteredCooldown: boolean; operatorReset: boolean; expiredInline?: boolean; resetConvs?: string[] }): void {
+    if (info.enteredCooldown) this.armCoolingTimer()
+    // Operator resets (own and referenced DM conversation), or an expiry done
+    // inline by this message before the timer ran: release held rows on every binding.
+    const release = new Set<string>(info.resetConvs ?? (info.operatorReset ? [info.conversationKey] : []))
+    if (info.expiredInline === true) release.add(info.conversationKey)
+    for (const c of release) for (const b of this.store.bindingsHoldingWake(c)) this.scheduleCoalesce(b.principal, b.name)
+    if (release.size > 0) this.armCoolingTimer()
+  }
+
+  private armCoolingTimer (): void {
+    const next = this.store.nextCoolingExpiry()
+    if (next === undefined) {
+      if (this.coolingTimer !== undefined) clearTimeout(this.coolingTimer)
+      this.coolingTimer = undefined; this.coolingAt = undefined
+      return
+    }
+    if (this.coolingTimer !== undefined && this.coolingAt === next) return
+    if (this.coolingTimer !== undefined) clearTimeout(this.coolingTimer)
+    this.coolingAt = next
+    this.coolingTimer = setTimeout(() => { this.coolingTimer = undefined; this.coolingAt = undefined; this.onCoolingDue() }, Math.max(0, Math.min(next - Date.now(), 2 ** 31 - 1)))
+  }
+
+  private onCoolingDue (): void {
+    const expired = this.store.expireCooldowns(Date.now())
+    for (const conv of expired) for (const b of this.store.bindingsHoldingWake(conv)) this.scheduleCoalesce(b.principal, b.name)
+    this.armCoolingTimer()
+  }
+
+  // ------------------------------------------------------------------
+  // wake pacing (§8.4, A4 §3): coalesce; min interval; persistent rolling budget
   // ------------------------------------------------------------------
 
   private coalesceTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -135,49 +176,51 @@ export class Delivery {
     r.coalesceTimer = timer
   }
 
-  private hourlyCount (r: BindingRuntime, now: number): number {
-    const cutoff = now - 3_600_000
-    r.wakePushes = r.wakePushes.filter(t => t > cutoff)
-    return r.wakePushes.length
+  /** Earliest instant a NEW wake push is permitted for this binding (persistent, A4 §3). */
+  eligibleAt (principal: string, name: string, now = Date.now()): number {
+    let at = now
+    const last = this.store.lastWakePush(principal, name)
+    if (last !== 0) at = Math.max(at, last + this.cfg.wakeMinIntervalMs)
+    const times = this.store.wakePushTimes(principal, name, now)
+    if (times.length >= this.cfg.wakeHourlyLimit) at = Math.max(at, times[times.length - this.cfg.wakeHourlyLimit] + this.cfg.wakeWindowMs + 1)
+    return at
   }
 
-  private deferWakeUntilBudget (principal: string, name: string): void {
+  private deferWakeUntilBudget (principal: string, name: string, at: number): void {
     const r = this.runtime(principal, name)
     if (r.deferTimer !== undefined) return
-    const now = Date.now()
-    let delay = 0
-    const sinceLast = now - r.lastWakePush
-    if (r.lastWakePush !== 0 && sinceLast < this.cfg.wakeMinIntervalMs) {
-      delay = Math.max(delay, this.cfg.wakeMinIntervalMs - sinceLast)
-    }
-    if (this.hourlyCount(r, now) >= this.cfg.wakeHourlyLimit) {
-      const oldest = Math.min(...r.wakePushes)
-      delay = Math.max(delay, oldest + 3_600_000 - now + 1)
-    }
-    const timer = setTimeout(() => {
+    r.deferTimer = setTimeout(() => {
       r.deferTimer = undefined
       this.attemptWakePush(principal, name)
-    }, Math.min(delay, 60_000))
-    r.deferTimer = timer
+    }, Math.max(0, Math.min(at - Date.now(), 60_000)))
   }
 
   /** Try to push one wake batch for the binding (respects the outstanding slot + budget). */
   attemptWakePush (principal: string, name: string): void {
     const r = this.runtime(principal, name)
-    const ws = r.ws
-    if (ws === undefined) return
+    if (r.ws === undefined) return
     if (this.store.outstandingBatch(principal, name, 'wake') !== undefined) return
     const now = Date.now()
-    if (r.lastWakePush !== 0 && now - r.lastWakePush < this.cfg.wakeMinIntervalMs) {
-      return this.deferWakeUntilBudget(principal, name)
+    const at = this.eligibleAt(principal, name, now)
+    if (at > now) {
+      if (this.selectableWake(principal, name, now).length > 0) this.deferWakeUntilBudget(principal, name, at)
+      return
     }
-    if (this.hourlyCount(r, now) >= this.cfg.wakeHourlyLimit) {
-      return this.deferWakeUntilBudget(principal, name)
-    }
-    const pushed = this.composeAndPush(principal, name, 'wake', true)
-    if (pushed === undefined) return
-    r.lastWakePush = now
-    r.wakePushes.push(now)
+    this.composeAndPush(principal, name, 'wake', true)
+  }
+
+  /** Wake rows not in an outstanding batch and not held by a cooling conversation, in queue order. */
+  private selectableWake (principal: string, name: string, now: number): StoredMessage[] {
+    const excludes = new Set<string>()
+    for (const b of this.store.outstandingBatchesOf(principal, name)) for (const id of b.msgIds) excludes.add(id)
+    const cooling = new Map<string, boolean>()
+    return this.store.pendingMessages(principal, name, 'wake').filter(m => {
+      if (excludes.has(m.id)) return false
+      const c = convKeyOf(m)
+      let held = cooling.get(c)
+      if (held === undefined) { held = this.store.isCooling(c, now); cooling.set(c, held) }
+      return !held
+    })
   }
 
   // ------------------------------------------------------------------
@@ -185,7 +228,7 @@ export class Delivery {
   // ------------------------------------------------------------------
 
   private scopeKeyOf (m: StoredMessage): string {
-    return m.scope === 'dm' ? dmPairKey(m.from, m.to[0]) : `room:${m.room!}`
+    return convKeyOf(m)
   }
 
   private composeAndPush (principal: string, name: string, kind: 'wake' | 'passive', wake: boolean): BatchRow | undefined {
@@ -198,12 +241,30 @@ export class Delivery {
       return this.resend(outstanding)
     }
     if (outstanding !== undefined) return undefined
-    const all = this.store.pendingMessages(principal, name, kind)
-    const excludes = new Set<string>()
-    for (const b of this.store.outstandingBatchesOf(principal, name)) for (const id of b.msgIds) excludes.add(id)
-    const candidates = all.filter(m => !excludes.has(m.id))
+    const now = Date.now()
+    let candidates: StoredMessage[]
+    if (kind === 'wake') {
+      candidates = this.selectableWake(principal, name, now)
+    } else {
+      const excludes = new Set<string>()
+      for (const b of this.store.outstandingBatchesOf(principal, name)) for (const id of b.msgIds) excludes.add(id)
+      candidates = this.store.pendingMessages(principal, name, kind).filter(m => !excludes.has(m.id))
+    }
     if (candidates.length === 0) return undefined
-    const key = this.scopeKeyOf(candidates[0])
+    // A4 §2: LRS chooses the conversation (wake); FIFO chooses rows inside it.
+    let key = this.scopeKeyOf(candidates[0])
+    if (kind === 'wake') {
+      const served = this.store.lastServed(principal, name)
+      let best = Infinity
+      const seen = new Set<string>()
+      for (const m of candidates) {
+        const c = this.scopeKeyOf(m)
+        if (seen.has(c)) continue
+        seen.add(c)
+        const t = served.get(c) ?? -Infinity
+        if (t < best) { best = t; key = c } // first appearance wins ties (oldest head row)
+      }
+    }
     const scoped = candidates.filter(m => this.scopeKeyOf(m) === key)
     const isRoom = key.startsWith('room:')
     // Notices are peeked, not consumed, until a batch is actually built, so a
@@ -214,8 +275,8 @@ export class Delivery {
       const roomHint = isRoom ? `vx log ${key.slice(5)}` : 'vx log --dm'
       allNotices.push(`[vx: ${expired} older messages expired; ${roomHint}]`)
     }
-    const pausedNotice = this.store.peekConversationNotice(key)
-    if (pausedNotice !== undefined) allNotices.push(pausedNotice)
+    const cooldownNotice = this.store.peekCooldownNotice(key, principal, name)
+    if (cooldownNotice !== undefined) allNotices.push(cooldownNotice)
     const pick = (notices: string[]): StoredMessage[] => {
       const out: StoredMessage[] = []
       for (const m of scoped) {
@@ -236,15 +297,19 @@ export class Delivery {
     let picked = pick(notices)
     if (picked.length === 0 && notices.length > 0) { notices = []; picked = pick(notices) }
     if (picked.length === 0) return undefined
-    if (notices.length > 0) {
-      if (expired > 0) this.store.consumeExpiredNotice(principal, name)
-      if (pausedNotice !== undefined) this.store.takeConversationNotice(key)
-    }
     // Real id replaces the constant-length placeholder: sizing holds (all ULIDs
     // are exactly 26 chars, so the wrapper length is id-content-invariant).
     const id = ulid()
-    const batch: BatchRow = { id, principal, binding: name, kind, status: 'pending', msgIds: picked.map(m => m.id), notices, created: Date.now() }
-    this.store.insertBatchRow(batch)
+    const batch: BatchRow = { id, principal, binding: name, kind, status: 'pending', msgIds: picked.map(m => m.id), notices, created: now }
+    // One transaction: batch row, consumed notices and (wake) the permit record.
+    this.store.atomic(() => {
+      if (notices.length > 0) {
+        if (expired > 0) this.store.consumeExpiredNotice(principal, name)
+        if (cooldownNotice !== undefined) this.store.takeCooldownNotice(key, principal, name)
+      }
+      this.store.insertBatchRow(batch)
+      if (kind === 'wake') this.store.recordWakePush(principal, name, key, id, now)
+    })
     const frame: BatchFrame = { type: 'batch', batch: id, wake, messages: picked, notices }
     hosted.send(frame)
     this.startRetryTimer(batch)
@@ -399,6 +464,8 @@ export class Delivery {
     for (const t of this.orderTimers.values()) clearTimeout(t)
     for (const t of this.coalesceTimers.values()) clearTimeout(t)
     for (const t of this.retryTimers.values()) clearTimeout(t)
+    for (const r of this.runtimes.values()) if (r.deferTimer !== undefined) clearTimeout(r.deferTimer)
+    if (this.coolingTimer !== undefined) clearTimeout(this.coolingTimer)
     this.orderTimers.clear(); this.coalesceTimers.clear(); this.retryTimers.clear()
   }
 }

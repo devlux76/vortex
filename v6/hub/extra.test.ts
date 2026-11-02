@@ -309,3 +309,31 @@ test('DM never appears in room stream or room log', async () => {
     sb.ws.close(); sc.ws.close()
   } finally { await env.stop() }
 })
+
+test('send is crash-atomic: failed recipient enqueue stores nothing', async () => {
+  const env = await setup()
+  try {
+    const bob = env.client('bob')
+    const carol = env.client('carol')
+    await bob.bind('o1', ['all'])
+    await carol.bind('c1', ['all'])
+    const store = env.hub.store as any
+    const real = store.enqueuePending.bind(store)
+    // Simulate a crash mid-fan-out: bob's row is written, then carol's fails.
+    store.enqueuePending = (p: string, b: string, m: unknown, k: 'wake' | 'passive') => {
+      if (p === 'carol') throw new Error('simulated crash during enqueue')
+      return real(p, b, m, k)
+    }
+    const failed = await post(env, 'alice', { text: 'lost?', to: ['bob'] })
+    assert.equal(failed.status, 500)
+    assert.equal(env.hub.store.pendingStats('bob', 'o1').count, 0, 'bob row rolled back with the message')
+    assert.equal(store.db.prepare("SELECT COUNT(*) AS c FROM messages WHERE text = 'lost?'").get().c, 0, 'no orphan message')
+    store.enqueuePending = real
+    const ok = await post(env, 'alice', { text: 'kept', to: ['bob'] })
+    assert.equal(ok.status, 200)
+    const { seq } = await ok.json() as { seq: number }
+    assert.equal(store.db.prepare('SELECT MAX(seq) AS m FROM messages').get().m, seq, 'seq not consumed by the rolled-back send')
+    assert.equal(env.hub.store.pendingStats('bob', 'o1').count, 1)
+    assert.equal(env.hub.store.pendingStats('carol', 'c1').count, 1)
+  } finally { await env.stop() }
+})

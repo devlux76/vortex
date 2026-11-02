@@ -270,6 +270,14 @@ export class HubStore {
   }
 
   /**
+   * Run `fn` in one transaction (nested store transactions become savepoints).
+   * Used by the send path so insert + recipient enqueue are all-or-nothing.
+   */
+  atomic<T> (fn: () => T): T {
+    return this.db.transaction(fn)()
+  }
+
+  /**
    * Single transaction: bump seq, insert message, join sender to a room,
    * update the conversation counts (§8.5), prune retention (§8.4).
    */

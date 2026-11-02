@@ -64,7 +64,7 @@ Conclusion: the baseline every surface can rely on is **ordinary MCP tools that 
    - escaping holds (a body containing `</vx>` cannot close the block).
 2. vx_read DM: only the caller's own DMs. Never another pair's, and never via `/v1/dms` (still 403 for non-operators).
 3. Non-consuming: before and after vx_read, pending rows, batch rows, wake_pushes, conversation counts and cooldown state are identical; no frame is pushed.
-4. Arguments: unknown keys rejected; there is no identity or human_turn argument; limit is 1..20; after is a non-negative safe integer; scope/room validation matches vx_send.
+4. Arguments: unknown keys rejected; there is no identity or human_turn argument; limit outside 1..20 is REJECTED, not clamped (the hub endpoint's own `logLimitMax` cap is a separate server-side clamp); after is a non-negative safe integer; scope/room validation matches vx_send.
 5. Each host exposes vx_read with identical schema and behaviour (Claude MCP, Codex MCP, OpenCode tool.transform), via fake hosts. OpenCode is also checked by the real-fork conformance script.
 6. Live acceptance (later, separate): an actual desktop plugin tool call per host. A stdio test does not substitute for that (Codex).
 

@@ -55,7 +55,7 @@ python3 netlab.py down
 - Harness hardening after Codex review:
   - every fault transition is a checked mutation, OBSERVED at both ends (`ip -br link` / `tc qdisc show`) and persisted to `chaos.jsonl`;
   - chaos heals the active fault on any error, SIGINT or SIGTERM and exits nonzero;
-  - `peer-check` uses run-specific remote paths, propagates both peers' exit codes, and validates the paired artifacts (fresh, ok, exact round count, one run id, identical nonce sets) before success. It writes `<run>-verdict.json`.
+  - `peer-check` uses run-specific remote paths, propagates both peers' exit codes, and validates the paired artifacts before success: fresh (UTC), ok, exact round count and unique nonces on both sides, one run id, and per nonce the PING/PONG ids cross-matched (a.sentId = b.replyId, a.replyId = b.sentId) with the same requested, seen and reply scope. It writes `<run>-verdict.json`.
   - `test_netlab.py` holds offline regressions (RED on the old harness).
 - Focused proof: 3 faults (2 blackhole, 1 carrier), each fail and heal observed at both ends; `peer-check` verdict ok with 6/6 paired rounds on a fresh hub.
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Offline regression tests for netlab.py harness logic (no VMs): python3 -m unittest test_netlab"""
+import calendar
 import importlib.util
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -83,9 +85,85 @@ class FaultInjection(Base):
 
 
 def evidence(role, host, nonces, ok=True, started=None, valid=True):
+    # Mirrors peer-check.ts: initiator sentId=PING/replyId=PONG; responder replyId=PING it answered/sentId=its PONG.
     started = started or time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime())
-    return {'role': role, 'host': host, 'ok': ok, 'started': started,
-            'rounds': [{'n': i + 1, 'nonce': n, 'valid': valid} for i, n in enumerate(nonces)]}
+    rounds = []
+    for i, n in enumerate(nonces):
+        ping, pong = f'PING-{n}', f'PONG-{n}'
+        if role == 'initiate':
+            rounds.append({'n': i + 1, 'nonce': n, 'scope': 'room', 'sentId': ping, 'replyId': pong, 'replyScope': 'room', 'valid': valid})
+        else:
+            rounds.append({'n': i + 1, 'nonce': n, 'scope': 'room', 'sentId': pong, 'replyId': ping})
+    return {'role': role, 'host': host, 'ok': ok, 'started': started, 'rounds': rounds}
+
+
+def pair(started=None, count=6):
+    n = [f'r1-{i}' for i in range(1, count + 1)]
+    return evidence('initiate', 'peer-a', n, started=started), evidence('respond', 'peer-b', n, started=started)
+
+
+PROOF = Path.home() / '.cache/vortex-netlab/evidence/20261102T133240'
+
+
+class ValidatePair(unittest.TestCase):
+    def check(self, a, b, rounds=6, run_started=None):
+        return netlab.validate_pair(a, b, rounds, time.time() - 5 if run_started is None else run_started, 0, 0)
+
+    def test_consistent_pair_has_no_problems(self):
+        self.assertEqual(self.check(*pair()), [])
+
+    def test_duplicate_responder_record_fails(self):
+        a, b = pair()
+        b['rounds'].append(dict(b['rounds'][0]))  # 7 responder records for 6 requested rounds
+        self.assertTrue(self.check(a, b))
+
+    def test_wrong_response_id_fails(self):
+        a, b = pair()
+        b['rounds'][0]['sentId'] = 'WRONG-RESPONSE-ID'
+        self.assertTrue(self.check(a, b))
+
+    def test_wrong_ping_id_fails(self):
+        a, b = pair()
+        b['rounds'][2]['replyId'] = 'WRONG-PING-ID'
+        self.assertTrue(self.check(a, b))
+
+    def test_scope_mismatch_fails(self):
+        a, b = pair()
+        a['rounds'][1]['replyScope'] = 'dm'
+        self.assertTrue(self.check(a, b))
+        a, b = pair()
+        b['rounds'][1]['scope'] = 'dm'
+        self.assertTrue(self.check(a, b))
+
+    def test_summer_utc_timestamp_not_false_stale(self):
+        # mktime()-timezone is an hour off under DST; a fresh July artifact must not look stale.
+        old = os.environ.get('TZ')
+        os.environ['TZ'] = 'America/New_York'
+        time.tzset()
+        try:
+            problems = self.check(*pair(started='2026-07-01T12:00:00.000Z'),
+                                  run_started=calendar.timegm((2026, 7, 1, 12, 0, 0, 0, 0, 0)))
+        finally:
+            if old is None:
+                os.environ.pop('TZ', None)
+            else:
+                os.environ['TZ'] = old
+            time.tzset()
+        self.assertEqual(problems, [])
+
+    @unittest.skipUnless(Path(f'{PROOF}-a.json').exists() and Path(f'{PROOF}-b.json').exists(), 'focused-proof artifacts absent')
+    def test_real_focused_proof_and_mutations(self):
+        load = lambda s: json.loads(Path(f'{PROOF}-{s}.json').read_text())
+        a = load('a')
+        started = calendar.timegm(time.strptime(a['started'][:19], '%Y-%m-%dT%H:%M:%S'))
+        rounds = len(a['rounds'])
+        self.assertEqual(self.check(load('a'), load('b'), rounds, started), [])
+        b = load('b')
+        b['rounds'].append(dict(b['rounds'][0]))
+        self.assertTrue(self.check(load('a'), b, rounds, started), 'duplicate responder record accepted')
+        b = load('b')
+        b['rounds'][0]['sentId'] = 'WRONG-RESPONSE-ID'
+        self.assertTrue(self.check(load('a'), b, rounds, started), 'wrong PONG id accepted')
 
 
 class PeerCheck(Base):

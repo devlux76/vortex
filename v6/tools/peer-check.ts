@@ -17,7 +17,12 @@ import { hostname, networkInterfaces } from 'node:os'
 import { VortexClient, type WireApiMessage } from '../client/client.ts'
 import type { Credential } from '../client/credential.ts'
 
-interface Round { n: number; scope: 'room' | 'dm'; nonce: string; sentId?: string; sentSeq?: number; replyId?: string; replyFrom?: string; peerHost?: string; rttMs?: number }
+interface Round {
+  n: number; scope: 'room' | 'dm'; nonce: string; sentId?: string; sentSeq?: number
+  replyId?: string; replyFrom?: string; peerHost?: string; rttMs?: number
+  /** What actually came back (never the requested values): */
+  replyScope?: 'room' | 'dm'; replyRoom?: string; replyRecipients?: string[]; replyTo?: string; valid?: boolean; invalid?: string
+}
 
 function flags (argv: string[]): Map<string, string> {
   const m = new Map<string, string>()
@@ -58,7 +63,9 @@ export async function main (argv: string[]): Promise<number> {
   const client = new VortexClient(cred)
   try { await client.bind(binding, ['all']) } catch (e) { evidence.error = `bind failed: ${(e as Error).message}`; return finish(1) }
 
-  const waiters: Array<(m: WireApiMessage) => boolean> = []
+  // Every PONG from the peer is buffered: a reply may arrive before our own send's HTTP response returns.
+  const pongs: WireApiMessage[] = []
+  const arrivals: Array<() => void> = []
   let done = false
   const seenHost = (h: string | undefined): void => { if (h !== undefined && !evidence.peerHostsSeen.includes(h)) evidence.peerHostsSeen.push(h) }
   const parse = (text: string): { kind: string; nonce: string; host?: string } | undefined => {
@@ -84,7 +91,7 @@ export async function main (argv: string[]): Promise<number> {
             void client.send(reply).then(r => evidence.rounds.push({ n: evidence.rounds.length + 1, scope: m.scope as 'room' | 'dm', nonce: p.nonce, replyId: m.id, replyFrom: peer, peerHost: p.host, sentId: r.id, sentSeq: r.seq }))
           }
           if (role === 'respond' && p.kind === 'DONE') done = true
-          for (let i = waiters.length - 1; i >= 0; i--) if (waiters[i](m)) waiters.splice(i, 1)
+          if (p.kind === 'PONG') { pongs.push(m); arrivals.splice(0).forEach(w => w()) }
         }
         if (!done) client.pull(ws)
       },
@@ -101,28 +108,49 @@ export async function main (argv: string[]): Promise<number> {
     return finish(evidence.rounds.length > 0 ? 0 : 1)
   }
 
+  /** Resolves with the first buffered PONG carrying `nonce` (already arrived or arriving before the deadline). */
+  const waitPong = async (nonce: string, ms: number): Promise<WireApiMessage> => {
+    const end = Date.now() + ms
+    while (true) {
+      const hit = pongs.find(m => parse(m.text)?.nonce === nonce)
+      if (hit !== undefined) return hit
+      const left = end - Date.now()
+      if (left <= 0) throw new Error(`no PONG for ${nonce} within deadline`)
+      await Promise.race([new Promise<void>(r => arrivals.push(r)), new Promise(r => setTimeout(r, Math.min(left, 1000)))])
+    }
+  }
+  /** The reply must answer our exact message, in the same scope, addressed back to us. */
+  const checkReply = (m: WireApiMessage, scope: 'room' | 'dm', sentId: string): string | undefined => {
+    if (m.reply_to !== sentId) return `reply_to ${m.reply_to ?? '(missing)'} does not reference our PING ${sentId}`
+    if (m.scope !== scope) return `reply scope ${m.scope} differs from PING scope ${scope}`
+    if (scope === 'room' && m.room !== 'all') return `room reply in ${m.room ?? '(none)'}, expected all`
+    if (scope === 'room' && !m.to.includes(me)) return `room reply not addressed to ${me}`
+    if (scope === 'dm' && !(m.to.length === 1 && m.to[0] === me)) return `DM reply recipients ${JSON.stringify(m.to)}, expected [${me}]`
+    return undefined
+  }
+
   const run = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
   for (let n = 1; n <= rounds; n++) {
     const scope: 'room' | 'dm' = n % 2 === 1 ? 'room' : 'dm'
     const nonce = `${run}-${n}`
     const round: Round = { n, scope, nonce }
     evidence.rounds.push(round)
-    const got = new Promise<WireApiMessage>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error(`round ${n} (${scope}) no PONG within deadline`)), Math.max(1000, deadline - Date.now()))
-      waiters.push(m => { const p = parse(m.text); if (p?.kind === 'PONG' && p.nonce === nonce) { clearTimeout(t); resolve(m); return true } return false })
-    })
     const t0 = Date.now()
     const text = `vx-peer-check PING ${nonce} host=${evidence.host}`
     try {
       const r = await client.send(scope === 'dm' ? { scope: 'dm', to: [peer], text } : { scope: 'room', room: 'all', to: [peer], text })
       round.sentId = r.id; round.sentSeq = r.seq
-      const m = await got
+      const m = await waitPong(nonce, Math.max(1000, deadline - Date.now()))
       round.rttMs = Date.now() - t0; round.replyId = m.id; round.replyFrom = m.from; round.peerHost = parse(m.text)?.host
+      round.replyScope = m.scope; round.replyRoom = m.room; round.replyRecipients = [...m.to]; round.replyTo = m.reply_to
+      const problem = checkReply(m, scope, r.id)
+      round.valid = problem === undefined
+      if (problem !== undefined) { round.invalid = problem; evidence.error = `round ${n} (${scope}): ${problem}`; break }
     } catch (e) { evidence.error = (e as Error).message; break }
   }
   try { await client.send({ scope: 'dm', to: [peer], text: `vx-peer-check DONE ${run} host=${evidence.host}` }) } catch { /* responder times out instead */ }
   ws.close()
-  const complete = evidence.error === undefined && evidence.rounds.every(r => r.rttMs !== undefined)
+  const complete = evidence.error === undefined && evidence.rounds.length === rounds && evidence.rounds.every(r => r.valid === true)
   return finish(complete ? 0 : 1)
 }
 

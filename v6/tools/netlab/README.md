@@ -41,3 +41,15 @@ python3 netlab.py down
 - `--loop-limit N` and `--wake-hourly-limit N` raise the hub's §8.5/A4 loop breaker and its per-binding hourly wake budget for transport-only runs, so pacing behaviour doesn't mask network behaviour.
   - Without them, a long run correctly stalls once a binding uses its 60 wake permits per rolling hour, which persist across runs and hub restarts.
   - That stall was observed once: mail stayed pending at the hub, nothing was lost.
+
+## Results (2026-11-02)
+- Run 4: fresh hub, `wan` impairment, 10 random core-link failures (3 silent blackholes, 7 carrier losses, 6 of them on peer-a's own uplinks).
+  - `peer-check` completed 30/30 rounds on both sides; every PONG was validated (reply_to, scope, addressee).
+  - Impairment audit 14/14 before and after.
+  - Round trip min/median/max 4.7/10.0/13.0 s; 10 s is the hub's wake pacing.
+- Earlier runs found three tooling bugs and confirmed one hub behaviour:
+  - a heal step that dropped impairment (fixed);
+  - a self-matching `pkill` that skipped the hub wipe (fixed);
+  - stale replayed mail fooling the kit (fixed, with a regression test);
+  - the persistent 60/h wake budget correctly holding mail (confirmed).
+

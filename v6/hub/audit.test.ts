@@ -109,3 +109,64 @@ test('47d23e9: a late failed frame from the current owner cannot reopen a delive
     assert.equal(s.outstandingBatch('bob', 'main', 'wake'), undefined)
   } finally { d.stop() }
 }))
+
+// ---- Claude findings, self-confirmed RED on ace2dde before the fix ----
+
+import { logLine, recentLine, type WireMessage } from '../client/render.ts'
+import { loadHubConfig } from './config.ts'
+import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
+
+const CONTROL = /[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/
+
+test('F14: human listings never pass terminal control from peer text', () => {
+  const evil = 'hi \u001b]52;c;cHduZWQ=\u0007 \u001b[2J\u001b[8m hidden \u009b31m \u007f ‮gnirts'
+  const m: WireMessage = { id: '01ABCDEFGHJKMNPQRSTVWXYZ01', seq: 1, ts: 0, from: 'peer', scope: 'room', room: 'all', to: [], text: evil, human: false }
+  for (const line of [logLine(m), recentLine(m)]) {
+    assert.ok(!CONTROL.test(line), `raw control character in ${JSON.stringify(line)}`)
+    assert.ok(line.includes('\\x1b]52;c;'), 'escape shown visibly, not dropped')
+    assert.ok(line.includes('\\u202e'))
+  }
+})
+
+test('F4: hub.json rejects wrong types, out-of-range numbers and unknown keys', async () => {
+  const dir = mkdtempSync(`${tmpdir()}/vortex-hubcfg-`)
+  const prev = process.env.XDG_CONFIG_HOME
+  process.env.XDG_CONFIG_HOME = dir
+  mkdirSync(`${dir}/vortex`)
+  const load = (v: unknown) => { writeFileSync(`${dir}/vortex/hub.json`, JSON.stringify(v)); return loadHubConfig() }
+  try {
+    const bad: unknown[] = [
+      { wakeMinIntervalMs: '10000' }, { wakeHourlyLimit: 0 }, { wakeHourlyLimit: -1 }, { batchMaxMessages: 1.5 },
+      { sendPerMinute: null }, { nope: 1 }, { tls: { lsten: ':7901' } }, { tls: { listen: 7901 } }, { tls: 'x' },
+      { listen: 7900 }, { listen: 'host:notaport' }, [], null,
+    ]
+    for (const b of bad) await assert.rejects(load(b), `accepted ${JSON.stringify(b)}`)
+    const ok = await load({ listen: '127.0.0.1:7900', wakeMinIntervalMs: 0, wakeCoalesceMs: 0, wakeHourlyLimit: 90, tls: { listen: ':7901' } })
+    assert.equal(ok.wakeHourlyLimit, 90)
+    assert.equal(ok.wakeMinIntervalMs, 0)
+    assert.equal(ok.tlsListen, ':7901')
+  } finally {
+    if (prev === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = prev
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('F27: the Codex hook command finds the plugin root by substitution, PLUGIN_ROOT or CLAUDE_PLUGIN_ROOT', async () => {
+  const hooks = JSON.parse(readFileSync(new URL('../plugins/codex/hooks/hooks.json', import.meta.url), 'utf8')).hooks
+  const command: string = hooks.UserPromptSubmit[0].hooks[0].command
+  const root = mkdtempSync(`${tmpdir()}/vortex-hookroot-`)
+  try {
+    mkdirSync(`${root}/dist`)
+    writeFileSync(`${root}/dist/vx.js`, 'console.log("reached " + process.argv.slice(2).join(" "))')
+    const run = async (cmd: string, env: Record<string, string>) => {
+      const base = { ...process.env } as Record<string, string>
+      delete base.PLUGIN_ROOT; delete base.CLAUDE_PLUGIN_ROOT
+      const p = Bun.spawn(['sh', '-c', cmd], { env: { ...base, ...env }, stdout: 'pipe', stderr: 'pipe' })
+      return (await new Response(p.stdout).text()).trim()
+    }
+    const want = 'reached hook context --host codex'
+    assert.equal(await run(command.split('${PLUGIN_ROOT}').join(root), {}), want, 'host substitutes ${PLUGIN_ROOT} textually')
+    assert.equal(await run(command, { PLUGIN_ROOT: root }), want, 'host exports PLUGIN_ROOT')
+    assert.equal(await run(command, { CLAUDE_PLUGIN_ROOT: root }), want, 'host exports only CLAUDE_PLUGIN_ROOT')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})

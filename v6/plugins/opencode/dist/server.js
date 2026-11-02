@@ -286,6 +286,12 @@ function measure(compose, bounds = DEFAULT_BOUNDS) {
     return { text, codePoints: cp, bytes, fits: false, overflow: "bytes" };
   return { text, codePoints: cp, bytes, fits: true, overflow: "none" };
 }
+function printable(s) {
+  return s.replace(/[\u0000-\u001f\u007f-\u009f\u202A-\u202E\u2066-\u2069]/g, (c) => {
+    const code = c.charCodeAt(0);
+    return code <= 255 ? `\\x${code.toString(16).padStart(2, "0")}` : `\\u${code.toString(16).padStart(4, "0")}`;
+  });
+}
 function listingLabel(m) {
   const head = headerLabel(m);
   return m.to.length > 0 ? `${head}\u2192${m.to.join(",")}` : head;
@@ -295,7 +301,7 @@ function listingDestination(m) {
 }
 function recentLine(m) {
   const body = normalizeBody(m.text).replace(/\n/g, " ").slice(0, 80);
-  return `#${m.id.slice(-6)} ${listingLabel(m)} ${listingDestination(m)} ${body}`;
+  return `#${m.id.slice(-6)} ${listingLabel(m)} ${listingDestination(m)} ${printable(body)}`;
 }
 
 // v6/client/read.ts

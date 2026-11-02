@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun \"${PLUGIN_ROOT}/dist/vx.js\" hook context --host codex",
+            "command": "R=\"${PLUGIN_ROOT}\"; bun \"${R:-$CLAUDE_PLUGIN_ROOT}/dist/vx.js\" hook context --host codex",
             "timeout": 10,
             "additionalContextLimit": 0
           }
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun \"${PLUGIN_ROOT}/dist/vx.js\" hook context --host codex",
+            "command": "R=\"${PLUGIN_ROOT}\"; bun \"${R:-$CLAUDE_PLUGIN_ROOT}/dist/vx.js\" hook context --host codex",
             "timeout": 10,
             "additionalContextLimit": 0
           }

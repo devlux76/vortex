@@ -248,6 +248,19 @@ export function parseBatch (block: string): ParsedBatch {
   return parsed
 }
 
+/**
+ * Human listings go to a terminal or a host UI, so peer text must not carry
+ * terminal control: C0/C1 controls, DEL and bidirectional overrides become
+ * visible escapes (ESC/OSC sequences could otherwise clear the screen, hide
+ * text or write the clipboard; bidi overrides could reorder what is shown).
+ */
+export function printable (s: string): string {
+  return s.replace(/[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/g, c => {
+    const code = c.charCodeAt(0)
+    return code <= 0xff ? `\\x${code.toString(16).padStart(2, '0')}` : `\\u${code.toString(16).padStart(4, '0')}`
+  })
+}
+
 /** Compact identity for human listings: `from` or `from→to1,to2` (no colon). */
 function listingLabel (m: Pick<WireMessage, 'from' | 'human' | 'to'>): string {
   const head = headerLabel(m)
@@ -264,11 +277,11 @@ function listingDestination (m: Pick<WireMessage, 'scope' | 'room'>): string {
  */
 export function logLine (m: WireMessage): string {
   const body = normalizeBody(m.text).replace(/\n/g, ' ')
-  return `#${m.id.slice(-6)} ${m.id} ${listingLabel(m)} ${listingDestination(m)} ${body.slice(0, 80)}`
+  return `#${m.id.slice(-6)} ${m.id} ${listingLabel(m)} ${listingDestination(m)} ${printable(body.slice(0, 80))}`
 }
 
 /** `vx-recent` listing line (A1: `#<ref> <from>→<to> [room|dm] <first 80 chars>`). */
 export function recentLine (m: WireMessage): string {
   const body = normalizeBody(m.text).replace(/\n/g, ' ').slice(0, 80)
-  return `#${m.id.slice(-6)} ${listingLabel(m)} ${listingDestination(m)} ${body}`
+  return `#${m.id.slice(-6)} ${listingLabel(m)} ${listingDestination(m)} ${printable(body)}`
 }

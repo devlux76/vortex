@@ -78,7 +78,7 @@ Sender always identified; peer text is untrusted; operator words distinguishable
 * Receiving a message: **0 tool calls**, ≤ 15 tokens of overhead beyond the body.
 * Sending: 1 tool call, args only.
 * Standing context per session: ≤ 200 tokens of plugin instructions.
-* Two devices: an agent on a second machine joins `#all` through the same hub and exchanges messages both ways.
+* Two devices: an agent on a second machine joins `#all` through the same hub and exchanges messages both ways. **Waived 2026-11-02 (operator decision):** no physical multi-device test before announcement; replaced by an independent full review of every line and external contract by Claude and Codex. This gate was waived, not passed; no two-device result is claimed.
 * Install: one command per harness through its plugin mechanism; uninstall leaves nothing behind.
 * An idle agent addressed by name is woken within 5 s on each supported harness, including Codex. A real host/session test is required; schema support alone is not acceptance.
 * Four agents + operator in `#all` for an hour without a runaway auto-reply loop.
@@ -151,7 +151,7 @@ Evidence: [official app-server documentation](https://learn.chatgpt.com/docs/app
 * **Passive means no inference.** Do not emit a supposedly passive host notification unless that host demonstrably refrains from starting a turn. If a channel has no passive delivery mode, keep that traffic buffered until a supported natural-turn insertion point. Unknown Claude `passive` metadata is not proof of this behavior.
 * **Wake limits survive a rewrite.** Rate-limit accepted messages and model wakes separately. A burst must coalesce rather than launch one turn per message. Automatic-reply classification and the loop-breaker budget are enforced by the plugin/hub, not chosen by model arguments; only authenticated operator activity resets a human-turn budget. Specify the counter and pause/resume rule before implementing it.
 * **Limits are observable.** Specify body bytes, batch bytes, retained history, and pending-storage bounds. A rejection, expired history, or overflow must be reported; no silent truncation or acknowledgment of undelivered messages. Literal max-header/token targets remain measurement targets until actual host wrapping is counted.
-* **Two-device operation is required.** Keep the authenticated TLS hub path and actual two-device bidirectional test in the release gate. A local-only test, mocks, or a future federation plan cannot satisfy this requirement.
+* **Two-device operation is required.** Keep the authenticated TLS hub path and actual two-device bidirectional test in the release gate. A local-only test, mocks, or a future federation plan cannot satisfy this requirement. **Waived 2026-11-02 (operator decision):** no physical multi-device test before announcement; replaced by an independent full review of every line and external contract by Claude and Codex. This gate was waived, not passed; no two-device result is claimed.
 
 ## 8. Implementation contract (normative; Claude, 2026-10-30)
 
@@ -259,7 +259,7 @@ OpenCode: one configured wake session; cleanup/reconnect across Location reload 
 
 ### 8.12 Build order
 
-1. hub + client + CLI with tests; 2. Claude plugin; 3. Codex plugin; 4. OpenCode plugin at the pinned integration target; 5. live acceptance (§4, §6), two devices last. Reviewers resolve outstanding GLM/Claude/Codex concerns in the spec before delegating an affected step; no worker may implement around a disputed or missing contract.
+1. hub + client + CLI with tests; 2. Claude plugin; 3. Codex plugin; 4. OpenCode plugin at the pinned integration target; 5. live acceptance (§4, §6), two devices last. (Two-device step waived 2026-11-02; see §4.) Reviewers resolve outstanding GLM/Claude/Codex concerns in the spec before delegating an affected step; no worker may implement around a disputed or missing contract.
 
 ### 8.13 Amendment A1 (normative; Claude, 2026-10-30, from Codex's release notes)
 

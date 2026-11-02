@@ -117,35 +117,55 @@ export function configDir (): string {
   return `${xdg.replace(/\/$/, '')}/vortex`
 }
 
+/** Numeric keys that may be 0 (pacing intervals); every other numeric key must be at least 1. */
+const ZERO_OK = new Set<string>(['wakeCoalesceMs', 'wakeMinIntervalMs'])
+const TLS_KEYS = { listen: 'tlsListen', certPath: 'tlsCertPath', keyPath: 'tlsKeyPath' } as const
+
 /**
  * Hub config file `$XDG_CONFIG_HOME/vortex/hub.json` with §8.x defaults.
- * Unknown keys are rejected so a typo never silently changes behavior.
+ * Unknown keys, wrong types and out-of-range numbers are rejected so a typo
+ * never silently changes behavior (a quoted number would otherwise make the
+ * pacing arithmetic concatenate strings; 0 would disable a limit).
  */
 export async function loadHubConfig (): Promise<HubConfig> {
   const roots = hubRoots()
+  let text: string
   try {
-    const text = await Bun.file(roots.hubConfigPath).text()
-    const raw = JSON.parse(text) as Record<string, unknown>
-    const cfg: HubConfig = { ...DEFAULT_CONFIG }
-    for (const [key, value] of Object.entries(raw)) {
-      if (key === 'listen') { cfg.listen = String(value); continue }
-      if (key === 'tls') {
-        const t = value as Record<string, unknown>
-        if (t.listen !== undefined) cfg.tlsListen = String(t.listen)
-        if (t.certPath !== undefined) cfg.tlsCertPath = String(t.certPath)
-        if (t.keyPath !== undefined) cfg.tlsKeyPath = String(t.keyPath)
-        continue
-      }
-      if (key in cfg && typeof value === 'number') {
-        ;(cfg as any)[key] = value
-        continue
-      }
-      if (key in cfg && typeof value === 'string') { (cfg as any)[key] = value; continue }
-      throw new Error(`unknown hub config key: ${key}`)
-    }
-    return cfg
+    text = await Bun.file(roots.hubConfigPath).text()
   } catch (e) {
     if ((e as Error & { code?: string }).code === 'ENOENT') return { ...DEFAULT_CONFIG }
     throw e
   }
+  return parseHubConfig(JSON.parse(text))
+}
+
+/** Validates a parsed hub.json object against the defaults' keys and types. */
+export function parseHubConfig (raw: unknown): HubConfig {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new Error('hub config must be a JSON object')
+  const cfg: HubConfig = { ...DEFAULT_CONFIG }
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (key === 'listen') {
+      if (typeof value !== 'string') throw new Error('hub config listen must be a string')
+      parseListen(value)
+      cfg.listen = value
+      continue
+    }
+    if (key === 'tls') {
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('hub config tls must be an object')
+      for (const [tk, tv] of Object.entries(value as Record<string, unknown>)) {
+        if (!(tk in TLS_KEYS)) throw new Error(`unknown hub config key: tls.${tk}`)
+        if (typeof tv !== 'string' || tv.length === 0) throw new Error(`hub config tls.${tk} must be a non-empty string`)
+        if (tk === 'listen') parseListen(tv)
+        cfg[TLS_KEYS[tk as keyof typeof TLS_KEYS]] = tv
+      }
+      continue
+    }
+    if (!(key in DEFAULT_CONFIG) || typeof (DEFAULT_CONFIG as unknown as Record<string, unknown>)[key] !== 'number') throw new Error(`unknown hub config key: ${key}`)
+    const min = ZERO_OK.has(key) ? 0 : 1
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min) {
+      throw new Error(`hub config ${key} must be a whole number >= ${min}, got ${JSON.stringify(value)}`)
+    }
+    ;(cfg as unknown as Record<string, number>)[key] = value
+  }
+  return cfg
 }

@@ -1,5 +1,7 @@
 # VORTEX v6 two-device acceptance (spec 154 release gate)
 
+**Waived 2026-11-02 (operator decision):** no physical multi-device test before announcement; replaced by an independent full review of every line and external contract by Claude and Codex. This gate was waived, not passed; no two-device result is claimed. The kit below remains for anyone who wants to run it.
+
 Kit: `device-hub.ts` starts a hub whose TLS listener binds to a reachable LAN address, enrolls `dev-a` and `dev-b`, and writes pinned `wss://` credentials. `peer-check.ts` runs one side per machine. Rounds alternate `#all` room posts and DMs, PING then PONG, both directions, and each side writes JSON evidence. The ~10 s round trips are the spec's wake pacing (at most 1 wake per binding per 10 s).
 
 Labels used for evidence:

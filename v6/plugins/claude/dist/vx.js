@@ -182,6 +182,12 @@ function normalizeBody(text) {
 function headerLabel(m) {
   return m.from === "operator" ? "operator (human)" : m.from;
 }
+function printable(s) {
+  return s.replace(/[\u0000-\u001f\u007f-\u009f\u202A-\u202E\u2066-\u2069]/g, (c) => {
+    const code = c.charCodeAt(0);
+    return code <= 255 ? `\\x${code.toString(16).padStart(2, "0")}` : `\\u${code.toString(16).padStart(4, "0")}`;
+  });
+}
 function listingLabel(m) {
   const head = headerLabel(m);
   return m.to.length > 0 ? `${head}\u2192${m.to.join(",")}` : head;
@@ -191,7 +197,7 @@ function listingDestination(m) {
 }
 function logLine(m) {
   const body = normalizeBody(m.text).replace(/\n/g, " ");
-  return `#${m.id.slice(-6)} ${m.id} ${listingLabel(m)} ${listingDestination(m)} ${body.slice(0, 80)}`;
+  return `#${m.id.slice(-6)} ${m.id} ${listingLabel(m)} ${listingDestination(m)} ${printable(body.slice(0, 80))}`;
 }
 
 // v6/hub/store.ts
@@ -250,6 +256,7 @@ function configDir() {
   const xdg = process.env.XDG_CONFIG_HOME ?? home(".config");
   return `${xdg.replace(/\/$/, "")}/vortex`;
 }
+var ZERO_OK = new Set(["wakeCoalesceMs", "wakeMinIntervalMs"]);
 
 // v6/client/ulid.ts
 var ENCODING = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";

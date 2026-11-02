@@ -114,9 +114,11 @@ that should receive wakes:
 bun v6/cli/vx.ts codex bind [<thread-id>]
 ```
 
-Without an argument it uses `$CODEX_THREAD_ID`. Wakes start a turn through the
-running Codex app-server (`turn/start` with tool output). VORTEX never creates
-a new chat to receive mail.
+Without an argument it uses `$CODEX_THREAD_ID`. Wakes are designed to start a
+turn through the running Codex app-server (`turn/start` with tool output), but
+that path is not yet proven on the Codex desktop app (see A5). The `vx_read`
+tool and hook context do not depend on it. VORTEX never creates a new chat to
+receive mail.
 
 ### OpenCode
 

@@ -1,4 +1,4 @@
-# Amendment A5 (DRAFT for cross-review): connector front door, the Slack/Teams way
+# Amendment A5 (normative; approved, see Status): connector front door, the Slack/Teams way
 
 Status: design APPROVED by Codex review of b5c15e2, with two precision corrections recorded below. Claude, 2026-11-02, bug:18f6172. Codex proposed the core (vx_read); the operator asked that every host's plugin work "the way the Slack and Teams plugins work".
 Implementation split (agreed):

@@ -43,7 +43,7 @@ python3 netlab.py down
   - That stall was observed once: mail stayed pending at the hub, nothing was lost.
 
 ## Results (2026-11-02)
-- Run 4: fresh hub, `wan` impairment, 10 random core-link failures (3 silent blackholes, 7 carrier losses, 6 of them on peer-a's own uplinks).
+- Run 4: fresh hub, `wan` impairment. Its 10 core-link failures (3 silent blackholes, 7 carrier losses, 6 of them on peer-a's own uplinks) come from the pre-fix chaos log: those mutations were unchecked (`check=False`), so the count is NOT observed evidence. The message exchange itself is valid.
   - `peer-check` completed 30/30 rounds on both sides; every PONG was validated (reply_to, scope, addressee).
   - Impairment audit 14/14 before and after.
   - Round trip min/median/max 4.7/10.0/13.0 s; 10 s is the hub's wake pacing.
@@ -52,4 +52,10 @@ python3 netlab.py down
   - a self-matching `pkill` that skipped the hub wipe (fixed);
   - stale replayed mail fooling the kit (fixed, with a regression test);
   - the persistent 60/h wake budget correctly holding mail (confirmed).
+- Harness hardening after Codex review:
+  - every fault transition is a checked mutation, OBSERVED at both ends (`ip -br link` / `tc qdisc show`) and persisted to `chaos.jsonl`;
+  - chaos heals the active fault on any error, SIGINT or SIGTERM and exits nonzero;
+  - `peer-check` uses run-specific remote paths, propagates both peers' exit codes, and validates the paired artifacts (fresh, ok, exact round count, one run id, identical nonce sets) before success. It writes `<run>-verdict.json`.
+  - `test_netlab.py` holds offline regressions (RED on the old harness).
+- Focused proof: 3 faults (2 blackhole, 1 carrier), each fail and heal observed at both ends; `peer-check` verdict ok with 6/6 paired rounds on a fresh hub.
 

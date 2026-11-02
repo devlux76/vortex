@@ -31,6 +31,7 @@ import json
 import os
 import random
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -65,6 +66,7 @@ LINK_ORDER = sorted(LINKS)
 CORE_LINKS = [l for l in LINK_ORDER if not l.startswith('lan-')]
 assert all(len(v) == 2 for v in LINKS.values()), LINKS
 
+PROFILE_SIGNATURES = {'wan': ('delay 15ms', 'loss 1%'), 'lossy': ('delay 40ms', 'gemodel')}
 PROFILES = {
     # Per core hop, per direction; a peer-to-hub path crosses two core hops.
     # Uncorrelated 'loss random': correlated netem loss ('loss P CORR') drops
@@ -299,37 +301,94 @@ def cmd_impair(a) -> None:
     print(f'impairment {a.profile} on {len(impair_targets())} interfaces ({len(CORE_LINKS)} core links, both directions)')
 
 
-def set_link_fault(link: str, mode: str, on: bool) -> None:
+def _profile() -> str:
+    return (RUN / 'profile').read_text().strip() if (RUN / 'profile').exists() else 'clear'
+
+
+def _expect_qdisc(observed: str, want: str) -> bool:
+    if want == 'blackhole':
+        return 'netem' in observed and 'loss 100%' in observed
+    if want == 'clear':
+        return 'netem' not in observed
+    return all(tok in observed for tok in PROFILE_SIGNATURES[want])
+
+
+def set_link_fault(link: str, mode: str, on: bool) -> dict:
     """carrier: interface down (both ends notice at once); blackhole: interface up but
-    100% loss, so OSPF only notices after its dead interval (4 s)."""
-    prof = (RUN / 'profile').read_text().strip() if (RUN / 'profile').exists() else 'clear'
+    100% loss, so OSPF only notices after its dead interval (4 s).
+
+    Every mutation is checked (ssh check=True) and then OBSERVED at both ends; the
+    observed link state / qdisc is returned as evidence. Any failure raises."""
+    prof = _profile()
+    observed = {}
     for n in LINKS[link]:
         if mode == 'carrier':
-            ssh(n, f'sudo ip link set dev {link} {"down" if on else "up"}', check=False)
-        elif on:
-            ssh(n, f'sudo tc qdisc del dev {link} root 2>/dev/null; sudo tc qdisc add dev {link} root netem loss random 100%', check=False)
+            ssh(n, f'sudo ip link set dev {link} {"down" if on else "up"}')
+            seen = ssh(n, f'ip -br link show dev {link}').strip()
+            state = seen.split()[1] if len(seen.split()) > 1 else '?'
+            ok = (state == 'DOWN') if on else (state in ('UP', 'UNKNOWN'))
         else:
-            restore = f'sudo tc qdisc add dev {link} root netem {PROFILES[prof]} limit 10000' if prof in PROFILES else 'true'
-            ssh(n, f'sudo tc qdisc del dev {link} root 2>/dev/null; {restore}', check=False)
+            if on:
+                ssh(n, f'sudo tc qdisc del dev {link} root 2>/dev/null; sudo tc qdisc add dev {link} root netem loss random 100%')
+            else:
+                restore = f'; sudo tc qdisc add dev {link} root netem {PROFILES[prof]} limit 10000' if prof in PROFILES else ''
+                ssh(n, f'sudo tc qdisc del dev {link} root 2>/dev/null{restore}')
+            seen = ssh(n, f'sudo tc qdisc show dev {link}').strip()
+            ok = _expect_qdisc(seen, 'blackhole' if on else prof)
+        observed[n] = seen
+        if not ok:
+            raise RuntimeError(f'{n}:{link} {mode} {"fail" if on else "heal"} not observed: {seen!r}')
+    return observed
 
 
 def cmd_chaos(a) -> None:
-    """Fail random core links (carrier loss or silent blackhole) for --down s, every --every s, for --duration s."""
+    """Fail random core links (carrier loss or silent blackhole) for --down s, every --every s, for --duration s.
+
+    Writes one JSON line per transition to chaos.jsonl with the observed state at both
+    ends. On any error or interruption (SIGINT/SIGTERM) the active fault is healed
+    (checked) before exiting nonzero."""
     if not (RUN / 'profile').exists():
         raise SystemExit('chaos: no recorded impairment profile; run `impair <profile|clear>` first so heals restore it')
     end = time.time() + a.duration
     rnd = random.Random(a.seed)
-    log = RUN / 'chaos.log'
+    log = RUN / 'chaos.jsonl'
+
+    def record(f, **rec) -> None:
+        rec = {'ts': time.strftime('%H:%M:%S'), **rec}
+        f.write(json.dumps(rec) + '\n'); f.flush()
+        print(json.dumps(rec), flush=True)
+
+    def interrupted(signum, _frame):
+        raise KeyboardInterrupt(f'signal {signum}')
+
+    old = signal.signal(signal.SIGTERM, interrupted)
+    active = None
+    failures = 0
     with log.open('a') as f:
-        while time.time() < end:
-            link = rnd.choice(CORE_LINKS)
-            mode = a.mode if a.mode != 'mixed' else rnd.choice(['carrier', 'blackhole'])
-            set_link_fault(link, mode, True)
-            f.write(f'{time.strftime("%H:%M:%S")} fail {link} {mode}\n'); f.flush()
-            time.sleep(a.down)
-            set_link_fault(link, mode, False)
-            f.write(f'{time.strftime("%H:%M:%S")} heal {link} {mode}\n'); f.flush()
-            time.sleep(max(0, a.every - a.down))
+        record(f, event='start', profile=_profile(), duration=a.duration, every=a.every, down=a.down, mode=a.mode, seed=a.seed)
+        try:
+            while time.time() < end:
+                link = rnd.choice(CORE_LINKS)
+                mode = a.mode if a.mode != 'mixed' else rnd.choice(['carrier', 'blackhole'])
+                active = (link, mode)
+                record(f, event='fail', link=link, mode=mode, observed=set_link_fault(link, mode, True))
+                time.sleep(a.down)
+                record(f, event='heal', link=link, mode=mode, observed=set_link_fault(link, mode, False))
+                active = None
+                time.sleep(max(0, a.every - a.down))
+        except BaseException as e:  # error or interruption: heal the active fault before leaving
+            failures += 1
+            record(f, event='error', error=f'{type(e).__name__}: {e}', active=list(active) if active else None)
+            if active is not None:
+                try:
+                    record(f, event='heal-on-error', link=active[0], mode=active[1], observed=set_link_fault(active[0], active[1], False))
+                except Exception as he:
+                    record(f, event='heal-on-error-failed', link=active[0], mode=active[1], error=str(he))
+        finally:
+            signal.signal(signal.SIGTERM, old)
+            record(f, event='end', failures=failures)
+    if failures:
+        raise SystemExit(1)
 
 
 def cmd_deploy_vortex(a) -> None:
@@ -359,26 +418,84 @@ def cmd_deploy_vortex(a) -> None:
     print('deployed: hub at wss://10.10.9.10:7844 (pinned TLS); dev-a -> peer-a, dev-b -> peer-b')
 
 
+def validate_pair(a: dict, b: dict, rounds: int, run_started: float, rc_a: int | None, rc_b: int | None) -> list:
+    """Paired evidence checks before success. Returns a list of problems (empty = valid)."""
+    problems = []
+    if rc_a != 0:
+        problems.append(f'initiator exit {rc_a}')
+    if rc_b != 0:
+        problems.append(f'responder exit {rc_b}')
+    for side, e, role in (('a', a, 'initiate'), ('b', b, 'respond')):
+        if e.get('role') != role:
+            problems.append(f'{side}: role {e.get("role")!r} != {role}')
+        if e.get('ok') is not True:
+            problems.append(f'{side}: ok={e.get("ok")!r} error={e.get("error")!r}')
+        try:
+            started = time.mktime(time.strptime(str(e.get('started', ''))[:19], '%Y-%m-%dT%H:%M:%S')) - time.timezone
+        except ValueError:
+            started = 0
+        if started < run_started - 120:
+            problems.append(f'{side}: stale evidence (started {e.get("started")!r} before this run)')
+    ra = a.get('rounds') or []
+    rb = b.get('rounds') or []
+    if len(ra) != rounds:
+        problems.append(f'a: {len(ra)} rounds, expected {rounds}')
+    if not all(r.get('valid') is True for r in ra):
+        problems.append('a: not every round valid')
+    run_ids = {str(r.get('nonce', '')).rsplit('-', 1)[0] for r in ra}
+    if len(run_ids) != 1:
+        problems.append(f'a: rounds span run ids {sorted(run_ids)}')
+    b_nonces = {str(r.get('nonce', '')) for r in rb}
+    a_nonces = {str(r.get('nonce', '')) for r in ra}
+    if b_nonces != a_nonces:
+        problems.append(f'pairing: responder answered {len(b_nonces)} nonces, initiator sent {len(a_nonces)}; mismatch {sorted(a_nonces ^ b_nonces)[:4]}')
+    if a.get('host') == b.get('host'):
+        problems.append('a and b report the same host')
+    return problems
+
+
 def cmd_peer_check(a) -> None:
     ev = RUN / 'evidence'
     ev.mkdir(exist_ok=True)
     tag = time.strftime('%Y%m%dT%H%M%S')
+    remote = f'runs/{tag}'
     timeout_ms = max(120_000, a.rounds * 20_000)
-    ssh('peer-b', f'cd ~/vx && setsid -f ./bun v6/tools/peer-check.ts --credential ~/dev-b.json --role respond --peer dev-a '
-                  f'--timeout-ms {timeout_ms + 60_000} --out ~/b.evidence > ~/b.out 2>&1 < /dev/null &')
+    run_started = time.time()
+    for node in ('peer-a', 'peer-b'):
+        ssh(node, f'mkdir -p ~/{remote}')
+    # Responder in the background; its exit code is written to a run-specific rc file.
+    ssh('peer-b', f'cd ~/vx && setsid -f sh -c \'./bun v6/tools/peer-check.ts --credential ~/dev-b.json --role respond --peer dev-a '
+                  f'--timeout-ms {timeout_ms + 60_000} --out ~/{remote}/b.json > ~/{remote}/b.out 2>&1 < /dev/null; '
+                  f'echo $? > ~/{remote}/b.rc\' > /dev/null 2>&1 < /dev/null')  # wrapper I/O detached too, or ssh waits on it
     time.sleep(3)
-    t0 = time.time()
     out = ssh('peer-a', f'cd ~/vx && ./bun v6/tools/peer-check.ts --credential ~/dev-a.json --role initiate --peer dev-b '
-                        f'--rounds {a.rounds} --timeout-ms {timeout_ms} --out ~/a.evidence; echo EXIT=$?', check=False,
-              timeout=timeout_ms // 1000 + 120)
-    print(out.strip()[-1500:])
-    for i in range(60):
-        if 'ok' in ssh('peer-b', 'cat ~/b.out 2>/dev/null', check=False):
+                        f'--rounds {a.rounds} --timeout-ms {timeout_ms} --out ~/{remote}/a.json > ~/{remote}/a.out 2>&1; '
+                        f'echo $? > ~/{remote}/a.rc; cat ~/{remote}/a.rc', check=False, timeout=timeout_ms // 1000 + 120)
+    rc_a = int(out.strip().splitlines()[-1]) if out.strip().splitlines() and out.strip().splitlines()[-1].strip().isdigit() else None
+    rc_b = None
+    for _ in range(90):  # the responder exits after DONE or its own timeout
+        got = ssh('peer-b', f'cat ~/{remote}/b.rc 2>/dev/null', check=False).strip()
+        if got.isdigit():
+            rc_b = int(got)
             break
         time.sleep(2)
-    for who, node in [('a', 'peer-a'), ('b', 'peer-b')]:
-        scp_from(node, f'{who}.evidence', str(ev / f'{tag}-{who}.json'))
-    print(f'elapsed {time.time() - t0:.0f}s; evidence {ev}/{tag}-a.json, {tag}-b.json')
+    local = {}
+    problems = []
+    for side, node in (('a', 'peer-a'), ('b', 'peer-b')):
+        dst = ev / f'{tag}-{side}.json'
+        try:
+            scp_from(node, f'{remote}/{side}.json', str(dst))
+            local[side] = json.loads(dst.read_text())
+        except Exception as e:
+            problems.append(f'{side}: no evidence for this run ({type(e).__name__})')
+            local[side] = {}
+    problems += validate_pair(local['a'], local['b'], a.rounds, run_started, rc_a, rc_b)
+    verdict = {'run': tag, 'rounds': a.rounds, 'rc_a': rc_a, 'rc_b': rc_b, 'ok': not problems, 'problems': problems,
+               'elapsed_s': round(time.time() - run_started), 'evidence': [str(ev / f'{tag}-a.json'), str(ev / f'{tag}-b.json')]}
+    (ev / f'{tag}-verdict.json').write_text(json.dumps(verdict, indent=2) + '\n')
+    print(json.dumps(verdict))
+    if problems:
+        raise SystemExit(1)
 
 
 def main() -> None:

@@ -85,6 +85,19 @@ Sender always identified; peer text is untrusted; operator words distinguishable
 * OpenCode targets fork `88e0591d104706814c7c47d66a8a01de24bd46a8`. Its plugin/client surfaces are moving; a fork update must pass the binding tests and update §8.8 before being supported. No claim of compatibility with untested upstream or nightly revisions.
 * The optional OpenCode human commands send the person's exact text into the selected conference or DM reply, labelled `operator (human)`, without requiring a model turn or a reply to routine peer traffic.
 
+**Acceptance status for v6.0 (2026-11-02, from the Claude and Codex release audit; "not run" means no record exists):**
+
+| Criterion | Status |
+| --- | --- |
+| Native read/send through the plugin | **Passed** on Codex desktop (MCP room read, DM send, own-DM read; authenticated receipt) and Claude Code 2.1.316 CLI with channels off and a real model. |
+| OpenCode delivery | **Passed** on the real fork `4d272be` with a deterministic stub model: synthetic wake, read, send, reply, restart and offline replay, plus the A4 soak. |
+| Idle wake within 5 s | **Not run** for Claude (no live channels-on idle test) and **not proven** for Codex (the tested desktop exposes no reachable app-server proxy). OpenCode: stub model only. |
+| Codex passive hook context | **Not proven** on the desktop: it needs a chat bound through the same unreachable proxy. |
+| Two devices | **Waived**, not passed (see above). |
+| One install command per harness; clean uninstall | **Not met.** Setup takes several steps per harness (v6/README.md), and uninstall leaves credential and batch-state files. |
+| Four agents + operator for an hour | **Not run.** Netlab peers are protocol clients, not frontier models collaborating. |
+| 0 tool calls and ≤ 15 tokens per receive; ≤ 200 standing tokens | **Not measured** on live hosts. |
+
 ## 5. Questions for reviewers
 
 1. Codex: the API and hook findings are recorded in §6. Live plugin-to-desktop delivery remains an acceptance test, not an assumed capability.

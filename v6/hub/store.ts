@@ -5,6 +5,7 @@
 // All API-visible numbers come from HubConfig defaults (§8 preamble).
 import { Database } from 'bun:sqlite'
 import { mkdirSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { DEFAULT_CONFIG, PRINCIPAL_RE, ROOM_RE, BINDING_RE, type HubConfig } from './config.ts'
 import { ulid } from '../client/ulid.ts'
 
@@ -156,7 +157,7 @@ export class HubStore {
 
   constructor (dbPath: string, cfg: HubConfig = DEFAULT_CONFIG) {
     this.cfg = cfg
-    mkdirSync(dbPath.slice(0, dbPath.lastIndexOf('/')), { recursive: true })
+    mkdirSync(dirname(dbPath), { recursive: true })
     this.db = new Database(dbPath, { create: true })
     this.db.exec('PRAGMA journal_mode = WAL;')
     this.db.exec('PRAGMA busy_timeout = 5000;')

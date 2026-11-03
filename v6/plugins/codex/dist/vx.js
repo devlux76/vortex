@@ -206,6 +206,7 @@ function logLine(m) {
 // v6/hub/store.ts
 import { Database } from "bun:sqlite";
 import { mkdirSync as mkdirSync2 } from "fs";
+import { dirname } from "path";
 
 // v6/hub/config.ts
 var DEFAULT_CONFIG = {
@@ -374,7 +375,7 @@ class HubStore {
   cfg;
   constructor(dbPath, cfg = DEFAULT_CONFIG) {
     this.cfg = cfg;
-    mkdirSync2(dbPath.slice(0, dbPath.lastIndexOf("/")), { recursive: true });
+    mkdirSync2(dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath, { create: true });
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA busy_timeout = 5000;");

@@ -973,7 +973,7 @@ function checkFork(ctx, accept = []) {
   if (m === null)
     return { ok: false, reason: `unverified fork build "${version}": expected <version>-local.<sha> at revision ${PINNED_REVISION.slice(0, 9)}` };
   const sha = m[1];
-  if (PINNED_REVISION.startsWith(sha) || accept.some((a) => a.startsWith(sha) || sha.startsWith(a)))
+  if (PINNED_REVISION.startsWith(sha) || accept.some((a) => /^[0-9a-f]{7,40}$/.test(a) && (a.startsWith(sha) || sha.startsWith(a))))
     return { ok: true };
   return { ok: false, reason: `fork revision ${sha} is not the verified revision ${PINNED_REVISION.slice(0, 9)}; verify \xA78.8 against it, then add it to options.acceptRevisions` };
 }

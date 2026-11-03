@@ -221,6 +221,7 @@ export abstract class BridgeBase {
         try { lock.run('BEGIN IMMEDIATE') } catch { await Bun.sleep(25); continue }
         try {
           if (await this.socketLive()) { this.busy = true; return }
+          if (this.closed) return // stopped during the probe: never bind afterwards
           try { unlinkSync(this.sockPath) } catch { /* absent */ }
           if (this.bindSocket()) return
         } finally {
@@ -375,7 +376,26 @@ export abstract class BridgeBase {
     if (this.reconnectTimer !== undefined) clearTimeout(this.reconnectTimer)
     if (this.listenRetry !== undefined) clearTimeout(this.listenRetry)
     try { this.ws?.close() } catch { /* already closed */ }
-    this.server?.stop()
-    if (this.ownsSocket) { try { unlinkSync(this.sockPath) } catch { /* gone */ } }
+    if (!this.ownsSocket) { this.server?.stop(); return }
+    // Shutdown is part of the same critical section as start (Codex socket-stop
+    // race): while this lock is held nobody else can bind, so the path is still
+    // our socket and only ours is removed. If the lock is contended, leave the
+    // file; the next starter probes it dead and replaces it under the lock.
+    let lock: Database | undefined
+    let held = false
+    try {
+      lock = new Database(`${this.sockPath}.lock`, { create: true })
+      lock.run('PRAGMA busy_timeout = 0')
+      lock.run('BEGIN IMMEDIATE')
+      held = true
+    } catch { /* contended or unavailable: do not unlink */ }
+    try {
+      this.server?.stop()
+      this.ownsSocket = false
+      if (held) { try { unlinkSync(this.sockPath) } catch { /* gone */ } }
+    } finally {
+      if (held) { try { lock?.run('ROLLBACK') } catch { /* released on close */ } }
+      lock?.close()
+    }
   }
 }

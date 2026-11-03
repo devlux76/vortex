@@ -591,6 +591,8 @@ class BridgeBase {
             this.busy = true;
             return;
           }
+          if (this.closed)
+            return;
           try {
             unlinkSync(this.sockPath);
           } catch {}
@@ -775,11 +777,33 @@ class BridgeBase {
     try {
       this.ws?.close();
     } catch {}
-    this.server?.stop();
-    if (this.ownsSocket) {
-      try {
-        unlinkSync(this.sockPath);
-      } catch {}
+    if (!this.ownsSocket) {
+      this.server?.stop();
+      return;
+    }
+    let lock;
+    let held = false;
+    try {
+      lock = new Database(`${this.sockPath}.lock`, { create: true });
+      lock.run("PRAGMA busy_timeout = 0");
+      lock.run("BEGIN IMMEDIATE");
+      held = true;
+    } catch {}
+    try {
+      this.server?.stop();
+      this.ownsSocket = false;
+      if (held) {
+        try {
+          unlinkSync(this.sockPath);
+        } catch {}
+      }
+    } finally {
+      if (held) {
+        try {
+          lock?.run("ROLLBACK");
+        } catch {}
+      }
+      lock?.close();
     }
   }
 }

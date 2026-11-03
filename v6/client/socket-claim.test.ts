@@ -29,6 +29,50 @@ function bridgeChild (root: string, sock: string, role: string): ReturnType<type
   return Bun.spawn([process.execPath, `${root}/child.ts`], { env: { ...process.env, PROBE_ROLE: role, SOCK: sock }, stdout: 'ignore', stderr: 'inherit' })
 }
 
+function connectable (path: string): Promise<boolean> {
+  return new Promise(resolve => {
+    const c = require('node:net').connect(path)
+    c.once('connect', () => { c.destroy(); resolve(true) })
+    c.once('error', () => resolve(false))
+  })
+}
+
+test('cross-process shutdown (Codex socket-stop race): an old server stopping never removes a new owner socket', { timeout: 30000 }, async () => {
+  const root = setupCopy(false)
+  // Scheduling barrier only: pause role A inside stop(), right after its listener closes.
+  const file = `${root}/v6/client/bridge-base.ts`
+  const code = readFileSync(file, 'utf8')
+  const anchor = '      this.server?.stop()\n      this.ownsSocket = false\n'
+  assert.ok(code.includes(anchor), 'stop barrier anchor present')
+  writeFileSync(file, code.replace(anchor, `${anchor}      if (process.env.PROBE_ROLE === 'A') { writeFileSync(this.sockPath + '.stopping', ''); const t = Date.now(); while (!existsSync(this.sockPath + '.stop-go') && Date.now() - t < 20000) Bun.sleepSync(5) }\n`))
+  writeFileSync(`${root}/child.ts`, readFileSync(`${root}/child.ts`, 'utf8').replace('await Bun.sleep(30000)',
+    `if (process.env.PROBE_ROLE === 'A') { while (!require('node:fs').existsSync(process.env.SOCK + '.stop')) await Bun.sleep(5); b.stop(); process.exit(0) }
+await Bun.sleep(30000)`))
+  const sock = `${root}/hook.sock`
+  const kids: Array<ReturnType<typeof Bun.spawn>> = []
+  try {
+    const a = bridgeChild(root, sock, 'A'); kids.push(a)
+    await until(`${sock}.started-A`)
+    writeFileSync(`${sock}.stop`, '')
+    await until(`${sock}.stopping`)
+    kids.push(bridgeChild(root, sock, 'B'))
+    await until(`${sock}.started-B`, 8000)
+    assert.equal(JSON.parse(readFileSync(`${sock}.started-B`, 'utf8')).ownsSocket, false, 'B cannot bind while A is stopping under the lock')
+    writeFileSync(`${sock}.stop-go`, '')
+    await a.exited
+    const end = Date.now() + 5000
+    let live = false
+    while (!live && Date.now() < end) { live = await connectable(sock); if (!live) await sleep(100) }
+    assert.ok(live, 'B binds after A finished, and A cleanup did not remove it')
+    await sleep(300)
+    assert.ok(await connectable(sock), 'B socket still live')
+  } finally {
+    for (const k of kids) k.kill()
+    await Promise.all(kids.map(k => k.exited))
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 function setupCopy (barrier: boolean): string {
   const root = mkdtempSync(join(tmpdir(), 'vortex-claim-'))
   cpSync(V6, `${root}/v6`, { recursive: true, filter: src => !src.includes('/dist/') && !src.includes('node_modules') })

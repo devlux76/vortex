@@ -8,6 +8,7 @@ import { connect } from 'node:net'
 import { once } from 'node:events'
 import { createInterface } from 'node:readline'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { startHub } from '../../hub/main.ts'
 import { VortexClient } from '../../client/client.ts'
 import { FIXED_PEER_DATA_LINE, parseBatch } from '../../client/render.ts'
@@ -16,7 +17,7 @@ import { saveThreadBinding } from './binding.ts'
 import { TOOL } from './server.ts'
 import { READ_TOOL } from '../../client/read.ts'
 
-const ROOT = new URL('../../../', import.meta.url).pathname.replace(/\/$/, '')
+const ROOT = fileURLToPath(new URL('../../../', import.meta.url)).replace(/\/$/, '')
 const SERVER = `${ROOT}/v6/plugins/codex/server.ts`
 const FAKE = `${ROOT}/v6/plugins/codex/fake-appserver.ts`
 const VX = `${ROOT}/v6/cli/vx.ts`

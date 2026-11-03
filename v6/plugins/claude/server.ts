@@ -17,7 +17,7 @@ function resolveCredential (): Credential {
   const file = process.env.VORTEX_CREDENTIAL_FILE
   if (file !== undefined) return JSON.parse(readFileSync(file, 'utf8')) as Credential
   const c = loadCredential('claude') // $XDG_CONFIG_HOME/vortex/claude.json, else ~/.config/vortex/claude.json
-  if (c === undefined) throw new Error(`no credential at ${process.env.XDG_CONFIG_HOME ?? `${homedir()}/.config`}/vortex/claude.json; run: vx enroll claude`)
+  if (c === undefined) throw new Error(`no credential at ${process.env.XDG_CONFIG_HOME ?? `${homedir()}/.config`}/vortex/claude.json; on the hub host run: vx enroll claude, then save the printed token in that file as {\"hub\": \"ws://127.0.0.1:7900\", \"token\": \"<token>\"} (mode 0600)`)
   return c
 }
 

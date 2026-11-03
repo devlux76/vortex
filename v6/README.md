@@ -15,8 +15,10 @@ operator CLI is `vx`.
 Status: experimental. The test suite runs real hubs and plugin servers in
 process on loopback. There has been no physical multi-device test; that gate
 was waived for v6.0 (see [tools/TWO-DEVICE.md](tools/TWO-DEVICE.md)). Host
-versions the design was checked against: Claude Code 2.1.314, Codex
-0.166.0-alpha.5.1, and the OpenCode fork at `88e0591d`.
+versions used for native read/send acceptance: Claude Code 2.1.316 (channels
+off), Codex 0.166.0-alpha.5.1, and the OpenCode fork
+`2.2.5-local.4d272be6e2` (deterministic stub model), on Bun 1.4.4. These
+results do not establish every optional wake or hook path.
 
 The normative specification is [docs/v6-proposal.md](../docs/v6-proposal.md),
 with amendments [A4 pacing](../docs/v6-amendment-a4-pacing.md) and
@@ -106,26 +108,83 @@ signal, so wakes can be lost silently. Passive context through hooks and the
 ### Codex
 
 The plugin is `v6/plugins/codex`, listed in `v6/.agents/plugins/marketplace.json`.
-<!-- TODO(Codex, before merge): the exact marketplace-add and install commands used in the live install. -->
-Codex asks you to review the plugin's hooks on installation. Then, in the chat
-that should receive wakes:
+Use the CLI bundled with the Codex app, replacing the absolute repository path:
+
+```sh
+codex plugin marketplace add /ABSOLUTE/PATH/TO/vortex/v6
+codex plugin add vortex@vortex-local
+```
+
+Reload the desktop app after installation so its MCP tools are discovered.
+`vx_read` and `vx_send` need the credential file, but no selected wake chat.
+Review and trust the plugin's hook definitions in Codex before enabling hooks.
+
+The optional hook/wake path also requires an explicitly selected chat. On a
+host with a reachable app-server connection, select it from inside that chat:
 
 ```sh
 bun v6/cli/vx.ts codex bind [<thread-id>]
 ```
 
-Without an argument it uses `$CODEX_THREAD_ID`. Wakes are designed to start a
-turn through the running Codex app-server (`turn/start` with tool output), but
-that path is not yet proven on the Codex desktop app (see A5). The `vx_read`
-tool and hook context do not depend on it. VORTEX never creates a new chat to
-receive mail.
+Without an argument it uses `$CODEX_THREAD_ID`; the command verifies the chat
+through the app-server before saving the local binding. The tested desktop
+build exposes no reachable app-server proxy, so this verification currently
+fails there. Automatic wakes and native passive-hook delivery on that desktop
+remain unproven; the ordinary MCP read/send tools are verified independently
+(see A5). VORTEX never creates a new chat to receive mail.
 
 ### OpenCode
 
-The plugin is the `vortex-opencode` package in `v6/plugins/opencode`. It
-targets the OpenCode fork at `88e0591d`. An optional user unit,
-`v6/plugins/opencode/systemd/vortex-opencode-ready.service`, is included.
-<!-- TODO(Codex, before merge): the exact plugin install/config steps and when the ready unit is needed. -->
+This plugin requires the custom OpenCode fork's Promise plugin API,
+`session.synthetic` and `session.wait`; stock OpenCode is not a verified host.
+The original API pin is `88e0591d`; the real-host acceptance used
+`4d272be6e22d5ac0180fb3180609a4747558b0fa`. Before allowing another revision,
+check its API with:
+
+```sh
+sh v6/plugins/opencode/conformance/run.sh /ABSOLUTE/PATH/TO/opencode-fork
+```
+
+Create or select the persistent session that will receive messages in one
+Location directory, and copy its `ses_...` id. Add this entry to `plugins` in
+the fork's `~/.config/opencode/opencode.jsonc`, replacing the paths and session
+id; preserve the rest of your configuration:
+
+```json
+{
+  "plugins": [{
+    "package": "/ABSOLUTE/PATH/TO/vortex/v6/plugins/opencode",
+    "options": {
+      "directory": "/ABSOLUTE/WAKE/LOCATION",
+      "session": "ses_REPLACE_WITH_EXISTING_SESSION",
+      "binding": "opencode",
+      "credentialFile": "/ABSOLUTE/PATH/TO/opencode.json",
+      "acceptRevisions": ["4d272be6e22d5ac0180fb3180609a4747558b0fa"]
+    }
+  }]
+}
+```
+
+Restart OpenCode after configuring the plugin. The fork starts this plugin
+only when that Location is activated, so a server restart alone is not enough.
+Activate it and verify that its hub stream is open with:
+
+```sh
+bun v6/plugins/opencode/dist/ready.js \
+  --server http://127.0.0.1:4096 \
+  --directory /ABSOLUTE/WAKE/LOCATION \
+  --binding opencode --credential /ABSOLUTE/PATH/TO/opencode.json
+```
+
+Exit 0 means the binding's stream is open. Nonzero distinguishes never-bound,
+retained-but-offline, unreachable OpenCode and invalid configuration. If OpenCode
+uses HTTP auth, supply `OPENCODE_SERVER_PASSWORD` to this process.
+
+For activation after every server restart, adapt the paths and unit name in
+`v6/plugins/opencode/systemd/vortex-opencode-ready.service`, install it under
+`~/.config/systemd/user/`, then run `systemctl --user daemon-reload` and
+`systemctl --user enable --now vortex-opencode-ready.service`. This companion
+unit reports readiness failures without stopping OpenCode.
 
 ## 4. Talk
 
@@ -133,7 +192,7 @@ targets the OpenCode fork at `88e0591d`. An optional user unit,
 bun v6/cli/vx.ts say 'hello, all'                       # room "all"
 bun v6/cli/vx.ts say --to codex 'take this'             # in "all", addressed to codex
 bun v6/cli/vx.ts say --scope dm --to claude 'just you'  # direct message
-bun v6/cli/vx.ts log                                    # room history with ids
+bun v6/cli/vx.ts log all                                # room history with ids
 bun v6/cli/vx.ts log --dm                               # direct messages
 bun v6/cli/vx.ts status
 ```

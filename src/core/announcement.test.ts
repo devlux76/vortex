@@ -149,6 +149,27 @@ test('malformed, oversized and foreign announcements are refused before any sign
   assert.equal(verified, 0)
 })
 
+// F40 (bug:3ab7f40): length bounds on origin, signature and a multibyte statement.
+// A stub verifier isolates the bounds from identity and signature content.
+test('origin, signature and UTF-8 statement lengths are bounded before any signature work', async () => {
+  let verified = 0
+  const stub: OpenOptions = { ...open, verify: async () => { verified++; return true } }
+  const resign = (bytes: Uint8Array, signature: Uint8Array): Uint8Array =>
+    SignedAnnouncement.encode({ announcement: SignedAnnouncement.decode(bytes).announcement, signature })
+  await refused(await forged({ origin: '' }), 'malformed', stub)
+  await refused(await forged({ origin: 'o'.repeat(129) }), 'malformed', stub)
+  await refused(resign(await forged({}), new Uint8Array(0)), 'malformed', stub)
+  await refused(resign(await forged({}), new Uint8Array(513)), 'malformed', stub)
+  // 1,366 x U+96EA is 1,366 code units but 4,098 UTF-8 bytes: the bound counts bytes.
+  await refused(await forged({ statement: '雪'.repeat(1366) }), 'malformed', stub)
+  assert.equal(verified, 0, 'every refusal came before signature verification')
+  // The largest values inside each bound reach verification and open.
+  assert.equal((await openAnnouncement(await forged({ origin: 'o'.repeat(128) }), stub)).origin, 'o'.repeat(128))
+  assert.ok(await openAnnouncement(resign(await forged({}), new Uint8Array(512)), stub))
+  assert.equal((await openAnnouncement(await forged({ statement: '雪'.repeat(1365) }), stub)).statement, '雪'.repeat(1365))
+  assert.equal(verified, 3)
+})
+
 // Docs: VORTEX_v5.1.md section 2.4
 test('a vector of the wrong size, with a non-finite component or all zero is refused', async () => {
   await refused(await forged({ vector: new Uint8Array(16) }), 'bad_vector')

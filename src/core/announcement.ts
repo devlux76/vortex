@@ -30,7 +30,7 @@ export interface Announcement {
   vector: Float32Array
   /** The peer identity that signed this. */
   origin: PeerId
-  /** A signed libp2p peer record for the origin. Opaque here; whoever dials checks it. */
+  /** Encoded Contact (dial addresses), covered by this announcement's signature; callers validate it with openContact (contact.ts). */
   contact: Uint8Array
   /** Milliseconds since the Unix epoch. */
   issuedAt: number

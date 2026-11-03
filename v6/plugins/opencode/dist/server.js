@@ -367,7 +367,8 @@ async function readHistory(client, args) {
 }
 
 // v6/client/bridge-base.ts
-import { closeSync, existsSync as existsSync2, mkdirSync as mkdirSync3, openSync, readFileSync as readFileSync3, statSync, unlinkSync, writeFileSync as writeFileSync2, writeSync } from "fs";
+import { existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync3, unlinkSync, writeFileSync as writeFileSync2 } from "fs";
+import { Database } from "bun:sqlite";
 import { connect } from "net";
 
 // v6/client/hooksocket.ts
@@ -558,39 +559,35 @@ class BridgeBase {
   }
   async listen() {
     ensureRuntimeDir();
-    const claim = `${this.sockPath}.claim`;
-    const deadline = Date.now() + 3000;
-    while (!this.closed && Date.now() < deadline) {
-      let fd;
-      try {
-        fd = openSync(claim, "wx", 384);
-      } catch {}
-      if (fd === undefined) {
-        if (claimAbandoned(claim)) {
-          try {
-            unlinkSync(claim);
-          } catch {}
-        } else
-          await Bun.sleep(50);
-        continue;
-      }
-      try {
-        writeSync(fd, String(process.pid));
-        if (await this.socketLive()) {
-          this.busy = true;
-          return;
+    const lock = new Database(`${this.sockPath}.lock`, { create: true });
+    try {
+      lock.run("PRAGMA busy_timeout = 0");
+      const deadline = Date.now() + 3000;
+      while (!this.closed && Date.now() < deadline) {
+        try {
+          lock.run("BEGIN IMMEDIATE");
+        } catch {
+          await Bun.sleep(25);
+          continue;
         }
         try {
-          unlinkSync(this.sockPath);
-        } catch {}
-        if (this.bindSocket())
-          return;
-      } finally {
-        closeSync(fd);
-        try {
-          unlinkSync(claim);
-        } catch {}
+          if (await this.socketLive()) {
+            this.busy = true;
+            return;
+          }
+          try {
+            unlinkSync(this.sockPath);
+          } catch {}
+          if (this.bindSocket())
+            return;
+        } finally {
+          try {
+            lock.run("ROLLBACK");
+          } catch {}
+        }
       }
+    } finally {
+      lock.close();
     }
     if (this.closed || this.ownsSocket || this.busy)
       return;
@@ -768,25 +765,6 @@ class BridgeBase {
         unlinkSync(this.sockPath);
       } catch {}
     }
-  }
-}
-function claimAbandoned(claim) {
-  let text;
-  let age;
-  try {
-    text = readFileSync3(claim, "utf8").trim();
-    age = Date.now() - statSync(claim).mtimeMs;
-  } catch {
-    return false;
-  }
-  const pid = /^[1-9][0-9]*$/.test(text) ? Number(text) : undefined;
-  if (pid === undefined)
-    return age > 1000;
-  try {
-    process.kill(pid, 0);
-    return false;
-  } catch (e) {
-    return e.code === "ESRCH";
   }
 }
 

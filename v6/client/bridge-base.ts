@@ -2,7 +2,8 @@
 // one hub stream per binding, passive batches offered to `vx hook context`
 // over a per-binding unix socket, `vx_send`, accepted-id persistence, human-turn
 // recording. Hosts supply only the wake path (`onWake`) and prompt classification.
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { Database } from 'bun:sqlite'
 import { connect } from 'node:net'
 import { VortexClient, type Evidence, type WireApiMessage } from './client.ts'
 import type { Credential } from './credential.ts'
@@ -200,35 +201,34 @@ export abstract class BridgeBase {
   }
 
   /**
-   * Claims the per-binding socket (Codex c144c44). A unix bind fails while the
-   * path exists, so binding is atomic. A live socket means another server owns
-   * the binding (busy). Every probe, unlink and bind happens inside an
-   * exclusive `<sock>.claim` (O_EXCL), held from probe through bind; there is no
-   * bind outside it. A claim whose recorded pid is dead, or an empty one older than
-   * 1 s (crash between create and write), is abandoned and removed. Busy comes
-   * only from a live socket: if the claim cannot be resolved in time, the
-   * server keeps retrying in the background instead of staying busy.
+   * Claims the per-binding socket (Codex c144c44 and the claim-reap race).
+   * Every probe, unlink and bind happens inside a SQLite `BEGIN IMMEDIATE` on
+   * `<sock>.lock`. That is an fcntl lock held by the kernel and released when
+   * the holder exits or crashes, so there are no stale claims to reap and no
+   * pid or age heuristics. `busy_timeout` is 0 and contention is polled
+   * asynchronously, because SQLite's own busy wait would block this event loop
+   * while a same-process holder awaits its probe. A live socket means busy.
+   * Unresolved contention past the deadline retries in the background; it is
+   * never reported as busy.
    */
   private async listen (): Promise<void> {
     ensureRuntimeDir()
-    const claim = `${this.sockPath}.claim`
-    const deadline = Date.now() + 3000
-    while (!this.closed && Date.now() < deadline) {
-      let fd: number | undefined
-      try { fd = openSync(claim, 'wx', 0o600) } catch { /* held or abandoned */ }
-      if (fd === undefined) {
-        if (claimAbandoned(claim)) { try { unlinkSync(claim) } catch { /* gone */ } } else await Bun.sleep(50)
-        continue
+    const lock = new Database(`${this.sockPath}.lock`, { create: true })
+    try {
+      lock.run('PRAGMA busy_timeout = 0')
+      const deadline = Date.now() + 3000
+      while (!this.closed && Date.now() < deadline) {
+        try { lock.run('BEGIN IMMEDIATE') } catch { await Bun.sleep(25); continue }
+        try {
+          if (await this.socketLive()) { this.busy = true; return }
+          try { unlinkSync(this.sockPath) } catch { /* absent */ }
+          if (this.bindSocket()) return
+        } finally {
+          try { lock.run('ROLLBACK') } catch { /* released on close */ }
+        }
       }
-      try {
-        writeSync(fd, String(process.pid))
-        if (await this.socketLive()) { this.busy = true; return }
-        try { unlinkSync(this.sockPath) } catch { /* absent */ }
-        if (this.bindSocket()) return
-      } finally {
-        closeSync(fd)
-        try { unlinkSync(claim) } catch { /* gone */ }
-      }
+    } finally {
+      lock.close()
     }
     if (this.closed || this.ownsSocket || this.busy) return
     this.listenRetry = setTimeout(() => { void this.listen() }, 1000)
@@ -378,14 +378,4 @@ export abstract class BridgeBase {
     this.server?.stop()
     if (this.ownsSocket) { try { unlinkSync(this.sockPath) } catch { /* gone */ } }
   }
-}
-
-/** A claim left by a crashed starter: its pid is dead, or it is empty/unreadable and older than 1 s. */
-function claimAbandoned (claim: string): boolean {
-  let text: string
-  let age: number
-  try { text = readFileSync(claim, 'utf8').trim(); age = Date.now() - statSync(claim).mtimeMs } catch { return false }
-  const pid = /^[1-9][0-9]*$/.test(text) ? Number(text) : undefined
-  if (pid === undefined) return age > 1000
-  try { process.kill(pid, 0); return false } catch (e) { return (e as { code?: string }).code === 'ESRCH' }
 }

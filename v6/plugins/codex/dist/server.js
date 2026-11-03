@@ -3,7 +3,7 @@
 
 // v6/plugins/codex/server.ts
 import { homedir } from "os";
-import { readFileSync as readFileSync5 } from "fs";
+import { readFileSync as readFileSync6 } from "fs";
 
 // v6/client/credential.ts
 import { chmodSync, mkdirSync, readFileSync, writeFileSync, existsSync } from "fs";
@@ -26,7 +26,7 @@ function loadCredential(name) {
 }
 
 // v6/client/hooksocket.ts
-import { mkdirSync as mkdirSync2 } from "fs";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "fs";
 function bindingName() {
   return process.env.VORTEX_BINDING ?? "default";
 }
@@ -243,10 +243,10 @@ async function readHistory(client, args) {
 }
 
 // v6/plugins/codex/bridge.ts
-import { mkdirSync as mkdirSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync4 } from "fs";
+import { mkdirSync as mkdirSync5, readFileSync as readFileSync5, writeFileSync as writeFileSync4 } from "fs";
 
 // v6/client/bridge-base.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync2, unlinkSync, writeFileSync as writeFileSync2 } from "fs";
+import { existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync3, unlinkSync, writeFileSync as writeFileSync2 } from "fs";
 import { connect } from "net";
 
 // v6/client/client.ts
@@ -430,12 +430,12 @@ class BridgeBase {
   isMachineTurn(_event) {
     return false;
   }
-  acceptsHook(_event) {
+  acceptsHook(_event, _origin) {
     return true;
   }
   loadAccepted() {
     try {
-      return JSON.parse(readFileSync2(this.opts.stateFile, "utf8"));
+      return JSON.parse(readFileSync3(this.opts.stateFile, "utf8"));
     } catch {
       return [];
     }
@@ -624,7 +624,7 @@ class BridgeBase {
         reply({ ok: true });
         return;
       }
-      if (!this.acceptsHook(req.event)) {
+      if (!this.acceptsHook(req.event, req.origin)) {
         reply({ ok: true });
         return;
       }
@@ -635,7 +635,7 @@ class BridgeBase {
         reply({ ok: true });
         return;
       }
-      if (!this.acceptsHook(req.event)) {
+      if (!this.acceptsHook(req.event, req.origin)) {
         this.passiveInflight.delete(offer.batch);
         reply({ ok: true });
         return;
@@ -656,7 +656,7 @@ class BridgeBase {
         return;
       }
       const acked = new Promise((resolve) => {
-        sock.data.ack = { batch: offer.batch, event: req.event, resolve };
+        sock.data.ack = { batch: offer.batch, event: req.event, origin: req.origin, resolve };
       });
       reply({ ok: true, context, batch: offer.batch });
       const timer = setTimeout(() => sock.data.ack?.resolve(false), this.opts.hookAckMs ?? 1e4);
@@ -672,7 +672,7 @@ class BridgeBase {
         return;
       }
       sock.data.ack = undefined;
-      if (!this.acceptsHook(pending.event)) {
+      if (!this.acceptsHook(pending.event, pending.origin)) {
         pending.resolve(false);
         reply({ ok: false, error: "chat binding changed before acknowledgment" });
         return;
@@ -740,7 +740,7 @@ class BridgeBase {
 }
 
 // v6/plugins/codex/binding.ts
-import { chmodSync as chmodSync2, existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "fs";
+import { chmodSync as chmodSync2, existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "fs";
 function bindingFile(binding) {
   return `${vortexConfigDir()}/codex-thread-${binding.replace(/[^A-Za-z0-9_.-]/g, "_")}.json`;
 }
@@ -749,7 +749,7 @@ function loadThreadBinding(binding) {
   if (!existsSync3(path))
     return;
   try {
-    const v = JSON.parse(readFileSync3(path, "utf8"));
+    const v = JSON.parse(readFileSync4(path, "utf8"));
     if (typeof v.thread !== "string" || v.thread.length === 0 || v.binding !== binding)
       return;
     return v;
@@ -931,7 +931,7 @@ class CodexBridge extends BridgeBase {
   }
   loadTurns() {
     try {
-      return JSON.parse(readFileSync4(this.copts.turnsFile, "utf8"));
+      return JSON.parse(readFileSync5(this.copts.turnsFile, "utf8"));
     } catch {
       return {};
     }
@@ -1039,7 +1039,7 @@ class CodexBridge extends BridgeBase {
 function resolveCredential() {
   const file = process.env.VORTEX_CREDENTIAL_FILE;
   if (file !== undefined)
-    return JSON.parse(readFileSync5(file, "utf8"));
+    return JSON.parse(readFileSync6(file, "utf8"));
   const c = loadCredential("codex");
   if (c === undefined)
     throw new Error(`no credential at ${process.env.XDG_CONFIG_HOME ?? `${homedir()}/.config`}/vortex/codex.json; run: vx enroll codex`);

@@ -7,7 +7,7 @@ import { connect } from 'node:net'
 import { VortexClient, type Evidence, type WireApiMessage } from './client.ts'
 import type { Credential } from './credential.ts'
 import { measure, renderWrapped, type WireMessage } from './render.ts'
-import { ensureRuntimeDir, socketPath, type HostName, type HookRequest, type HookResponse } from './hooksocket.ts'
+import { ensureRuntimeDir, socketPath, type HookOrigin, type HostName, type HookRequest, type HookResponse } from './hooksocket.ts'
 import type { SendArgs } from './mcp.ts'
 
 export interface BaseOptions {
@@ -61,8 +61,8 @@ export abstract class BridgeBase {
   protected abstract onWake (batch: string, messages: WireApiMessage[], notices: string[]): Promise<void>
   /** A `UserPromptSubmit` event that did not originate from the human (e.g. a channel/tool-output wake). */
   protected isMachineTurn (_event: Record<string, unknown>): boolean { return false }
-  /** Whether this hook belongs to the locally selected host session. */
-  protected acceptsHook (_event: Record<string, unknown>): boolean { return true }
+  /** Whether this hook belongs to the locally selected host session (`origin`: the hook's host process). */
+  protected acceptsHook (_event: Record<string, unknown>, _origin?: HookOrigin): boolean { return true }
 
   // ---- persistence of accepted batch ids (§8.4) ----------------------------
 
@@ -203,7 +203,7 @@ export abstract class BridgeBase {
     if (await this.socketLive()) { this.busy = true; return } // another live server owns this binding
     try { unlinkSync(this.sockPath) } catch { /* absent */ }
     const bridge = this
-    const listener = Bun.listen<{ buf: string; ack?: { batch: string; event: Record<string, unknown>; resolve: (v: boolean) => void } }>({
+    const listener = Bun.listen<{ buf: string; ack?: { batch: string; event: Record<string, unknown>; origin?: HookOrigin; resolve: (v: boolean) => void } }>({
       unix: this.sockPath,
       socket: {
         open (sock) { sock.data = { buf: '' } },
@@ -224,7 +224,7 @@ export abstract class BridgeBase {
     this.server = listener
   }
 
-  private async onHookLine (sock: { data: { ack?: { batch: string; event: Record<string, unknown>; resolve: (v: boolean) => void } }; write: (s: string) => unknown }, line: string): Promise<void> {
+  private async onHookLine (sock: { data: { ack?: { batch: string; event: Record<string, unknown>; origin?: HookOrigin; resolve: (v: boolean) => void } }; write: (s: string) => unknown }, line: string): Promise<void> {
     const reply = (r: HookResponse): void => { sock.write(JSON.stringify(r) + '\n') }
     let req: HookRequest
     try { req = JSON.parse(line) as HookRequest } catch { reply({ ok: false, error: 'invalid request' }); return }
@@ -232,13 +232,13 @@ export abstract class BridgeBase {
       // Only the two natural-turn insertion points offer context; Stop or any other event acknowledges and offers nothing.
       const name = req.event?.hook_event_name
       if (name !== 'UserPromptSubmit' && name !== 'PostToolUse') { reply({ ok: true }); return }
-      if (!this.acceptsHook(req.event)) { reply({ ok: true }); return }
+      if (!this.acceptsHook(req.event, req.origin)) { reply({ ok: true }); return }
       // §8.5: UserPromptSubmit records the human turn, unless it was a machine-originated prompt (A2).
       if (req.event?.hook_event_name === 'UserPromptSubmit' && !this.isMachineTurn(req.event)) this.humanTurn = true
       const offer = await this.offerPassive()
       if (offer === undefined) { reply({ ok: true }); return }
       // The local selection may change while the passive pull is in flight.
-      if (!this.acceptsHook(req.event)) {
+      if (!this.acceptsHook(req.event, req.origin)) {
         this.passiveInflight.delete(offer.batch)
         reply({ ok: true })
         return
@@ -258,7 +258,7 @@ export abstract class BridgeBase {
         reply({ ok: true })
         return
       }
-      const acked = new Promise<boolean>(resolve => { sock.data.ack = { batch: offer.batch, event: req.event, resolve } })
+      const acked = new Promise<boolean>(resolve => { sock.data.ack = { batch: offer.batch, event: req.event, origin: req.origin, resolve } })
       reply({ ok: true, context, batch: offer.batch })
       const timer = setTimeout(() => sock.data.ack?.resolve(false), this.opts.hookAckMs ?? 10_000)
       const ok = await acked
@@ -271,7 +271,7 @@ export abstract class BridgeBase {
       const pending = sock.data.ack
       if (pending === undefined || pending.batch !== req.batch) { reply({ ok: false, error: 'no matching context offer' }); return }
       sock.data.ack = undefined
-      if (!this.acceptsHook(pending.event)) {
+      if (!this.acceptsHook(pending.event, pending.origin)) {
         pending.resolve(false)
         reply({ ok: false, error: 'chat binding changed before acknowledgment' })
         return

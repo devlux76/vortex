@@ -1,6 +1,6 @@
 // @bun
 // v6/plugins/opencode/plugin.ts
-import { readFileSync as readFileSync3 } from "fs";
+import { readFileSync as readFileSync4 } from "fs";
 import { homedir } from "os";
 
 // v6/client/credential.ts
@@ -367,11 +367,11 @@ async function readHistory(client, args) {
 }
 
 // v6/client/bridge-base.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync2, unlinkSync, writeFileSync as writeFileSync2 } from "fs";
+import { existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync3, unlinkSync, writeFileSync as writeFileSync2 } from "fs";
 import { connect } from "net";
 
 // v6/client/hooksocket.ts
-import { mkdirSync as mkdirSync2 } from "fs";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "fs";
 function bindingName() {
   return process.env.VORTEX_BINDING ?? "default";
 }
@@ -414,12 +414,12 @@ class BridgeBase {
   isMachineTurn(_event) {
     return false;
   }
-  acceptsHook(_event) {
+  acceptsHook(_event, _origin) {
     return true;
   }
   loadAccepted() {
     try {
-      return JSON.parse(readFileSync2(this.opts.stateFile, "utf8"));
+      return JSON.parse(readFileSync3(this.opts.stateFile, "utf8"));
     } catch {
       return [];
     }
@@ -608,7 +608,7 @@ class BridgeBase {
         reply({ ok: true });
         return;
       }
-      if (!this.acceptsHook(req.event)) {
+      if (!this.acceptsHook(req.event, req.origin)) {
         reply({ ok: true });
         return;
       }
@@ -619,7 +619,7 @@ class BridgeBase {
         reply({ ok: true });
         return;
       }
-      if (!this.acceptsHook(req.event)) {
+      if (!this.acceptsHook(req.event, req.origin)) {
         this.passiveInflight.delete(offer.batch);
         reply({ ok: true });
         return;
@@ -640,7 +640,7 @@ class BridgeBase {
         return;
       }
       const acked = new Promise((resolve) => {
-        sock.data.ack = { batch: offer.batch, event: req.event, resolve };
+        sock.data.ack = { batch: offer.batch, event: req.event, origin: req.origin, resolve };
       });
       reply({ ok: true, context, batch: offer.batch });
       const timer = setTimeout(() => sock.data.ack?.resolve(false), this.opts.hookAckMs ?? 1e4);
@@ -656,7 +656,7 @@ class BridgeBase {
         return;
       }
       sock.data.ack = undefined;
-      if (!this.acceptsHook(pending.event)) {
+      if (!this.acceptsHook(pending.event, pending.origin)) {
         pending.resolve(false);
         reply({ ok: false, error: "chat binding changed before acknowledgment" });
         return;
@@ -930,7 +930,7 @@ function parseOptions(raw) {
   };
 }
 function readFile(path) {
-  const c = JSON.parse(readFileSync3(path, "utf8"));
+  const c = JSON.parse(readFileSync4(path, "utf8"));
   if (typeof c.hub !== "string" || typeof c.token !== "string")
     throw new Error(`invalid credential file: ${path}`);
   return c;

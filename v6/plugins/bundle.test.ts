@@ -147,7 +147,8 @@ for (const host of ['claude', 'codex'] as const) {
       assert.match(read.result.content[0].text, /\[vx: next after=\d+; more=false\]$/)
       const proc = Bun.spawn(resolveCommand(hooks, rootVar, root), {
         cwd: tmpdir(), stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
-        env: { ...process.env, ...envv },
+        // The test process spawned the MCP server, so it is the host the hook belongs to.
+        env: { ...process.env, ...envv, CLAUDE_PID: String(process.pid) },
       })
       ;(proc.stdin as any).write(JSON.stringify({ hook_event_name: 'UserPromptSubmit', prompt: 'hello', session_id: 'isolated-codex-chat' }))
       ;(proc.stdin as any).end()

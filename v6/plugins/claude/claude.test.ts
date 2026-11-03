@@ -8,9 +8,10 @@ import { connect } from 'node:net'
 import { startHub } from '../../hub/main.ts'
 import { VortexClient } from '../../client/client.ts'
 import { FIXED_PEER_DATA_LINE, parseBatch } from '../../client/render.ts'
-import { INSTRUCTIONS } from './bridge.ts'
+import { Bridge, INSTRUCTIONS } from './bridge.ts'
 import { TOOL } from './server.ts'
 import { READ_TOOL } from '../../client/read.ts'
+import { hookFromHost, hookOrigin } from '../../client/hooksocket.ts'
 
 const ROOT = new URL('../../../', import.meta.url).pathname.replace(/\/$/, '')
 const SERVER = `${ROOT}/v6/plugins/claude/server.ts`
@@ -137,7 +138,8 @@ function evidenceOf (env: Env, batch: string): { status: string; evidence: strin
 async function runHook (env: Env, event: Record<string, unknown>, binding = 'main') {
   const proc = Bun.spawn(['bun', VX, 'hook', 'context'], {
     cwd: ROOT, stdin: new TextEncoder().encode(JSON.stringify(event)), stdout: 'pipe', stderr: 'pipe',
-    env: { ...process.env, XDG_RUNTIME_DIR: env.runtime, VORTEX_BINDING: binding },
+    // The test process spawned the MCP server, so it plays the Claude Code host the hook belongs to.
+    env: { ...process.env, XDG_RUNTIME_DIR: env.runtime, VORTEX_BINDING: binding, CLAUDE_PID: String(process.pid) },
   })
   const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
   return { out, code }
@@ -233,7 +235,7 @@ test('a hook that fails before writing acknowledges nothing; the batch is offere
       sock.on('error', reject)
     })
     await new Promise<void>(r => sock.once('connect', r))
-    sock.write(JSON.stringify({ op: 'context', event: { hook_event_name: 'PostToolUse' } }) + '\n')
+    sock.write(JSON.stringify({ op: 'context', event: { hook_event_name: 'PostToolUse' }, origin: { claudePid: process.pid, ancestors: [process.pid] } }) + '\n')
     const offer = await got
     assert.equal(offer.ok, true)
     assert.ok(offer.batch)
@@ -308,16 +310,16 @@ test('a second server on the same binding gets 4409, reports it, and never steal
   } finally { await env.teardown() }
 })
 
-test('without an initialized channel a wake is held, reported as "channels not enabled", then delivered after initialize', { timeout: 40000 }, async () => {
+test('before MCP initialized a wake is held, reported as not initialized (never as channel state), then delivered after initialize', { timeout: 40000 }, async () => {
   const env = await setup()
   try {
     const s = new McpServer(env) // no handshake yet
     await until(() => env.hub.delivery.openStreams().some(o => o.principal === 'claude'), 5000, 'stream open')
     await env.codex.send({ text: 'wake me', to: ['claude'] })
     const err = await until(() => env.hub.delivery.lastError('claude', 'main'), 5000, 'lastError')
-    assert.match(err, /channels not enabled/)
+    assert.match(err, /MCP session not initialized/)
     const viaApi = (await env.operator.status()).bindings.find((b: any) => b.name === 'main')
-    assert.match(viaApi.lastError, /channels not enabled/)
+    assert.match(viaApi.lastError, /MCP session not initialized/)
     assert.equal(s.channels().length, 0)
     // A tool call still works but carries the warning.
     await s.handshake()
@@ -395,7 +397,7 @@ test('A2: an idle passive hook gets `empty` at once (no fixed wait); the 300 ms 
     })
     await new Promise<void>(r => sock.once('connect', r))
     const t0 = performance.now()
-    sock.write(JSON.stringify({ op: 'context', event: { hook_event_name: 'PostToolUse' } }) + '\n')
+    sock.write(JSON.stringify({ op: 'context', event: { hook_event_name: 'PostToolUse' }, origin: { claudePid: process.pid, ancestors: [process.pid] } }) + '\n')
     const r = await reply
     const socketMs = performance.now() - t0
     sock.destroy()
@@ -518,4 +520,87 @@ test('F13: an HTTP call to a hub that accepts but never answers times out', { ti
     await assert.rejects(client.send({ scope: 'room', room: 'all', text: 'into the void' }))
     assert.ok(Date.now() - t0 < 5000, `took ${Date.now() - t0} ms`)
   } finally { hole.stop(true) }
+})
+
+// ---- Hook isolation (Codex 97e407b): a socket is per binding, not per chat --
+
+function askHook (path: string, req: unknown): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const s = connect(path)
+    let buf = ''
+    s.setTimeout(3000, () => { s.destroy(); reject(new Error('hook timeout')) })
+    s.on('error', reject)
+    s.on('connect', () => s.write(JSON.stringify(req) + '\n'))
+    s.on('data', c => {
+      buf += c
+      const i = buf.indexOf('\n')
+      if (i >= 0) { resolve(JSON.parse(buf.slice(0, i))); s.destroy() }
+    })
+  })
+}
+
+test('hook isolation: a second Claude session on the same binding gets no passive mail and sets no human turn', { timeout: 40000 }, async () => {
+  const env = await setup()
+  const sock = `${env.newDir()}/owner.sock`
+  const credential = { hub: `ws://127.0.0.1:${env.hub.port}`, token: env.claudeToken }
+  const mk = (hostPid: number, name: string) => new Bridge({ credential, binding: 'iso', stateFile: `${env.newDir()}/${name}.json`, socketPath: sock, notify: async () => {}, hostPid })
+  const owner = mk(1111, 'owner')
+  const second = mk(2222, 'second')
+  try {
+    await owner.start()
+    await until(() => env.hub.delivery.openStreams().some(o => o.principal === 'claude' && o.name === 'iso'), 5000, 'owner stream')
+    await second.start()
+    assert.equal(second.busy, true, 'the second session sees the live socket and stays idle')
+    await env.codex.send({ text: 'OWNER_PASSIVE_SENTINEL' })
+    await sleep(200)
+    const event = { hook_event_name: 'UserPromptSubmit', session_id: 'FOREIGN-CLAUDE-CHAT', prompt: 'foreign human input' }
+    // The second session's hook: its own CLAUDE_PID, even with the owner further up its ancestry
+    // (a Claude session started inside the owner's shell).
+    const foreign = await askHook(sock, { op: 'context', event, origin: { claudePid: 2222, ancestors: [2222, 1111] } })
+    assert.deepEqual(foreign, { ok: true })
+    assert.equal((owner as any).humanTurn, false, 'a foreign hook never records a human turn')
+    assert.deepEqual(await askHook(sock, { op: 'context', event }), { ok: true }, 'no origin: refused')
+    assert.deepEqual(await askHook(sock, { op: 'context', event, origin: { ancestors: [2222] } }), { ok: true }, 'foreign ancestry: refused')
+    const own = await askHook(sock, { op: 'context', event: { ...event, session_id: 'OWNER-CHAT' }, origin: { claudePid: 1111, ancestors: [1111] } })
+    assert.match(own.context ?? '', /OWNER_PASSIVE_SENTINEL/, 'the owner session still gets its passive mail')
+    assert.equal((owner as any).humanTurn, true)
+  } finally {
+    owner.stop()
+    second.stop()
+    await env.teardown()
+  }
+})
+
+test('hook isolation end to end: a real hook from another Claude process prints nothing', { timeout: 40000 }, async () => {
+  const env = await setup()
+  try {
+    await ready(env)
+    await env.codex.send({ text: 'passive for the owner only' })
+    await sleep(200)
+    const event = { hook_event_name: 'UserPromptSubmit', session_id: 'other', prompt: 'hi' }
+    const proc = Bun.spawn(['bun', VX, 'hook', 'context'], {
+      cwd: ROOT, stdin: new TextEncoder().encode(JSON.stringify(event)), stdout: 'pipe', stderr: 'pipe',
+      env: { ...process.env, XDG_RUNTIME_DIR: env.runtime, VORTEX_BINDING: 'main', CLAUDE_PID: '999999' },
+    })
+    const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
+    assert.equal(code, 0)
+    assert.equal(out, '', 'a hook of another Claude process gets no context')
+    const mine = await runHook(env, event)
+    assert.match(mine.out, /passive for the owner only/, 'the owning process still gets it')
+  } finally { await env.teardown() }
+})
+
+test('hook origin: CLAUDE_PID parsed strictly, ancestry starts at the parent; matching rules', () => {
+  const o = hookOrigin({ CLAUDE_PID: '1234' })
+  assert.equal(o.claudePid, 1234)
+  assert.equal(o.ancestors[0], process.ppid)
+  assert.equal(hookOrigin({ CLAUDE_PID: '12x' }).claudePid, undefined)
+  assert.equal(hookOrigin({ CLAUDE_PID: '0' }).claudePid, undefined)
+  assert.equal(hookOrigin({}).claudePid, undefined)
+  assert.equal(hookFromHost({ claudePid: 5, ancestors: [5] }, 5), true)
+  assert.equal(hookFromHost({ claudePid: 6, ancestors: [6, 5] }, 5), false, 'nested session: its own CLAUDE_PID wins over ancestry')
+  assert.equal(hookFromHost({ ancestors: [9, 5] }, 5), true, 'no CLAUDE_PID: ancestry fallback')
+  assert.equal(hookFromHost({ ancestors: [9] }, 5), false)
+  assert.equal(hookFromHost(undefined, 5), false)
+  assert.equal(hookFromHost({ ancestors: 'x' } as any, 5), false)
 })

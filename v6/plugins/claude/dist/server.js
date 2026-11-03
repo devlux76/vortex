@@ -3,7 +3,7 @@
 
 // v6/plugins/claude/server.ts
 import { homedir } from "os";
-import { readFileSync as readFileSync3 } from "fs";
+import { readFileSync as readFileSync4 } from "fs";
 
 // v6/client/credential.ts
 import { chmodSync, mkdirSync, readFileSync, writeFileSync, existsSync } from "fs";
@@ -104,7 +104,7 @@ function measure(compose, bounds = DEFAULT_BOUNDS) {
 }
 
 // v6/client/bridge-base.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync2, unlinkSync, writeFileSync as writeFileSync2 } from "fs";
+import { existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync3, unlinkSync, writeFileSync as writeFileSync2 } from "fs";
 import { connect } from "net";
 
 // v6/client/client.ts
@@ -261,7 +261,7 @@ async function expectJson(res, status) {
 }
 
 // v6/client/hooksocket.ts
-import { mkdirSync as mkdirSync2 } from "fs";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "fs";
 function bindingName() {
   return process.env.VORTEX_BINDING ?? "default";
 }
@@ -274,6 +274,13 @@ function socketPath(binding = bindingName(), host = "claude") {
 }
 function ensureRuntimeDir() {
   mkdirSync2(runtimeDir(), { recursive: true, mode: 448 });
+}
+function hookFromHost(origin, hostPid) {
+  if (origin === undefined || !Array.isArray(origin.ancestors))
+    return false;
+  if (origin.claudePid !== undefined)
+    return origin.claudePid === hostPid;
+  return origin.ancestors.includes(hostPid);
 }
 
 // v6/client/bridge-base.ts
@@ -304,12 +311,12 @@ class BridgeBase {
   isMachineTurn(_event) {
     return false;
   }
-  acceptsHook(_event) {
+  acceptsHook(_event, _origin) {
     return true;
   }
   loadAccepted() {
     try {
-      return JSON.parse(readFileSync2(this.opts.stateFile, "utf8"));
+      return JSON.parse(readFileSync3(this.opts.stateFile, "utf8"));
     } catch {
       return [];
     }
@@ -498,7 +505,7 @@ class BridgeBase {
         reply({ ok: true });
         return;
       }
-      if (!this.acceptsHook(req.event)) {
+      if (!this.acceptsHook(req.event, req.origin)) {
         reply({ ok: true });
         return;
       }
@@ -509,7 +516,7 @@ class BridgeBase {
         reply({ ok: true });
         return;
       }
-      if (!this.acceptsHook(req.event)) {
+      if (!this.acceptsHook(req.event, req.origin)) {
         this.passiveInflight.delete(offer.batch);
         reply({ ok: true });
         return;
@@ -530,7 +537,7 @@ class BridgeBase {
         return;
       }
       const acked = new Promise((resolve) => {
-        sock.data.ack = { batch: offer.batch, event: req.event, resolve };
+        sock.data.ack = { batch: offer.batch, event: req.event, origin: req.origin, resolve };
       });
       reply({ ok: true, context, batch: offer.batch });
       const timer = setTimeout(() => sock.data.ack?.resolve(false), this.opts.hookAckMs ?? 1e4);
@@ -546,7 +553,7 @@ class BridgeBase {
         return;
       }
       sock.data.ack = undefined;
-      if (!this.acceptsHook(pending.event)) {
+      if (!this.acceptsHook(pending.event, pending.origin)) {
         pending.resolve(false);
         reply({ ok: false, error: "chat binding changed before acknowledgment" });
         return;
@@ -691,6 +698,9 @@ class Bridge extends BridgeBase {
     super(opts, "claude");
     this.bopts = opts;
   }
+  acceptsHook(_event, origin) {
+    return hookFromHost(origin, this.bopts.hostPid ?? process.ppid);
+  }
   isMachineTurn(event) {
     const prompt = typeof event.prompt === "string" ? event.prompt : "";
     if (prompt.includes(CHANNEL_WRAPPER))
@@ -700,7 +710,7 @@ class Bridge extends BridgeBase {
   async onWake(batch, messages, notices) {
     if (!this.initialized) {
       this.heldWake.push({ batch, messages, notices });
-      this.fail(batch, "channels not enabled: MCP session is not initialized");
+      this.fail(batch, "MCP session not initialized yet; wake held until notifications/initialized");
       return;
     }
     await this.emitWake(batch, messages, notices);
@@ -731,7 +741,7 @@ class Bridge extends BridgeBase {
     if (this.busy)
       return this.busyMessage();
     if (!this.initialized)
-      return "channels not enabled: MCP session is not initialized";
+      return "MCP session not initialized yet; wakes are held";
     return "ok";
   }
 }
@@ -799,7 +809,7 @@ async function readHistory(client, args) {
 function resolveCredential() {
   const file = process.env.VORTEX_CREDENTIAL_FILE;
   if (file !== undefined)
-    return JSON.parse(readFileSync3(file, "utf8"));
+    return JSON.parse(readFileSync4(file, "utf8"));
   const c = loadCredential("claude");
   if (c === undefined)
     throw new Error(`no credential at ${process.env.XDG_CONFIG_HOME ?? `${homedir()}/.config`}/vortex/claude.json; run: vx enroll claude`);
@@ -855,7 +865,7 @@ async function main() {
         const out = await bridge.send(parseSendArgs(params.arguments));
         const content = [{ type: "text", text: JSON.stringify(out) }];
         if (!bridge.initialized)
-          content.push({ type: "text", text: "warning: channels not enabled" });
+          content.push({ type: "text", text: "warning: MCP session not initialized yet; wakes are held" });
         await reply(id, { content, structuredContent: out });
       } catch (e) {
         await reply(id, { content: [{ type: "text", text: e.message }], isError: true });

@@ -71,7 +71,7 @@ async function main (): Promise<void> {
       try {
         const out = await bridge.send(parseSendArgs(params.arguments))
         const content: Array<{ type: 'text'; text: string }> = [{ type: 'text', text: JSON.stringify(out) }]
-        if (!bridge.initialized) content.push({ type: 'text', text: 'warning: channels not enabled' })
+        if (!bridge.initialized) content.push({ type: 'text', text: 'warning: MCP session not initialized yet; wakes are held' })
         await reply(id, { content, structuredContent: out })
       } catch (e) {
         await reply(id, { content: [{ type: 'text', text: (e as Error).message }], isError: true })

@@ -4,7 +4,7 @@
 // only after the full output is written and flushed tells the server to
 // acknowledge `hook-returned`. Any failure before the write acknowledges nothing.
 import { connect } from 'node:net'
-import { bindingName, socketPath, type HostName, type HookRequest, type HookResponse } from '../client/hooksocket.ts'
+import { bindingName, hookOrigin, socketPath, type HostName, type HookRequest, type HookResponse } from '../client/hooksocket.ts'
 
 const EVENTS = new Set(['UserPromptSubmit', 'PostToolUse'])
 
@@ -56,7 +56,7 @@ export async function hookContext (host: HostName = 'claude'): Promise<void> {
 
   await new Promise<void>(resolve => { sock.once('connect', resolve); sock.once('error', resolve) })
   if (dead) return // no local server: print nothing, exit 0
-  send({ op: 'context', event })
+  send({ op: 'context', event, origin: hookOrigin() })
   const res = await next(5000)
   if (res === undefined || !res.ok || res.context === undefined || res.batch === undefined || typeof eventName !== 'string' || !EVENTS.has(eventName)) {
     sock.destroy()

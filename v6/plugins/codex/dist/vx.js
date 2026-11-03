@@ -1,6 +1,6 @@
 // @bun
 // v6/cli/vx.ts
-import { mkdirSync as mkdirSync4, existsSync as existsSync3 } from "fs";
+import { mkdirSync as mkdirSync5, existsSync as existsSync3 } from "fs";
 
 // v6/client/client.ts
 function derDigest(raw) {
@@ -838,6 +838,7 @@ function sha256Hex(s) {
 import { connect } from "net";
 
 // v6/client/hooksocket.ts
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync2 } from "fs";
 function bindingName() {
   return process.env.VORTEX_BINDING ?? "default";
 }
@@ -847,6 +848,43 @@ function runtimeDir() {
 }
 function socketPath(binding = bindingName(), host = "claude") {
   return `${runtimeDir()}/${host}-${binding.replace(/[^A-Za-z0-9_.-]/g, "_")}.sock`;
+}
+function parentOf(pid) {
+  try {
+    const stat = readFileSync2(`/proc/${pid}/stat`, "utf8");
+    const ppid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+    return Number.isInteger(ppid) && ppid > 0 ? ppid : undefined;
+  } catch {
+    return;
+  }
+}
+function hookOrigin(env = process.env, max = 16) {
+  const raw = env.CLAUDE_PID;
+  const claudePid = raw !== undefined && /^[1-9][0-9]*$/.test(raw) ? Number(raw) : undefined;
+  let parent = parentOf;
+  if (parentOf(process.pid) === undefined) {
+    const table = new Map;
+    try {
+      const out = Bun.spawnSync(["ps", "-A", "-o", "pid=,ppid="]).stdout.toString();
+      for (const line of out.split(`
+`)) {
+        const [p, pp] = line.trim().split(/\s+/).map(Number);
+        if (Number.isInteger(p) && Number.isInteger(pp))
+          table.set(p, pp);
+      }
+    } catch {}
+    parent = (pid) => table.get(pid);
+  }
+  const ancestors = [];
+  let pid = process.ppid;
+  while (ancestors.length < max && pid > 1) {
+    ancestors.push(pid);
+    const next = parent(pid);
+    if (next === undefined)
+      break;
+    pid = next;
+  }
+  return claudePid === undefined ? { ancestors } : { claudePid, ancestors };
 }
 
 // v6/cli/hook.ts
@@ -918,7 +956,7 @@ async function hookContext(host = "claude") {
   });
   if (dead)
     return;
-  send({ op: "context", event });
+  send({ op: "context", event, origin: hookOrigin() });
   const res = await next(5000);
   if (res === undefined || !res.ok || res.context === undefined || res.batch === undefined || typeof eventName !== "string" || !EVENTS.has(eventName)) {
     sock.destroy();
@@ -938,12 +976,12 @@ async function hookContext(host = "claude") {
 }
 
 // v6/plugins/codex/binding.ts
-import { chmodSync as chmodSync2, existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "fs";
+import { chmodSync as chmodSync2, existsSync as existsSync2, mkdirSync as mkdirSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "fs";
 function bindingFile(binding) {
   return `${vortexConfigDir()}/codex-thread-${binding.replace(/[^A-Za-z0-9_.-]/g, "_")}.json`;
 }
 function saveThreadBinding(binding, thread) {
-  mkdirSync3(vortexConfigDir(), { recursive: true, mode: 448 });
+  mkdirSync4(vortexConfigDir(), { recursive: true, mode: 448 });
   const path = bindingFile(binding);
   writeFileSync2(path, JSON.stringify({ thread, binding, boundAt: Date.now() }, null, 2) + `
 `, { mode: 384 });
@@ -1200,7 +1238,7 @@ async function main() {
     const roots = hubRoots();
     if (!existsSync3(roots.db))
       die(`no hub database at ${roots.db}; run vortexd on this host first`);
-    mkdirSync4(roots.config, { recursive: true, mode: 448 });
+    mkdirSync5(roots.config, { recursive: true, mode: 448 });
     const store = new HubStore(roots.db);
     let token = "";
     try {

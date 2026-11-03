@@ -458,14 +458,6 @@ class BridgeBase {
     const claim = `${this.sockPath}.claim`;
     const deadline = Date.now() + 3000;
     while (!this.closed && Date.now() < deadline) {
-      if (!existsSync2(claim)) {
-        if (this.bindSocket())
-          return;
-        if (await this.socketLive()) {
-          this.busy = true;
-          return;
-        }
-      }
       let fd;
       try {
         fd = openSync(claim, "wx", 384);

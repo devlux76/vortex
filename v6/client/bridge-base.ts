@@ -202,9 +202,9 @@ export abstract class BridgeBase {
   /**
    * Claims the per-binding socket (Codex c144c44). A unix bind fails while the
    * path exists, so binding is atomic. A live socket means another server owns
-   * the binding (busy). A stale file is replaced only inside an exclusive
-   * `<sock>.claim` held from probe through bind; contenders never bind while a
-   * claim exists. A claim whose recorded pid is dead, or an empty one older than
+   * the binding (busy). Every probe, unlink and bind happens inside an
+   * exclusive `<sock>.claim` (O_EXCL), held from probe through bind; there is no
+   * bind outside it. A claim whose recorded pid is dead, or an empty one older than
    * 1 s (crash between create and write), is abandoned and removed. Busy comes
    * only from a live socket: if the claim cannot be resolved in time, the
    * server keeps retrying in the background instead of staying busy.
@@ -214,10 +214,6 @@ export abstract class BridgeBase {
     const claim = `${this.sockPath}.claim`
     const deadline = Date.now() + 3000
     while (!this.closed && Date.now() < deadline) {
-      if (!existsSync(claim)) {
-        if (this.bindSocket()) return
-        if (await this.socketLive()) { this.busy = true; return }
-      }
       let fd: number | undefined
       try { fd = openSync(claim, 'wx', 0o600) } catch { /* held or abandoned */ }
       if (fd === undefined) {

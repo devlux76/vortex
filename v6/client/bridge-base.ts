@@ -2,7 +2,7 @@
 // one hub stream per binding, passive batches offered to `vx hook context`
 // over a per-binding unix socket, `vx_send`, accepted-id persistence, human-turn
 // recording. Hosts supply only the wake path (`onWake`) and prompt classification.
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { VortexClient, type Evidence, type WireApiMessage } from './client.ts'
 import type { Credential } from './credential.ts'
@@ -198,12 +198,55 @@ export abstract class BridgeBase {
     })
   }
 
+  /**
+   * Claims the per-binding socket atomically (Codex c144c44): bind first, since a
+   * unix bind fails while the path exists, so two concurrent starts cannot both
+   * win. A live socket means another server owns the binding (busy). A stale file
+   * is removed only by the holder of an exclusive claim file, after re-checking
+   * that it is dead, so a live socket is never unlinked.
+   */
   private async listen (): Promise<void> {
     ensureRuntimeDir()
-    if (await this.socketLive()) { this.busy = true; return } // another live server owns this binding
-    try { unlinkSync(this.sockPath) } catch { /* absent */ }
+    for (let attempt = 0; attempt < 6; attempt++) {
+      if (this.bindSocket()) return
+      if (await this.socketLive()) { this.busy = true; return } // another live server owns this binding
+      const claim = `${this.sockPath}.claim`
+      let fd: number | undefined
+      try {
+        fd = openSync(claim, 'wx', 0o600)
+      } catch {
+        // Another starter is clearing the stale file; a claim left by a crash expires.
+        try { if (Date.now() - statSync(claim).mtimeMs > 10_000) unlinkSync(claim) } catch { /* gone */ }
+        await Bun.sleep(25 * (attempt + 1))
+        continue
+      }
+      try {
+        if (!(await this.socketLive())) { try { unlinkSync(this.sockPath) } catch { /* absent */ } }
+      } finally {
+        closeSync(fd)
+        try { unlinkSync(claim) } catch { /* gone */ }
+      }
+    }
+    this.busy = true // could not claim the socket: never steal, report busy
+  }
+
+  /** One atomic bind attempt; false when the path is already taken. */
+  private bindSocket (): boolean {
+    let listener: { stop: () => void }
+    try {
+      listener = this.makeListener()
+    } catch (e) {
+      if (existsSync(this.sockPath)) return false
+      throw e
+    }
+    this.ownsSocket = true
+    this.server = listener
+    return true
+  }
+
+  private makeListener (): { stop: () => void } {
     const bridge = this
-    const listener = Bun.listen<{ buf: string; ack?: { batch: string; event: Record<string, unknown>; origin?: HookOrigin; resolve: (v: boolean) => void } }>({
+    return Bun.listen<{ buf: string; ack?: { batch: string; event: Record<string, unknown>; origin?: HookOrigin; resolve: (v: boolean) => void } }>({
       unix: this.sockPath,
       socket: {
         open (sock) { sock.data = { buf: '' } },
@@ -220,8 +263,6 @@ export abstract class BridgeBase {
         error () { /* closed by close() */ },
       },
     })
-    this.ownsSocket = true
-    this.server = listener
   }
 
   private async onHookLine (sock: { data: { ack?: { batch: string; event: Record<string, unknown>; origin?: HookOrigin; resolve: (v: boolean) => void } }; write: (s: string) => unknown }, line: string): Promise<void> {

@@ -153,14 +153,14 @@ export function parseHubConfig (raw: unknown): HubConfig {
     if (key === 'tls') {
       if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('hub config tls must be an object')
       for (const [tk, tv] of Object.entries(value as Record<string, unknown>)) {
-        if (!(tk in TLS_KEYS)) throw new Error(`unknown hub config key: tls.${tk}`)
+        if (!Object.hasOwn(TLS_KEYS, tk)) throw new Error(`unknown hub config key: tls.${tk}`)
         if (typeof tv !== 'string' || tv.length === 0) throw new Error(`hub config tls.${tk} must be a non-empty string`)
         if (tk === 'listen') parseListen(tv)
         cfg[TLS_KEYS[tk as keyof typeof TLS_KEYS]] = tv
       }
       continue
     }
-    if (!(key in DEFAULT_CONFIG) || typeof (DEFAULT_CONFIG as unknown as Record<string, unknown>)[key] !== 'number') throw new Error(`unknown hub config key: ${key}`)
+    if (!Object.hasOwn(DEFAULT_CONFIG, key) || typeof (DEFAULT_CONFIG as unknown as Record<string, unknown>)[key] !== 'number') throw new Error(`unknown hub config key: ${key}`)
     const min = ZERO_OK.has(key) ? 0 : 1
     if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min) {
       throw new Error(`hub config ${key} must be a whole number >= ${min}, got ${JSON.stringify(value)}`)

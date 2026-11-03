@@ -139,6 +139,9 @@ test('F4: hub.json rejects wrong types, out-of-range numbers and unknown keys', 
       { wakeMinIntervalMs: '10000' }, { wakeHourlyLimit: 0 }, { wakeHourlyLimit: -1 }, { batchMaxMessages: 1.5 },
       { sendPerMinute: null }, { nope: 1 }, { tls: { lsten: ':7901' } }, { tls: { listen: 7901 } }, { tls: 'x' },
       { listen: 7900 }, { listen: 'host:notaport' }, [], null,
+      // inherited names are not config keys (Codex nit on 104dff8)
+      { tls: { constructor: ':7901' } }, { tls: { toString: ':7901' } }, JSON.parse('{"tls":{"__proto__":":7901"}}'),
+      JSON.parse('{"__proto__":1}'), { constructor: 1 },
     ]
     for (const b of bad) await assert.rejects(load(b), `accepted ${JSON.stringify(b)}`)
     const ok = await load({ listen: '127.0.0.1:7900', wakeMinIntervalMs: 0, wakeCoalesceMs: 0, wakeHourlyLimit: 90, tls: { listen: ':7901' } })

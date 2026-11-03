@@ -246,7 +246,7 @@ async function readHistory(client, args) {
 import { mkdirSync as mkdirSync5, readFileSync as readFileSync5, writeFileSync as writeFileSync4 } from "fs";
 
 // v6/client/bridge-base.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync3, unlinkSync, writeFileSync as writeFileSync2 } from "fs";
+import { closeSync, existsSync as existsSync2, mkdirSync as mkdirSync3, openSync, readFileSync as readFileSync3, statSync, unlinkSync, writeFileSync as writeFileSync2 } from "fs";
 import { connect } from "net";
 
 // v6/client/client.ts
@@ -573,15 +573,56 @@ class BridgeBase {
   }
   async listen() {
     ensureRuntimeDir();
-    if (await this.socketLive()) {
-      this.busy = true;
-      return;
+    for (let attempt = 0;attempt < 6; attempt++) {
+      if (this.bindSocket())
+        return;
+      if (await this.socketLive()) {
+        this.busy = true;
+        return;
+      }
+      const claim = `${this.sockPath}.claim`;
+      let fd;
+      try {
+        fd = openSync(claim, "wx", 384);
+      } catch {
+        try {
+          if (Date.now() - statSync(claim).mtimeMs > 1e4)
+            unlinkSync(claim);
+        } catch {}
+        await Bun.sleep(25 * (attempt + 1));
+        continue;
+      }
+      try {
+        if (!await this.socketLive()) {
+          try {
+            unlinkSync(this.sockPath);
+          } catch {}
+        }
+      } finally {
+        closeSync(fd);
+        try {
+          unlinkSync(claim);
+        } catch {}
+      }
     }
+    this.busy = true;
+  }
+  bindSocket() {
+    let listener;
     try {
-      unlinkSync(this.sockPath);
-    } catch {}
+      listener = this.makeListener();
+    } catch (e) {
+      if (existsSync2(this.sockPath))
+        return false;
+      throw e;
+    }
+    this.ownsSocket = true;
+    this.server = listener;
+    return true;
+  }
+  makeListener() {
     const bridge = this;
-    const listener = Bun.listen({
+    return Bun.listen({
       unix: this.sockPath,
       socket: {
         open(sock) {
@@ -603,8 +644,6 @@ class BridgeBase {
         error() {}
       }
     });
-    this.ownsSocket = true;
-    this.server = listener;
   }
   async onHookLine(sock, line) {
     const reply = (r) => {

@@ -604,3 +604,42 @@ test('hook origin: CLAUDE_PID parsed strictly, ancestry starts at the parent; ma
   assert.equal(hookFromHost(undefined, 5), false)
   assert.equal(hookFromHost({ ancestors: 'x' } as any, 5), false)
 })
+
+test('concurrent start (Codex c144c44): exactly one session owns both the socket and the stream, and its hooks work', { timeout: 40000 }, async () => {
+  const env = await setup()
+  const sock = `${env.newDir()}/race.sock`
+  const credential = { hub: `ws://127.0.0.1:${env.hub.port}`, token: env.claudeToken }
+  const mk = (hostPid: number, name: string) => new Bridge({ credential, binding: 'race', stateFile: `${env.newDir()}/${name}.json`, socketPath: sock, notify: async () => {}, hostPid })
+  const a = mk(1111, 'a')
+  const b = mk(2222, 'b')
+  try {
+    await Promise.all([a.start(), b.start()])
+    assert.equal([a, b].filter(x => x.busy).length, 1, 'exactly one loser')
+    const winner = a.busy ? b : a
+    const pid = winner === a ? 1111 : 2222
+    await until(() => env.hub.delivery.openStreams().some(o => o.principal === 'claude' && o.name === 'race'), 5000, 'winner stream')
+    await sleep(300)
+    assert.equal([a, b].filter(x => x.busy).length, 1, 'the loser never opened a competing stream')
+    await env.codex.send({ text: 'RACE_SENTINEL' })
+    await sleep(200)
+    const own = await askHook(sock, { op: 'context', event: { hook_event_name: 'UserPromptSubmit', prompt: 'p' }, origin: { claudePid: pid, ancestors: [pid] } })
+    assert.match(own.context ?? '', /RACE_SENTINEL/, 'the stream owner also owns the socket its hooks reach')
+  } finally { a.stop(); b.stop(); await env.teardown() }
+})
+
+test('a stale socket file is recovered, and a live one is never unlinked', { timeout: 40000 }, async () => {
+  const env = await setup()
+  const sock = `${env.newDir()}/stale.sock`
+  writeFileSync(sock, '') // left over from a crash: exists, nothing listening
+  const credential = { hub: `ws://127.0.0.1:${env.hub.port}`, token: env.claudeToken }
+  const a = new Bridge({ credential, binding: 'stale', stateFile: `${env.newDir()}/a.json`, socketPath: sock, notify: async () => {}, hostPid: 1 })
+  const b = new Bridge({ credential, binding: 'stale', stateFile: `${env.newDir()}/b.json`, socketPath: sock, notify: async () => {}, hostPid: 2 })
+  try {
+    await a.start()
+    assert.equal(a.busy, false, 'stale file replaced')
+    await b.start()
+    assert.equal(b.busy, true, 'a live socket makes the second busy')
+    const r = await askHook(sock, { op: 'context', event: { hook_event_name: 'PostToolUse' }, origin: { claudePid: 1, ancestors: [1] } })
+    assert.equal(r.ok, true, 'the first server still answers on its socket')
+  } finally { a.stop(); b.stop(); await env.teardown() }
+})

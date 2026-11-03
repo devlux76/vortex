@@ -175,12 +175,12 @@ export class Api {
       reply_author = original.from
       reply_ts = original.ts
     }
-    if (this.deps.skipRateLimit !== true && !this.allowSend(principal)) return json({ error: 'send rate exceeded' }, 429)
     const human = principal === 'operator' ? true : human_turn
     // Pre-acceptance rendered fit check (§8.4): canonical labels + full batch
     // wrapper incl. the fixed peer-data line; 413 before storage/seq advance.
     const fit = fitSingle({ id: 'x', seq: 0, ts: 0, from: principal, scope, room, to, text: body.text, human, reply_author, reply_ts }, this.bounds())
     if (!fit.fits) return json({ error: `rendered batch exceeds bounds (${fit.bytes} bytes / ${fit.codePoints} code points)` }, 413)
+    if (this.deps.skipRateLimit !== true && !this.allowSend(principal)) return json({ error: 'send rate exceeded' }, 429)
     // Crash-atomic outbox: the message row and every recipient's pending row
     // commit together, so a crash can never leave a logged message with no
     // deliveries. Wake timers are armed only after the commit.

@@ -140,6 +140,15 @@ test('batch limits: 6000 code points and 8 KiB rendered', async () => {
   } finally { await env.stop() }
 })
 
+test('a send refused for size does not consume a send slot', async () => {
+  const limited = await setup({ sendPerMinute: 1 })
+  try {
+    assert.equal((await post(limited, 'alice', { text: 'x'.repeat(7000), to: ['bob'] })).status, 413)
+    assert.equal((await post(limited, 'alice', { text: 'one', to: ['bob'] })).status, 200)
+    assert.equal((await post(limited, 'alice', { text: 'two', to: ['bob'] })).status, 429)
+  } finally { await limited.stop() }
+})
+
 test('wake pacing independent of send rate', async () => {
   // (a) the send limiter is a separate gate: 429 stores nothing.
   const limited = await setup({ sendPerMinute: 1 })

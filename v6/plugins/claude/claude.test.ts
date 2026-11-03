@@ -643,3 +643,36 @@ test('a stale socket file is recovered, and a live one is never unlinked', { tim
     assert.equal(r.ok, true, 'the first server still answers on its socket')
   } finally { a.stop(); b.stop(); await env.teardown() }
 })
+
+test('crash recovery (Codex): an abandoned claim never leaves the binding busy; a live holder is waited for', { timeout: 40000 }, async () => {
+  const env = await setup()
+  const credential = { hub: `ws://127.0.0.1:${env.hub.port}`, token: env.claudeToken }
+  const mk = (sock: string) => new Bridge({ credential, binding: 'claim', stateFile: `${env.newDir()}/s.json`, socketPath: sock, notify: async () => {}, hostPid: 1 })
+  const started: Bridge[] = []
+  try {
+    // 1. Crash right after creating the claim: empty claim plus a stale socket file.
+    const s1 = `${env.newDir()}/c1.sock`
+    writeFileSync(s1, ''); writeFileSync(`${s1}.claim`, '')
+    const a = mk(s1); started.push(a)
+    const t0 = Date.now()
+    await a.start()
+    assert.equal(a.busy, false)
+    assert.ok(Date.now() - t0 < 2500, `recovered in ${Date.now() - t0} ms`)
+    // 2. A claim naming a dead pid is abandoned at once.
+    const s2 = `${env.newDir()}/c2.sock`
+    const dead = Bun.spawn(['true']); await dead.exited
+    writeFileSync(s2, ''); writeFileSync(`${s2}.claim`, String(dead.pid))
+    const b = mk(s2); started.push(b)
+    await b.start()
+    assert.equal(b.busy, false)
+    // 3. A claim held by a live process is honoured, never treated as busy, and the server binds once it is released.
+    const s3 = `${env.newDir()}/c3.sock`
+    writeFileSync(s3, ''); writeFileSync(`${s3}.claim`, String(process.pid))
+    const c = mk(s3); started.push(c)
+    await c.start()
+    assert.equal(c.busy, false, 'a held claim is not a live owner')
+    rmSync(`${s3}.claim`)
+    await until(() => (askHook(s3, { op: 'context', event: { hook_event_name: 'PostToolUse' }, origin: { claudePid: 1, ancestors: [1] } }).then(() => { ok3 = true }, () => {}), ok3), 5000, 'bound after the claim was released')
+  } finally { for (const x of started) x.stop(); await env.teardown() }
+})
+let ok3 = false

@@ -2,7 +2,7 @@
 // one hub stream per binding, passive batches offered to `vx hook context`
 // over a per-binding unix socket, `vx_send`, accepted-id persistence, human-turn
 // recording. Hosts supply only the wake path (`onWake`) and prompt classification.
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
 import { connect } from 'node:net'
 import { VortexClient, type Evidence, type WireApiMessage } from './client.ts'
 import type { Credential } from './credential.ts'
@@ -40,6 +40,7 @@ export abstract class BridgeBase {
   private backoff = 500
   private server?: { stop: () => void }
   private reconnectTimer?: ReturnType<typeof setTimeout>
+  private listenRetry?: ReturnType<typeof setTimeout>
   readonly sockPath: string
   private ownsSocket = false
 
@@ -199,35 +200,42 @@ export abstract class BridgeBase {
   }
 
   /**
-   * Claims the per-binding socket atomically (Codex c144c44): bind first, since a
-   * unix bind fails while the path exists, so two concurrent starts cannot both
-   * win. A live socket means another server owns the binding (busy). A stale file
-   * is removed only by the holder of an exclusive claim file, after re-checking
-   * that it is dead, so a live socket is never unlinked.
+   * Claims the per-binding socket (Codex c144c44). A unix bind fails while the
+   * path exists, so binding is atomic. A live socket means another server owns
+   * the binding (busy). A stale file is replaced only inside an exclusive
+   * `<sock>.claim` held from probe through bind; contenders never bind while a
+   * claim exists. A claim whose recorded pid is dead, or an empty one older than
+   * 1 s (crash between create and write), is abandoned and removed. Busy comes
+   * only from a live socket: if the claim cannot be resolved in time, the
+   * server keeps retrying in the background instead of staying busy.
    */
   private async listen (): Promise<void> {
     ensureRuntimeDir()
-    for (let attempt = 0; attempt < 6; attempt++) {
-      if (this.bindSocket()) return
-      if (await this.socketLive()) { this.busy = true; return } // another live server owns this binding
-      const claim = `${this.sockPath}.claim`
+    const claim = `${this.sockPath}.claim`
+    const deadline = Date.now() + 3000
+    while (!this.closed && Date.now() < deadline) {
+      if (!existsSync(claim)) {
+        if (this.bindSocket()) return
+        if (await this.socketLive()) { this.busy = true; return }
+      }
       let fd: number | undefined
-      try {
-        fd = openSync(claim, 'wx', 0o600)
-      } catch {
-        // Another starter is clearing the stale file; a claim left by a crash expires.
-        try { if (Date.now() - statSync(claim).mtimeMs > 10_000) unlinkSync(claim) } catch { /* gone */ }
-        await Bun.sleep(25 * (attempt + 1))
+      try { fd = openSync(claim, 'wx', 0o600) } catch { /* held or abandoned */ }
+      if (fd === undefined) {
+        if (claimAbandoned(claim)) { try { unlinkSync(claim) } catch { /* gone */ } } else await Bun.sleep(50)
         continue
       }
       try {
-        if (!(await this.socketLive())) { try { unlinkSync(this.sockPath) } catch { /* absent */ } }
+        writeSync(fd, String(process.pid))
+        if (await this.socketLive()) { this.busy = true; return }
+        try { unlinkSync(this.sockPath) } catch { /* absent */ }
+        if (this.bindSocket()) return
       } finally {
         closeSync(fd)
         try { unlinkSync(claim) } catch { /* gone */ }
       }
     }
-    this.busy = true // could not claim the socket: never steal, report busy
+    if (this.closed || this.ownsSocket || this.busy) return
+    this.listenRetry = setTimeout(() => { void this.listen() }, 1000)
   }
 
   /** One atomic bind attempt; false when the path is already taken. */
@@ -369,8 +377,19 @@ export abstract class BridgeBase {
   stop (): void {
     this.closed = true
     if (this.reconnectTimer !== undefined) clearTimeout(this.reconnectTimer)
+    if (this.listenRetry !== undefined) clearTimeout(this.listenRetry)
     try { this.ws?.close() } catch { /* already closed */ }
     this.server?.stop()
     if (this.ownsSocket) { try { unlinkSync(this.sockPath) } catch { /* gone */ } }
   }
+}
+
+/** A claim left by a crashed starter: its pid is dead, or it is empty/unreadable and older than 1 s. */
+function claimAbandoned (claim: string): boolean {
+  let text: string
+  let age: number
+  try { text = readFileSync(claim, 'utf8').trim(); age = Date.now() - statSync(claim).mtimeMs } catch { return false }
+  const pid = /^[1-9][0-9]*$/.test(text) ? Number(text) : undefined
+  if (pid === undefined) return age > 1000
+  try { process.kill(pid, 0); return false } catch (e) { return (e as { code?: string }).code === 'ESRCH' }
 }

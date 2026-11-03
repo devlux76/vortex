@@ -142,6 +142,7 @@ export class Api {
     let room: string | undefined
     if (scope === 'dm') {
       if (to.length !== 1) return json({ error: 'a DM requires exactly one recipient' }, 400)
+      if (body.room !== undefined) return json({ error: 'a DM takes no room' }, 400)
       room = undefined
     } else {
       if (body.room !== undefined) {

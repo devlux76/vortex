@@ -113,6 +113,18 @@ test('operator impersonation rejected (from field)', async t => {
   await teardown()
 })
 
+test('a DM with a room is refused (400)', async t => {
+  await setup()
+  const res = await fetch(`http://127.0.0.1:${hubHandles.port}/v1/messages`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${aliceToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ scope: 'dm', to: ['bob'], room: 'all', text: 'hi' }),
+  })
+  assert.equal(res.status, 400)
+  assert.match((await res.json() as any).error, /a DM takes no room/)
+  await teardown()
+})
+
 test('escaped single‑message rejection before storage (413)', async t => {
   await setup()
   const client = new VortexClient({ hub: `ws://127.0.0.1:${hubHandles.port}`, token: aliceToken })

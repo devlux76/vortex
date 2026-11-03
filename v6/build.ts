@@ -1,8 +1,9 @@
 // A3 (§8.15): bundle each plugin into its own dist/ so a copied or cached
 // install needs no sibling tree. Run with `bun run v6:build`; dist/ is committed.
 import { rmSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
-const ROOT = new URL('./', import.meta.url).pathname.replace(/\/$/, '')
+const ROOT = fileURLToPath(new URL('./', import.meta.url)).replace(/\/$/, '')
 
 const targets: Array<{ plugin: string; entries: Record<string, string> }> = [
   { plugin: 'claude', entries: { 'server.js': 'plugins/claude/server.ts', 'vx.js': 'cli/vx.ts' } },

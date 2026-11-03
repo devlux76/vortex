@@ -4,6 +4,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { connect } from 'node:net'
 import { startHub } from '../../hub/main.ts'
 import { VortexClient } from '../../client/client.ts'
@@ -12,7 +13,7 @@ import { INSTRUCTIONS } from './bridge.ts'
 import { TOOL } from './server.ts'
 import { READ_TOOL } from '../../client/read.ts'
 
-const ROOT = new URL('../../../', import.meta.url).pathname.replace(/\/$/, '')
+const ROOT = fileURLToPath(new URL('../../../', import.meta.url)).replace(/\/$/, '')
 const SERVER = `${ROOT}/v6/plugins/claude/server.ts`
 const VX = `${ROOT}/v6/cli/vx.ts`
 

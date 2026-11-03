@@ -7,13 +7,14 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { startHub } from '../hub/main.ts'
 import { VortexClient } from '../client/client.ts'
 import { FIXED_PEER_DATA_LINE, parseBatch } from '../client/render.ts'
 import { INSTRUCTIONS } from '../client/mcp.ts'
 import { FakeHost } from './opencode/fake-host.ts'
 
-const V6 = new URL('../', import.meta.url).pathname.replace(/\/$/, '')
+const V6 = fileURLToPath(new URL('../', import.meta.url)).replace(/\/$/, '')
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 async function until<T> (fn: () => T | undefined | false, ms = 8000, what = 'condition'): Promise<T> {
   const deadline = Date.now() + ms

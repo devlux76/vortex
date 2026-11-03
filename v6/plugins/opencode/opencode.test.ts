@@ -157,9 +157,9 @@ test('fork revision check: only the verified revision (or an operator-listed one
   assert.equal(stale.ok, false)
   assert.match((stale as any).reason, /631e96b3e.*88e0591d1/)
   assert.deepEqual(checkFork(host.ctx({}), ['631e96b3e']), { ok: true })
-    assert.equal(checkFork(host.ctx({}), ['']).ok, false)
-    assert.equal(checkFork(host.ctx({}), ['631e9']).ok, false)
-    assert.equal(checkFork(host.ctx({}), ['631E96B3E']).ok, false)
+  assert.equal(checkFork(host.ctx({}), ['']).ok, false)
+  assert.equal(checkFork(host.ctx({}), ['631e9']).ok, false)
+  assert.equal(checkFork(host.ctx({}), ['631E96B3E']).ok, false)
   host.version = '2.1.4'
   assert.match((checkFork(host.ctx({})) as any).reason, /unverified fork build/)
   host.version = '2.1.4-local.88e0591d1'

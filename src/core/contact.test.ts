@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { encodeContact, openContact } from './contact.ts'
+import { generateKeyPair } from '@libp2p/crypto/keys'
+import { peerIdFromPrivateKey } from '@libp2p/peer-id'
 
-const peer = '12D3KooWContactTestPeer000000000000000000000000000001'
+const peer = peerIdFromPrivateKey(await generateKeyPair('Ed25519')).toString()
 const addr = (port: number, id: string = peer): string => `/ip4/127.0.0.1/tcp/${port}/p2p/${id}`
 
 // Docs: VORTEX_v5.1.md section 4.2

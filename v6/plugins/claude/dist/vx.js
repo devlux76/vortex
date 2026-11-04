@@ -179,7 +179,7 @@ function loadCredential(name) {
 var DEFAULT_BOUNDS = { maxMessages: 20, maxCodePoints: 6000, maxBytes: 8 * 1024 };
 var enc = new TextEncoder;
 function normalizeBody(text) {
-  return text.replace(/\r\n|\r|[\u0085\u2028\u2029]/g, `
+  return text.replace(/\r\n|\r|[\u000b\u000c\u0085\u2028\u2029]/g, `
 `);
 }
 function headerLabel(m) {

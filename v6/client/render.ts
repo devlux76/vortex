@@ -57,7 +57,7 @@ export function unescapeText (s: string): string {
 
 /** A1: every line separator variant becomes \n before rendering. */
 export function normalizeBody (text: string): string {
-  return text.replace(/\r\n|\r|[\u0085\u2028\u2029]/g, '\n')
+  return text.replace(/\r\n|\r|[\u000b\u000c\u0085\u2028\u2029]/g, '\n')
 }
 
 function hhmm (ts: number): string {

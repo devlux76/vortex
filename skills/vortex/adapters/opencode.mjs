@@ -12,7 +12,9 @@ import { resolve } from 'node:path';
 // topic in `opencode-topics.json`; the old `wake-session` file is no longer
 // read (and is left alone). A missing or deleted session is recreated on the
 // server's default model, so a ring always has a session to wake and its
-// context stays bounded. It never answers a question, grants a permission, or
+// context stays bounded. A topic's session older than
+// VORTEX_OPENCODE_SESSION_MAX_AGE_MS (default 12 h) or on a model other than
+// the server's current default is replaced by a fresh one. It never answers a question, grants a permission, or
 // aborts anything. Exit codes: 0 delivered or nothing unread;
 // 75 the session is busy through the deadline or has pending form or
 // permission requests; 76 an accepted prompt is awaiting acknowledgment;
@@ -136,11 +138,16 @@ const settled = (s) => {
   return runCursors.every((c) => c <= watermark || handled.has(c));
 };
 
-const createSession = async (title = 'VORTEX mail', writeWake = false) => {
+const defaultModel = async () => {
   const config = await api('GET', '/api/model/default');
   const { providerID, id } = config.json?.data ?? {};
   if (config.status !== 200 || typeof providerID !== 'string' || !providerID || typeof id !== 'string' || !id)
     fail(1, 'server has no default model; cannot create a wake session');
+  return { providerID, id };
+};
+
+const createSession = async (title = 'VORTEX mail', writeWake = false) => {
+  const { providerID, id } = await defaultModel();
   const made = await api('POST', '/api/session', { title, location: { directory: projectDir }, model: { providerID, id } });
   if (made.status !== 200 || !/^ses\w+$/.test(String(made.json?.data?.id))) fail(1, `session create failed with status ${made.status}`);
   if (writeWake) writeFileSync(wakeFile, made.json.data.id, { mode: 0o600 });
@@ -174,7 +181,11 @@ if (pinned !== undefined) {
     } else if (typeof directoryOf(fetched.json.data) !== 'string' || resolve(directoryOf(fetched.json.data)) !== projectDir) {
       isNew = true;
     } else {
-      sessionDoc = fetched.json.data;
+      const doc = fetched.json.data;
+      const current = await defaultModel();
+      const stale = !(Number.isFinite(entry.created) && Date.now() - entry.created <= MAX_AGE_MS);
+      const otherModel = doc.model?.providerID !== current.providerID || doc.model?.id !== current.id;
+      if (stale || otherModel) isNew = true; else sessionDoc = doc;
     }
   } else {
     isNew = true;

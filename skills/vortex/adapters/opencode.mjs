@@ -106,6 +106,7 @@ let firstCursor = null;
 let throughCursor = null;
 let runCursors = [];
 if (pinned !== undefined) {
+  const handled = handledOf(snapshot);
   const hasData = (Array.isArray(snapshot.events) ? snapshot.events : []).some((e) => e && Number.isSafeInteger(e.cursor) && e.cursor > acked && !handled.has(e.cursor) && !isControlEvent(e));
   if (!hasData) process.exit(0);
   target = snapshot.cursor;

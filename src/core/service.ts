@@ -44,6 +44,7 @@ const unhexBytes = (text: string): Uint8Array => {
   if (typeof text !== 'string' || !/^(?:[0-9a-f]{2})+$/.test(text)) throw new Error('invalid cached membership');
   return Uint8Array.from(text.match(/../g) as string[], pair => parseInt(pair, 16));
 };
+class SaveError extends Error {}
 export class VortexService {
   private transport: Transport;
   private save: (s: Snapshot) => void | Promise<void>;
@@ -79,6 +80,7 @@ export class VortexService {
   private recovery = new Map<string, { failures: number; notBefore: number; active: boolean;
     recheck: boolean; abort?: AbortController; resumePending: boolean }>();
   private removePeer?: () => void;
+  private rejected = { policy: 0, save: 0 };
   constructor(transport: Transport, name: string, save: (s: Snapshot) => void | Promise<void>, restored?: Snapshot, options: ServiceOptions = {}) {
     this.transport = transport; this.name = name; this.save = save; this.restored = restored;
     this.embedder = options.embedder; this.onError = options.onError ?? (() => {});
@@ -125,12 +127,12 @@ export class VortexService {
         if (packet.kind === 'message') await this.checkDisclosure('message', 'legacy', packet.body);
         await this.transport.send(peer, encode(packet), this.addressesFor(peer));
       },
-      save: this.save,
+      save: async s => { try { await this.save(s); } catch (e) { throw new SaveError(e instanceof Error ? e.message : String(e), { cause: e }); } },
       ...(this.embedder ? { route: (_peer: string, body: string) => this.routeMessage(body) } : {})
     }, this.restored, this.retention);
     this.removeDirect = this.transport.onDirect(event => {
-      try { this.core().receive(event.from, JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(event.data))).catch(() => {}); }
-      catch { /* Invalid peer packets have no authority to alter local state. */ }
+      try { this.core().receive(event.from, JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(event.data))).catch(e => this.rejectInbound(e)); }
+      catch (e) { this.rejectInbound(e); /* Invalid peer packets have no authority to alter local state. */ }
     });
     await this.transport.subscribe(TOPIC, event => {
       try {
@@ -199,6 +201,13 @@ export class VortexService {
     return this.conversations;
   }
   info(): TransportInfo { return this.transport.info(); }
+  inboundRejections(): { policy: number; save: number } { return { ...this.rejected }; }
+  /** Count and log a rejected inbound direct packet; never logs the packet, peer text or error message. */
+  private rejectInbound(e: unknown): void {
+    const kind = e instanceof SaveError ? 'save' : 'policy';
+    this.rejected[kind]++;
+    console.error(`vortex: inbound direct packet rejected (${kind})`);
+  }
   semanticNamespace(): string | undefined { return this.embedder?.profile().id; }
   async announceStatement(request: { session: string; statement: string; ttl?: number;
     publishStatement?: boolean; replaces?: string }): Promise<{ id: string; expires: number }> {

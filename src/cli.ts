@@ -398,7 +398,7 @@ if (operation==='serve') {
       if(!args || typeof args!=='object' || Array.isArray(args)) throw new Error('expected object');
       let result:unknown;
       switch(req.url) {
-        case '/info': result={...service.info(),presence:presence.info(service.core().waiters(),headSession()),wake:{configured:adapter!==undefined,
+        case '/info': result={...service.info(),inboundRejections:service.inboundRejections(),presence:presence.info(service.core().waiters(),headSession()),wake:{configured:adapter!==undefined,
           adapter:adapter??null,rings:adapter!==undefined,
           refusedRings,
           routerConnected:bridge?.status().connected??false,

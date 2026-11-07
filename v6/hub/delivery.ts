@@ -335,7 +335,13 @@ export class Delivery {
     const r = this.runtime(batch.principal, batch.binding)
     if (r.ws === undefined) return undefined
     const messages = this.store.getMessagesByIds(batch.msgIds)
-    if (messages.length === 0) { this.store.deleteBatchRow(batch.id); return undefined }
+    if (messages.length === 0) {
+      // Every message was dropped (overflow) and pruned (retention): the batch is
+      // void. Free its slot and let waiting wake rows use it now, not at the next event.
+      this.store.deleteBatchRow(batch.id)
+      if (batch.kind === 'wake') this.scheduleCoalesce(batch.principal, batch.binding)
+      return undefined
+    }
     r.ws.send({ type: 'batch', batch: batch.id, wake: batch.kind === 'wake', messages, notices: batch.notices })
     return batch
   }
@@ -441,7 +447,7 @@ export class Delivery {
     if (this.isStale(principal, name, socket)) return
     const r = this.runtime(principal, name)
     const outstanding = this.store.outstandingBatch(principal, name, 'passive')
-    if (outstanding !== undefined) { this.resend(outstanding); return }
+    if (outstanding !== undefined && this.resend(outstanding) !== undefined) return
     // A2 (§8.14): nothing pending answers at once so the hook never waits.
     if (this.composeAndPush(principal, name, 'passive', false) === undefined) socket.send({ type: 'empty', kind: 'passive' })
     void r

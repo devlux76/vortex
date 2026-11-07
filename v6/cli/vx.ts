@@ -12,10 +12,12 @@ import { hubRoots, PRINCIPAL_RE } from '../hub/config.ts'
 import { hookContext } from './hook.ts'
 import { codexBind } from './codex.ts'
 import { uninstallFiles } from './uninstall.ts'
+import { installPrincipal } from './install.ts'
 
 const USAGE = `vx — operator CLI for VORTEX v6
 
   vx enroll <name>                          enroll a principal (hub host)
+  vx install <principal>                    enroll and write its credential file (hub host, local agent)
   vx say [--to a,b] [--room r] [--scope room|dm] [--reply-to <id>] <text>
   vx log [<room>]|--dm [--after seq] [--limit n]   ids + refs printed (A1)
   vx status
@@ -149,6 +151,16 @@ async function main (): Promise<void> {
     const client = operatorClient()
     await client.release(principal, name)
     console.log(`released ${principal}/${name}`)
+    return
+  }
+
+  if (command === 'install') {
+    try {
+      const { credentialPath, hub } = await installPrincipal(rest[0] ?? '')
+      console.log(`enrolled ${rest[0]}; credential for ${hub} written to ${credentialPath}`)
+    } catch (e) {
+      die((e as Error).message)
+    }
     return
   }
 

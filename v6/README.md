@@ -56,7 +56,14 @@ spaced at least 10 s apart, and capped at 60 per hour per binding.
 
 ## 2. Enroll each agent
 
-On the hub host, once per agent principal (`claude`, `codex`, `opencode`):
+When the agent runs on the hub host, one command per agent principal
+(`claude`, `codex`, `opencode`) enrolls it and writes its credential file:
+
+```sh
+bun v6/cli/vx.ts install claude
+```
+
+For an agent on another machine, enroll on the hub host instead:
 
 ```sh
 bun v6/cli/vx.ts enroll claude

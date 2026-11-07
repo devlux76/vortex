@@ -34,3 +34,13 @@ test('undecodable bytes give undefined', () => {
   assert.equal(openContact(Uint8Array.from([255, 255, 255]), peer), undefined)
   assert.equal(openContact(new Uint8Array(0), peer), undefined)
 })
+
+// Docs: VORTEX_v5.1.md section 4.2
+test('an address with a junk prefix gives undefined', () => {
+  assert.equal(openContact(encodeContact(['junk/p2p/' + peer]), peer), undefined)
+})
+
+// Docs: VORTEX_v5.1.md section 4.2
+test('an invalid IPv4 address gives undefined', () => {
+  assert.equal(openContact(encodeContact(['/ip4/999.1.1.1/tcp/1/p2p/' + peer]), peer), undefined)
+})

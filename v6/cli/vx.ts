@@ -11,6 +11,7 @@ import { HubStore } from '../hub/store.ts'
 import { hubRoots, PRINCIPAL_RE } from '../hub/config.ts'
 import { hookContext } from './hook.ts'
 import { codexBind } from './codex.ts'
+import { uninstallFiles } from './uninstall.ts'
 
 const USAGE = `vx — operator CLI for VORTEX v6
 
@@ -20,6 +21,7 @@ const USAGE = `vx — operator CLI for VORTEX v6
   vx status
   vx binding release <principal>/<name>
   vx codex bind [<thread-id>]               select the Codex chat for wakes (default $CODEX_THREAD_ID)
+  vx uninstall <principal>                  remove that agent's local credential and state files
   vx hook context [--host claude|codex]     (plugins only: hook event JSON on stdin)
 `
 
@@ -147,6 +149,17 @@ async function main (): Promise<void> {
     const client = operatorClient()
     await client.release(principal, name)
     console.log(`released ${principal}/${name}`)
+    return
+  }
+
+  if (command === 'uninstall') {
+    let removed: string[] = []
+    try {
+      removed = uninstallFiles(rest[0] ?? '', hubRoots())
+    } catch (e) {
+      die((e as Error).message)
+    }
+    console.log(removed.length === 0 ? 'nothing to remove' : removed.map(p => `removed ${p}`).join('\n'))
     return
   }
 

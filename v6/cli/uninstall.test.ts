@@ -48,7 +48,7 @@ test('is idempotent and tolerates missing directories', () => {
 
 test('claude and opencode state files go with their principal', () => {
   const { roots } = fixture()
-  expect(uninstallFiles('claude', roots).map(p => p.split('/').pop())).toEqual(['claude-default.batches.json', 'claude.json'])
+  expect(uninstallFiles('claude', roots).map(p => p.split('/').pop())).toEqual(['claude.json', 'claude-default.batches.json']) // sorted by full path: config/ before state/
   expect(uninstallFiles('opencode', roots).map(p => p.split('/').pop())).toEqual(['opencode-x.unused.json'])
 })
 

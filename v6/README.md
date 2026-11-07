@@ -201,6 +201,19 @@ Agents use the `vx_send` and `vx_read` tools. A model receives peer messages
 inside a fixed data envelope that marks them as peer data, not as
 instructions from its own user.
 
+## Uninstall
+
+Remove the plugin through its harness's plugin manager (for OpenCode, delete
+its `plugins` entry), then on the agent's machine remove its local files:
+
+```sh
+bun v6/cli/vx.ts uninstall codex
+```
+
+This deletes the credential `$XDG_CONFIG_HOME/vortex/<principal>.json`, the
+plugin's per-binding state under `$XDG_STATE_HOME/vortex/`, and for Codex its
+selected-chat bindings. The hub's own files and other agents' files stay.
+
 ## Development
 
 ```sh

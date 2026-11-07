@@ -85,3 +85,15 @@ test('F6: /v1/status shows a peer only the cooling rooms it is a member of', wit
     assert.deepEqual(member.json.cooling.map((c: { conv: string }) => c.conv), ['room:secret-ops'])
   } finally { d.stop() }
 }))
+
+test('PUT /v1/bindings with a JSON null body is a 400, not a 500', withStore({}, async (s, cfg) => {
+  const alice = s.createPrincipal('alice').token
+  const d = new Delivery(s, cfg)
+  const api = new Api({ cfg, store: s, delivery: d })
+  try {
+    for (const body of ['null', '[]', '"x"']) {
+      const r = await call(api, alice, 'PUT', '/v1/bindings/main', body)
+      assert.equal(r.status, 400, `body ${body}`)
+    }
+  } finally { d.stop() }
+}))

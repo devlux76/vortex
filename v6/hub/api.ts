@@ -222,6 +222,7 @@ export class Api {
     if (principal === undefined) return json({ error: 'unauthorized' }, 401)
     let body: { rooms?: unknown }
     try { body = await req.json() as { rooms?: unknown } } catch { return json({ error: 'invalid JSON body' }, 400) }
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) return json({ error: 'invalid body' }, 400)
     if (!Array.isArray(body.rooms) || body.rooms.some(r => typeof r !== 'string')) return json({ error: 'rooms must be a string array' }, 400)
     try {
       const binding = this.deps.store.setBinding(principal, name, body.rooms as string[])

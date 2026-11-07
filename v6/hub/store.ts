@@ -8,148 +8,16 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DEFAULT_CONFIG, PRINCIPAL_RE, ROOM_RE, BINDING_RE, type HubConfig } from './config.ts'
 import { ulid } from '../client/ulid.ts'
+import { SCHEMA, dmPairKey, roomKey, convKeyOf, sha256Hex, utf8Count, type StoredMessage, type BatchRow, type BindingRow, type ConversationRow } from './store-schema.ts'
+import * as pending from './store-pending.ts'
+import * as logs from './store-log.ts'
+import { rowToStoredMessage } from './store-pending.ts'
 
-export interface StoredMessage {
-  id: string
-  seq: number
-  ts: number
-  scope: 'room' | 'dm'
-  room?: string
-  to: string[]
-  from: string
-  text: string
-  reply_to?: string
-  human: boolean
-  reply_author?: string
-  reply_ts?: number
-}
+export * from './store-schema.ts'
 
-export interface BatchRow {
-  id: string
-  principal: string
-  binding: string
-  kind: 'wake' | 'passive'
-  status: 'pending' | 'failed' | 'delivered'
-  error?: string
-  msgIds: string[]
-  /** One-line [vx: ...] notices rendered above the messages; kept for replay. */
-  notices: string[]
-  created: number
-}
-
-export interface BindingRow {
-  principal: string
-  name: string
-  rooms: string[]
-  expiredPending: number
-}
 
 /* Rendered-bounds checking lives in client/render.ts (fitSingle); the hub's
  * api.ts and delivery.ts import it from there, not from the store. */
-
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS principals (
-  name TEXT PRIMARY KEY,
-  token_hash TEXT NOT NULL UNIQUE,
-  created INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS bindings (
-  principal TEXT NOT NULL,
-  name TEXT NOT NULL,
-  rooms TEXT NOT NULL,
-  expired_pending INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (principal, name)
-);
-CREATE TABLE IF NOT EXISTS messages (
-  id TEXT PRIMARY KEY,
-  seq INTEGER NOT NULL UNIQUE,
-  ts INTEGER NOT NULL,
-  scope TEXT NOT NULL,
-  room TEXT,
-  to_json TEXT NOT NULL,
-  fromp TEXT NOT NULL,
-  text TEXT NOT NULL,
-  reply_to TEXT,
-  human INTEGER NOT NULL,
-  reply_author TEXT,
-  reply_ts INTEGER
-);
-CREATE INDEX IF NOT EXISTS messages_room ON messages(room, seq);
-CREATE INDEX IF NOT EXISTS messages_dm ON messages(scope, seq);
-CREATE TABLE IF NOT EXISTS members (
-  room TEXT NOT NULL,
-  principal TEXT NOT NULL,
-  PRIMARY KEY (room, principal)
-);
-CREATE TABLE IF NOT EXISTS conversations (
-  conv TEXT PRIMARY KEY,
-  auto_count INTEGER NOT NULL DEFAULT 0,
-  paused INTEGER NOT NULL DEFAULT 0,
-  notice_pending INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS pending (
-  binding_principal TEXT NOT NULL,
-  binding_name TEXT NOT NULL,
-  msg_id TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  enqueued TEXT NOT NULL,
-  message_bytes INTEGER NOT NULL,
-  PRIMARY KEY (binding_principal, binding_name, msg_id)
-);
-CREATE INDEX IF NOT EXISTS pending_order ON pending(binding_principal, binding_name, kind, enqueued);
-CREATE TABLE IF NOT EXISTS wake_pushes (
-  binding_principal TEXT NOT NULL,
-  binding_name TEXT NOT NULL,
-  conv TEXT NOT NULL,
-  batch_id TEXT NOT NULL,
-  ts INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS wake_pushes_binding ON wake_pushes(binding_principal, binding_name, ts);
-CREATE TABLE IF NOT EXISTS cooldown_notices (
-  conv TEXT NOT NULL,
-  binding_principal TEXT NOT NULL,
-  binding_name TEXT NOT NULL,
-  cooling_until INTEGER NOT NULL,
-  PRIMARY KEY (conv, binding_principal, binding_name)
-);
-CREATE TABLE IF NOT EXISTS meta (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS deliveries (
-  id TEXT PRIMARY KEY,
-  binding_principal TEXT NOT NULL,
-  binding_name TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  status TEXT NOT NULL,
-  evidence TEXT,
-  error TEXT,
-  msg_ids TEXT NOT NULL,
-  notices TEXT NOT NULL DEFAULT '[]',
-  created INTEGER NOT NULL
-);
-`
-
-export const dmPairKey = (a: string, b: string): string => `dm:${[a, b].sort().join('|')}`
-export const roomKey = (room: string): string => `room:${room}`
-/** The §8.5 conversation of a message: the room, or the unordered DM pair. */
-export const convKeyOf = (m: { scope: 'room' | 'dm'; room?: string; from: string; to: string[] }): string =>
-  m.scope === 'dm' ? dmPairKey(m.from, m.to[0]) : roomKey(m.room!)
-
-export interface ConversationRow {
-  conv: string
-  count: number
-  level: number
-  coolingUntil: number | null
-  lastAutoTs: number | null
-  lastCooldownEnd: number | null
-  lastDrainTs: number | null
-}
-
-export class DuplicateBinding extends Error { constructor () { super('binding busy'); this.name = 'DuplicateBinding' } }
-export function tokenHash (token: string): string {
-  return sha256Hex(token)
-}
 
 export class HubStore {
   readonly db: Database
@@ -313,21 +181,9 @@ export class HubStore {
   }
 
   private rowToMessage (row: any): StoredMessage {
-    return {
-      id: row.id,
-      seq: row.seq,
-      ts: row.ts,
-      scope: row.scope,
-      room: row.room === null ? undefined : row.room,
-      to: JSON.parse(row.to_json),
-      from: row.fromp,
-      text: row.text,
-      reply_to: row.reply_to === null ? undefined : row.reply_to,
-      human: row.human === 1,
-      reply_author: row.reply_author === null ? undefined : row.reply_author,
-      reply_ts: row.reply_ts === null ? undefined : row.reply_ts,
-    }
+    return rowToStoredMessage(row)
   }
+
 
   /**
    * Run `fn` in one transaction (nested store transactions become savepoints).
@@ -563,204 +419,78 @@ export class HubStore {
   }
 
   roomLog (room: string, after: number, limit: number): StoredMessage[] {
-    const rows = this.db.prepare(
-      `SELECT * FROM messages WHERE room = ? AND seq > ? ORDER BY seq LIMIT ?`,
-    ).all(room, after, limit) as any[]
-    return rows.map(r => this.rowToMessage(r))
+    return logs.roomLog(this, room, after, limit)
   }
 
   dmLog (principal: string, after: number, limit: number): StoredMessage[] {
-    const rows = this.db.prepare(
-      `SELECT * FROM messages WHERE scope = 'dm' AND (fromp = ? OR to_json = ?) AND seq > ? ORDER BY seq LIMIT ?`,
-    ).all(principal, JSON.stringify([principal]), after, limit) as any[]
-    return rows.map(r => this.rowToMessage(r))
+    return logs.dmLog(this, principal, after, limit)
   }
 
-  /** msgs visible to a principal: rooms they are a member of + their own DMs. */
   recentFor (principal: string, limit: number): StoredMessage[] {
-    const rows = this.db.prepare(
-      `SELECT * FROM messages
-       WHERE (scope = 'room' AND room IN (SELECT room FROM members WHERE principal = ?))
-          OR (scope = 'dm' AND (fromp = ? OR to_json = ?))
-       ORDER BY seq DESC LIMIT ?`,
-    ).all(principal, principal, JSON.stringify([principal]), limit) as any[]
-    return rows.map(r => this.rowToMessage(r))
+    return logs.recentFor(this, principal, limit)
   }
 
-  /** Operator-sovereign recent: every message, newest-first (§8.2 operator). */
   recentGlobal (limit: number): StoredMessage[] {
-    return (this.db.prepare('SELECT * FROM messages ORDER BY seq DESC LIMIT ?').all(limit) as any[])
-      .map(r => this.rowToMessage(r))
+    return logs.recentGlobal(this, limit)
   }
 
-  /** Operator-sovereign DM log across all pairs (operator-added endpoint; disclose). */
   dmLogAll (after: number, limit: number): StoredMessage[] {
-    const rows = this.db.prepare(
-      `SELECT * FROM messages WHERE scope = 'dm' AND seq > ? ORDER BY seq LIMIT ?`,
-    ).all(after, limit) as any[]
-    return rows.map(r => this.rowToMessage(r))
+    return logs.dmLogAll(this, after, limit)
   }
 
   roomSeqHead (room: string): number {
-    const row = this.db.prepare('SELECT COALESCE(MAX(seq), 0) AS s FROM messages WHERE room = ?').get(room) as any
-    return row.s
+    return logs.roomSeqHead(this, room)
   }
 
   seqHead (): number {
-    const row = this.db.prepare('SELECT COALESCE(MAX(seq), 0) AS s FROM messages').get() as any
-    return row.s
+    return logs.seqHead(this)
   }
 
   // ------------------------------------------------------------------
-  // pending queues (per binding, wake and passive; §8.4)
+  // pending queues and deliveries: delegates to store-pending.ts
   // ------------------------------------------------------------------
 
   enqueuePending (principal: string, binding: string, m: StoredMessage, kind: 'wake' | 'passive'):
     { overflowDropped: number; nowOverBoundary: boolean } {
-    let dropped = 0
-    let nowOverBoundary = false
-    const bytes = utf8Count(m.text)
-    this.db.transaction(() => {
-      this.db.prepare(
-        `INSERT INTO pending (binding_principal, binding_name, msg_id, kind, enqueued, message_bytes, conv)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ).run(principal, binding, m.id, kind, ulid(Date.now()), bytes, convKeyOf(m))
-      const stats = this.pendingStats(principal, binding)
-      while (stats.count > this.cfg.pendingMaxMessages || stats.bytes > this.cfg.pendingMaxBytes) {
-        const oldest = this.db.prepare(
-          `SELECT msg_id FROM pending WHERE binding_principal = ? AND binding_name = ? ORDER BY rowid LIMIT 1`,
-        ).get(principal, binding) as any
-        if (oldest === undefined) break
-        this.db.prepare('DELETE FROM pending WHERE binding_principal = ? AND binding_name = ? AND msg_id = ?').run(principal, binding, oldest.msg_id)
-        const row = this.pendingStats(principal, binding)
-        stats.count = row.count
-        stats.bytes = row.bytes
-        dropped++
-      }
-      if (dropped > 0) {
-        // Expire notice rides the next batch for this binding (§8.4), persisted.
-        this.db.prepare('UPDATE bindings SET expired_pending = expired_pending + ? WHERE principal = ? AND name = ?').run(dropped, principal, binding)
-        nowOverBoundary = true
-      }
-    })()
-    return { overflowDropped: dropped, nowOverBoundary }
+    return pending.enqueuePending(this, principal, binding, m, kind)
   }
-
   pendingStats (principal: string, binding: string): { count: number; bytes: number } {
-    const row = this.db.prepare(
-      `SELECT COUNT(*) AS c, COALESCE(SUM(message_bytes), 0) AS b FROM pending WHERE binding_principal = ? AND binding_name = ?`,
-    ).get(principal, binding) as any
-    return { count: row.c, bytes: row.b }
+    return pending.pendingStats(this, principal, binding)
   }
-
   pendingCountByKind (principal: string, binding: string): { wake: number; passive: number } {
-    const rows = this.db.prepare(
-      `SELECT kind, COUNT(*) AS c FROM pending WHERE binding_principal = ? AND binding_name = ? GROUP BY kind`,
-    ).all(principal, binding) as any[]
-    const out = { wake: 0, passive: 0 }
-    for (const r of rows) (out as any)[r.kind] = r.c
-    return out
+    return pending.pendingCountByKind(this, principal, binding)
   }
-
   pendingMessages (principal: string, binding: string, kind: 'wake' | 'passive'): StoredMessage[] {
-    const rows = this.db.prepare(
-      `SELECT m.* FROM pending p JOIN messages m ON m.id = p.msg_id
-       WHERE p.binding_principal = ? AND p.binding_name = ? AND p.kind = ?
-       ORDER BY p.rowid`,
-    ).all(principal, binding, kind) as any[]
-    return rows.map(r => this.rowToMessage(r))
+    return pending.pendingMessages(this, principal, binding, kind)
   }
-
   deletePending (principal: string, binding: string, ids: string[]): void {
-    const stmt = this.db.prepare('DELETE FROM pending WHERE binding_principal = ? AND binding_name = ? AND msg_id = ?')
-    for (const id of ids) stmt.run(principal, binding, id)
+    return pending.deletePending(this, principal, binding, ids)
   }
-
   consumeExpiredNotice (principal: string, binding: string): number {
-    const b = this.getBinding(principal, binding)
-    if (b === undefined) return 0
-    const n = b.expiredPending
-    if (n > 0) this.db.prepare('UPDATE bindings SET expired_pending = 0 WHERE principal = ? AND name = ?').run(principal, binding)
-    return n
+    return pending.consumeExpiredNotice(this, principal, binding)
   }
-
-  // ------------------------------------------------------------------
-  // deliveries (batch records; id stable across retries §8.4)
-  // ------------------------------------------------------------------
-
   insertBatchRow (b: { id: string; principal: string; binding: string; kind: 'wake' | 'passive'; msgIds: string[]; notices: string[] }): void {
-    this.db.prepare(
-      `INSERT INTO deliveries (id, binding_principal, binding_name, kind, status, msg_ids, notices, created)
-       VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)`,
-    ).run(b.id, b.principal, b.binding, b.kind, JSON.stringify(b.msgIds), JSON.stringify(b.notices), Date.now())
+    return pending.insertBatchRow(this, b)
   }
-
   getBatch (id: string): BatchRow | undefined {
-    const row = this.db.prepare('SELECT * FROM deliveries WHERE id = ?').get(id) as any
-    if (row == null) return undefined
-    return {
-      id: row.id, principal: row.binding_principal, binding: row.binding_name,
-      kind: row.kind, status: row.status, error: row.error === null ? undefined : row.error,
-      msgIds: JSON.parse(row.msg_ids), notices: JSON.parse(row.notices), created: row.created,
-    }
+    return pending.getBatch(this, id)
   }
-
   outstandingBatch (principal: string, binding: string, kind: 'wake' | 'passive'): BatchRow | undefined {
-    // At most one outstanding batch of each kind (§8.4): newest pending/failed row.
-    const row = this.db.prepare(
-      `SELECT * FROM deliveries WHERE binding_principal = ? AND binding_name = ? AND kind = ? AND status IN ('pending','failed')
-       ORDER BY created DESC, id DESC LIMIT 1`,
-    ).get(principal, binding, kind) as any
-    if (!row) return undefined
-    return { id: row.id, principal: row.binding_principal, binding: row.binding_name, kind: row.kind, status: row.status, error: row.error === null ? undefined : row.error, msgIds: JSON.parse(row.msg_ids), notices: JSON.parse(row.notices), created: row.created }
+    return pending.outstandingBatch(this, principal, binding, kind)
   }
-
   outstandingBatchesOf (principal: string, binding: string): BatchRow[] {
-    const wake = this.outstandingBatch(principal, binding, 'wake')
-    const passive = this.outstandingBatch(principal, binding, 'passive')
-    return [wake, passive].filter((x): x is BatchRow => x !== undefined)
+    return pending.outstandingBatchesOf(this, principal, binding)
   }
-
   deliverBatch (id: string, evidence: string): void {
-    this.db.transaction(() => {
-      const row = this.getBatch(id)
-      if (row != null) {
-        const convs = new Set((this.db.prepare(`SELECT DISTINCT conv FROM pending WHERE binding_principal = ? AND binding_name = ? AND msg_id IN (${row.msgIds.map(() => '?').join(',') || "''"})`)
-          .all(row.principal, row.binding, ...row.msgIds) as any[]).map(r => r.conv as string))
-        this.deletePending(row.principal, row.binding, row.msgIds)
-        const now = Date.now()
-        for (const c of convs) if (c !== null && !this.hasWakeWork(c)) this.db.prepare('UPDATE conversations SET last_drain_ts = ? WHERE conv = ?').run(now, c)
-        this.db.prepare(
-          `UPDATE deliveries SET status = 'delivered', evidence = ? WHERE id = ?`,
-        ).run(evidence, id)
-        // Keep the newest delivered row per binding for status display; prune the rest.
-        this.db.prepare(
-          `DELETE FROM deliveries
-           WHERE binding_principal = ? AND binding_name = ? AND status = 'delivered' AND id != ?`,
-        ).run(row.principal, row.binding, id)
-      }
-    })()
+    return pending.deliverBatch(this, id, evidence)
   }
-
   markBatchFailed (id: string, error: string): void {
-    this.db.prepare(`UPDATE deliveries SET status = 'failed', error = ? WHERE id = ?`).run(error, id)
+    return pending.markBatchFailed(this, id, error)
   }
-
   keepBatchPending (id: string): void {
-    this.db.prepare(`UPDATE deliveries SET status = 'pending', error = NULL WHERE id = ?`).run(id)
+    return pending.keepBatchPending(this, id)
   }
-
   deleteBatchRow (id: string): void {
-    this.db.prepare('DELETE FROM deliveries WHERE id = ?').run(id)
+    return pending.deleteBatchRow(this, id)
   }
-}
-
-export function utf8Count (s: string): number {
-  return new TextEncoder().encode(s).length
-}
-
-export function sha256Hex (s: string): string {
-  const hasher = new Bun.CryptoHasher('sha256')
-  hasher.update(s)
-  return hasher.digest('hex')
 }

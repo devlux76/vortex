@@ -44,3 +44,24 @@ test('an address with a junk prefix gives undefined', () => {
 test('an invalid IPv4 address gives undefined', () => {
   assert.equal(openContact(encodeContact(['/ip4/999.1.1.1/tcp/1/p2p/' + peer]), peer), undefined)
 })
+
+// Docs: VORTEX_v5.1.md section 4.2
+test('an unknown protocol gives undefined', () => {
+  assert.equal(openContact(encodeContact(['/foo/1/p2p/' + peer]), peer), undefined)
+})
+
+// Docs: VORTEX_v5.1.md section 4.2
+test('an invalid base58 peer id gives undefined, even as the expected peer', () => {
+  const bad = '12D3KooW0OIl0OIl0OIl0OIl0OIl0OIl0OIl0OIl0OIl0OIl0OIl'
+  assert.equal(openContact(encodeContact(['/ip4/127.0.0.1/tcp/1/p2p/' + bad]), bad), undefined)
+})
+
+// Docs: VORTEX_v5.1.md section 4.2
+test('a unix path that only mentions p2p gives undefined', () => {
+  assert.equal(openContact(encodeContact(['/unix/tmp%2Fp2p%2F' + peer]), peer), undefined)
+})
+
+// Docs: VORTEX_v5.1.md section 4.2
+test('one bad address rejects the whole list', () => {
+  assert.equal(openContact(encodeContact([addr(7810), 'junk']), peer), undefined)
+})

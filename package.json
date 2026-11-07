@@ -1,40 +1,19 @@
 {
   "name": "vortex",
-  "version": "0.0.1",
+  "version": "6.0.0",
   "private": true,
   "type": "module",
   "engines": {
     "bun": ">=1.4.3"
   },
   "scripts": {
-    "test": "bun test",
+    "test": "bun test v6",
     "typecheck": "tsc --noEmit",
-    "proto": "sh proto/generate.sh",
-    "bench:browser": "bun bench/serve.ts",
-    "vortex": "bun src/cli.ts",
     "v6:build": "bun v6/build.ts"
-  },
-  "dependencies": {
-    "@chainsafe/libp2p-noise": "latest",
-    "@chainsafe/libp2p-yamux": "latest",
-    "@huggingface/transformers": "latest",
-    "@libp2p/crypto": "latest",
-    "@libp2p/gossipsub": "latest",
-    "@libp2p/identify": "latest",
-    "@libp2p/peer-id": "latest",
-    "@libp2p/tcp": "latest",
-    "@libp2p/websockets": "latest",
-    "@multiformats/multiaddr": "latest",
-    "@noble/hashes": "latest",
-    "libp2p": "latest",
-    "protons-runtime": "latest",
-    "uint8arraylist": "latest",
-    "uint8arrays": "latest"
   },
   "devDependencies": {
     "@types/bun": "^1.4.4",
     "@types/node": "latest",
-    "protons": "latest",
     "typescript": "latest"
   }
 }

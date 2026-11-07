@@ -284,7 +284,7 @@ function randomPart() {
   return out;
 }
 
-// v6/hub/store.ts
+// v6/hub/store-schema.ts
 var SCHEMA = `
 CREATE TABLE IF NOT EXISTS principals (
   name TEXT PRIMARY KEY,
@@ -370,6 +370,179 @@ CREATE TABLE IF NOT EXISTS deliveries (
 var dmPairKey = (a, b) => `dm:${[a, b].sort().join("|")}`;
 var roomKey = (room) => `room:${room}`;
 var convKeyOf = (m) => m.scope === "dm" ? dmPairKey(m.from, m.to[0]) : roomKey(m.room);
+function utf8Count(s) {
+  return new TextEncoder().encode(s).length;
+}
+function sha256Hex(s) {
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(s);
+  return hasher.digest("hex");
+}
+
+// v6/hub/store-pending.ts
+function rowToStoredMessage(row) {
+  return {
+    id: row.id,
+    seq: row.seq,
+    ts: row.ts,
+    scope: row.scope,
+    room: row.room === null ? undefined : row.room,
+    to: JSON.parse(row.to_json),
+    from: row.fromp,
+    text: row.text,
+    reply_to: row.reply_to === null ? undefined : row.reply_to,
+    human: row.human === 1,
+    reply_author: row.reply_author === null ? undefined : row.reply_author,
+    reply_ts: row.reply_ts === null ? undefined : row.reply_ts
+  };
+}
+function enqueuePending(s, principal, binding, m, kind) {
+  let dropped = 0;
+  let nowOverBoundary = false;
+  const bytes = utf8Count(m.text);
+  s.db.transaction(() => {
+    s.db.prepare(`INSERT INTO pending (binding_principal, binding_name, msg_id, kind, enqueued, message_bytes, conv)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`).run(principal, binding, m.id, kind, ulid(Date.now()), bytes, convKeyOf(m));
+    const stats = s.pendingStats(principal, binding);
+    while (stats.count > s.cfg.pendingMaxMessages || stats.bytes > s.cfg.pendingMaxBytes) {
+      const oldest = s.db.prepare(`SELECT msg_id FROM pending WHERE binding_principal = ? AND binding_name = ? ORDER BY rowid LIMIT 1`).get(principal, binding);
+      if (oldest === undefined)
+        break;
+      s.db.prepare("DELETE FROM pending WHERE binding_principal = ? AND binding_name = ? AND msg_id = ?").run(principal, binding, oldest.msg_id);
+      const row = s.pendingStats(principal, binding);
+      stats.count = row.count;
+      stats.bytes = row.bytes;
+      dropped++;
+    }
+    if (dropped > 0) {
+      s.db.prepare("UPDATE bindings SET expired_pending = expired_pending + ? WHERE principal = ? AND name = ?").run(dropped, principal, binding);
+      nowOverBoundary = true;
+    }
+  })();
+  return { overflowDropped: dropped, nowOverBoundary };
+}
+function pendingStats(s, principal, binding) {
+  const row = s.db.prepare(`SELECT COUNT(*) AS c, COALESCE(SUM(message_bytes), 0) AS b FROM pending WHERE binding_principal = ? AND binding_name = ?`).get(principal, binding);
+  return { count: row.c, bytes: row.b };
+}
+function pendingCountByKind(s, principal, binding) {
+  const rows = s.db.prepare(`SELECT kind, COUNT(*) AS c FROM pending WHERE binding_principal = ? AND binding_name = ? GROUP BY kind`).all(principal, binding);
+  const out = { wake: 0, passive: 0 };
+  for (const r of rows)
+    out[r.kind] = r.c;
+  return out;
+}
+function pendingMessages(s, principal, binding, kind) {
+  const rows = s.db.prepare(`SELECT m.* FROM pending p JOIN messages m ON m.id = p.msg_id
+     WHERE p.binding_principal = ? AND p.binding_name = ? AND p.kind = ?
+     ORDER BY p.rowid`).all(principal, binding, kind);
+  return rows.map((r) => rowToStoredMessage(r));
+}
+function deletePending(s, principal, binding, ids) {
+  const stmt = s.db.prepare("DELETE FROM pending WHERE binding_principal = ? AND binding_name = ? AND msg_id = ?");
+  for (const id of ids)
+    stmt.run(principal, binding, id);
+}
+function consumeExpiredNotice(s, principal, binding) {
+  const b = s.getBinding(principal, binding);
+  if (b === undefined)
+    return 0;
+  const n = b.expiredPending;
+  if (n > 0)
+    s.db.prepare("UPDATE bindings SET expired_pending = 0 WHERE principal = ? AND name = ?").run(principal, binding);
+  return n;
+}
+function insertBatchRow(s, b) {
+  s.db.prepare(`INSERT INTO deliveries (id, binding_principal, binding_name, kind, status, msg_ids, notices, created)
+     VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)`).run(b.id, b.principal, b.binding, b.kind, JSON.stringify(b.msgIds), JSON.stringify(b.notices), Date.now());
+}
+function getBatch(s, id) {
+  const row = s.db.prepare("SELECT * FROM deliveries WHERE id = ?").get(id);
+  if (row == null)
+    return;
+  return {
+    id: row.id,
+    principal: row.binding_principal,
+    binding: row.binding_name,
+    kind: row.kind,
+    status: row.status,
+    error: row.error === null ? undefined : row.error,
+    msgIds: JSON.parse(row.msg_ids),
+    notices: JSON.parse(row.notices),
+    created: row.created
+  };
+}
+function outstandingBatch(s, principal, binding, kind) {
+  const row = s.db.prepare(`SELECT * FROM deliveries WHERE binding_principal = ? AND binding_name = ? AND kind = ? AND status IN ('pending','failed')
+     ORDER BY created DESC, id DESC LIMIT 1`).get(principal, binding, kind);
+  if (!row)
+    return;
+  return { id: row.id, principal: row.binding_principal, binding: row.binding_name, kind: row.kind, status: row.status, error: row.error === null ? undefined : row.error, msgIds: JSON.parse(row.msg_ids), notices: JSON.parse(row.notices), created: row.created };
+}
+function outstandingBatchesOf(s, principal, binding) {
+  const wake = s.outstandingBatch(principal, binding, "wake");
+  const passive = s.outstandingBatch(principal, binding, "passive");
+  return [wake, passive].filter((x) => x !== undefined);
+}
+function deliverBatch(s, id, evidence) {
+  s.db.transaction(() => {
+    const row = s.getBatch(id);
+    if (row != null) {
+      const convs = new Set(s.db.prepare(`SELECT DISTINCT conv FROM pending WHERE binding_principal = ? AND binding_name = ? AND msg_id IN (${row.msgIds.map(() => "?").join(",") || "''"})`).all(row.principal, row.binding, ...row.msgIds).map((r) => r.conv));
+      s.deletePending(row.principal, row.binding, row.msgIds);
+      const now = Date.now();
+      for (const c of convs)
+        if (c !== null && !s.hasWakeWork(c))
+          s.db.prepare("UPDATE conversations SET last_drain_ts = ? WHERE conv = ?").run(now, c);
+      s.db.prepare(`UPDATE deliveries SET status = 'delivered', evidence = ? WHERE id = ?`).run(evidence, id);
+      s.db.prepare(`DELETE FROM deliveries
+         WHERE binding_principal = ? AND binding_name = ? AND status = 'delivered' AND id != ?`).run(row.principal, row.binding, id);
+    }
+  })();
+}
+function markBatchFailed(s, id, error) {
+  s.db.prepare(`UPDATE deliveries SET status = 'failed', error = ? WHERE id = ?`).run(error, id);
+}
+function keepBatchPending(s, id) {
+  s.db.prepare(`UPDATE deliveries SET status = 'pending', error = NULL WHERE id = ?`).run(id);
+}
+function deleteBatchRow(s, id) {
+  s.db.prepare("DELETE FROM deliveries WHERE id = ?").run(id);
+}
+
+// v6/hub/store-log.ts
+function roomLog(s, room, after, limit) {
+  const rows = s.db.prepare(`SELECT * FROM messages WHERE room = ? AND seq > ? ORDER BY seq LIMIT ?`).all(room, after, limit);
+  return rows.map((r) => rowToStoredMessage(r));
+}
+function dmLog(s, principal, after, limit) {
+  const rows = s.db.prepare(`SELECT * FROM messages WHERE scope = 'dm' AND (fromp = ? OR to_json = ?) AND seq > ? ORDER BY seq LIMIT ?`).all(principal, JSON.stringify([principal]), after, limit);
+  return rows.map((r) => rowToStoredMessage(r));
+}
+function recentFor(s, principal, limit) {
+  const rows = s.db.prepare(`SELECT * FROM messages
+     WHERE (scope = 'room' AND room IN (SELECT room FROM members WHERE principal = ?))
+        OR (scope = 'dm' AND (fromp = ? OR to_json = ?))
+     ORDER BY seq DESC LIMIT ?`).all(principal, principal, JSON.stringify([principal]), limit);
+  return rows.map((r) => rowToStoredMessage(r));
+}
+function recentGlobal(s, limit) {
+  return s.db.prepare("SELECT * FROM messages ORDER BY seq DESC LIMIT ?").all(limit).map((r) => rowToStoredMessage(r));
+}
+function dmLogAll(s, after, limit) {
+  const rows = s.db.prepare(`SELECT * FROM messages WHERE scope = 'dm' AND seq > ? ORDER BY seq LIMIT ?`).all(after, limit);
+  return rows.map((r) => rowToStoredMessage(r));
+}
+function roomSeqHead(s, room) {
+  const row = s.db.prepare("SELECT COALESCE(MAX(seq), 0) AS s FROM messages WHERE room = ?").get(room);
+  return row.s;
+}
+function seqHead(s) {
+  const row = s.db.prepare("SELECT COALESCE(MAX(seq), 0) AS s FROM messages").get();
+  return row.s;
+}
+
+// v6/hub/store.ts
 class HubStore {
   db;
   cfg;
@@ -496,20 +669,7 @@ class HubStore {
     return out;
   }
   rowToMessage(row) {
-    return {
-      id: row.id,
-      seq: row.seq,
-      ts: row.ts,
-      scope: row.scope,
-      room: row.room === null ? undefined : row.room,
-      to: JSON.parse(row.to_json),
-      from: row.fromp,
-      text: row.text,
-      reply_to: row.reply_to === null ? undefined : row.reply_to,
-      human: row.human === 1,
-      reply_author: row.reply_author === null ? undefined : row.reply_author,
-      reply_ts: row.reply_ts === null ? undefined : row.reply_ts
-    };
+    return rowToStoredMessage(row);
   }
   atomic(fn) {
     return this.db.transaction(fn)();
@@ -683,156 +843,68 @@ class HubStore {
     this.db.prepare(`DELETE FROM messages WHERE ${where} AND id NOT IN (SELECT msg_id FROM pending) AND ts < ?`).run(...params, Date.now() - days * 86400000);
   }
   roomLog(room, after, limit) {
-    const rows = this.db.prepare(`SELECT * FROM messages WHERE room = ? AND seq > ? ORDER BY seq LIMIT ?`).all(room, after, limit);
-    return rows.map((r) => this.rowToMessage(r));
+    return roomLog(this, room, after, limit);
   }
   dmLog(principal, after, limit) {
-    const rows = this.db.prepare(`SELECT * FROM messages WHERE scope = 'dm' AND (fromp = ? OR to_json = ?) AND seq > ? ORDER BY seq LIMIT ?`).all(principal, JSON.stringify([principal]), after, limit);
-    return rows.map((r) => this.rowToMessage(r));
+    return dmLog(this, principal, after, limit);
   }
   recentFor(principal, limit) {
-    const rows = this.db.prepare(`SELECT * FROM messages
-       WHERE (scope = 'room' AND room IN (SELECT room FROM members WHERE principal = ?))
-          OR (scope = 'dm' AND (fromp = ? OR to_json = ?))
-       ORDER BY seq DESC LIMIT ?`).all(principal, principal, JSON.stringify([principal]), limit);
-    return rows.map((r) => this.rowToMessage(r));
+    return recentFor(this, principal, limit);
   }
   recentGlobal(limit) {
-    return this.db.prepare("SELECT * FROM messages ORDER BY seq DESC LIMIT ?").all(limit).map((r) => this.rowToMessage(r));
+    return recentGlobal(this, limit);
   }
   dmLogAll(after, limit) {
-    const rows = this.db.prepare(`SELECT * FROM messages WHERE scope = 'dm' AND seq > ? ORDER BY seq LIMIT ?`).all(after, limit);
-    return rows.map((r) => this.rowToMessage(r));
+    return dmLogAll(this, after, limit);
   }
   roomSeqHead(room) {
-    const row = this.db.prepare("SELECT COALESCE(MAX(seq), 0) AS s FROM messages WHERE room = ?").get(room);
-    return row.s;
+    return roomSeqHead(this, room);
   }
   seqHead() {
-    const row = this.db.prepare("SELECT COALESCE(MAX(seq), 0) AS s FROM messages").get();
-    return row.s;
+    return seqHead(this);
   }
   enqueuePending(principal, binding, m, kind) {
-    let dropped = 0;
-    let nowOverBoundary = false;
-    const bytes = utf8Count(m.text);
-    this.db.transaction(() => {
-      this.db.prepare(`INSERT INTO pending (binding_principal, binding_name, msg_id, kind, enqueued, message_bytes, conv)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`).run(principal, binding, m.id, kind, ulid(Date.now()), bytes, convKeyOf(m));
-      const stats = this.pendingStats(principal, binding);
-      while (stats.count > this.cfg.pendingMaxMessages || stats.bytes > this.cfg.pendingMaxBytes) {
-        const oldest = this.db.prepare(`SELECT msg_id FROM pending WHERE binding_principal = ? AND binding_name = ? ORDER BY rowid LIMIT 1`).get(principal, binding);
-        if (oldest === undefined)
-          break;
-        this.db.prepare("DELETE FROM pending WHERE binding_principal = ? AND binding_name = ? AND msg_id = ?").run(principal, binding, oldest.msg_id);
-        const row = this.pendingStats(principal, binding);
-        stats.count = row.count;
-        stats.bytes = row.bytes;
-        dropped++;
-      }
-      if (dropped > 0) {
-        this.db.prepare("UPDATE bindings SET expired_pending = expired_pending + ? WHERE principal = ? AND name = ?").run(dropped, principal, binding);
-        nowOverBoundary = true;
-      }
-    })();
-    return { overflowDropped: dropped, nowOverBoundary };
+    return enqueuePending(this, principal, binding, m, kind);
   }
   pendingStats(principal, binding) {
-    const row = this.db.prepare(`SELECT COUNT(*) AS c, COALESCE(SUM(message_bytes), 0) AS b FROM pending WHERE binding_principal = ? AND binding_name = ?`).get(principal, binding);
-    return { count: row.c, bytes: row.b };
+    return pendingStats(this, principal, binding);
   }
   pendingCountByKind(principal, binding) {
-    const rows = this.db.prepare(`SELECT kind, COUNT(*) AS c FROM pending WHERE binding_principal = ? AND binding_name = ? GROUP BY kind`).all(principal, binding);
-    const out = { wake: 0, passive: 0 };
-    for (const r of rows)
-      out[r.kind] = r.c;
-    return out;
+    return pendingCountByKind(this, principal, binding);
   }
   pendingMessages(principal, binding, kind) {
-    const rows = this.db.prepare(`SELECT m.* FROM pending p JOIN messages m ON m.id = p.msg_id
-       WHERE p.binding_principal = ? AND p.binding_name = ? AND p.kind = ?
-       ORDER BY p.rowid`).all(principal, binding, kind);
-    return rows.map((r) => this.rowToMessage(r));
+    return pendingMessages(this, principal, binding, kind);
   }
   deletePending(principal, binding, ids) {
-    const stmt = this.db.prepare("DELETE FROM pending WHERE binding_principal = ? AND binding_name = ? AND msg_id = ?");
-    for (const id of ids)
-      stmt.run(principal, binding, id);
+    return deletePending(this, principal, binding, ids);
   }
   consumeExpiredNotice(principal, binding) {
-    const b = this.getBinding(principal, binding);
-    if (b === undefined)
-      return 0;
-    const n = b.expiredPending;
-    if (n > 0)
-      this.db.prepare("UPDATE bindings SET expired_pending = 0 WHERE principal = ? AND name = ?").run(principal, binding);
-    return n;
+    return consumeExpiredNotice(this, principal, binding);
   }
   insertBatchRow(b) {
-    this.db.prepare(`INSERT INTO deliveries (id, binding_principal, binding_name, kind, status, msg_ids, notices, created)
-       VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)`).run(b.id, b.principal, b.binding, b.kind, JSON.stringify(b.msgIds), JSON.stringify(b.notices), Date.now());
+    return insertBatchRow(this, b);
   }
   getBatch(id) {
-    const row = this.db.prepare("SELECT * FROM deliveries WHERE id = ?").get(id);
-    if (row == null)
-      return;
-    return {
-      id: row.id,
-      principal: row.binding_principal,
-      binding: row.binding_name,
-      kind: row.kind,
-      status: row.status,
-      error: row.error === null ? undefined : row.error,
-      msgIds: JSON.parse(row.msg_ids),
-      notices: JSON.parse(row.notices),
-      created: row.created
-    };
+    return getBatch(this, id);
   }
   outstandingBatch(principal, binding, kind) {
-    const row = this.db.prepare(`SELECT * FROM deliveries WHERE binding_principal = ? AND binding_name = ? AND kind = ? AND status IN ('pending','failed')
-       ORDER BY created DESC, id DESC LIMIT 1`).get(principal, binding, kind);
-    if (!row)
-      return;
-    return { id: row.id, principal: row.binding_principal, binding: row.binding_name, kind: row.kind, status: row.status, error: row.error === null ? undefined : row.error, msgIds: JSON.parse(row.msg_ids), notices: JSON.parse(row.notices), created: row.created };
+    return outstandingBatch(this, principal, binding, kind);
   }
   outstandingBatchesOf(principal, binding) {
-    const wake = this.outstandingBatch(principal, binding, "wake");
-    const passive = this.outstandingBatch(principal, binding, "passive");
-    return [wake, passive].filter((x) => x !== undefined);
+    return outstandingBatchesOf(this, principal, binding);
   }
   deliverBatch(id, evidence) {
-    this.db.transaction(() => {
-      const row = this.getBatch(id);
-      if (row != null) {
-        const convs = new Set(this.db.prepare(`SELECT DISTINCT conv FROM pending WHERE binding_principal = ? AND binding_name = ? AND msg_id IN (${row.msgIds.map(() => "?").join(",") || "''"})`).all(row.principal, row.binding, ...row.msgIds).map((r) => r.conv));
-        this.deletePending(row.principal, row.binding, row.msgIds);
-        const now = Date.now();
-        for (const c of convs)
-          if (c !== null && !this.hasWakeWork(c))
-            this.db.prepare("UPDATE conversations SET last_drain_ts = ? WHERE conv = ?").run(now, c);
-        this.db.prepare(`UPDATE deliveries SET status = 'delivered', evidence = ? WHERE id = ?`).run(evidence, id);
-        this.db.prepare(`DELETE FROM deliveries
-           WHERE binding_principal = ? AND binding_name = ? AND status = 'delivered' AND id != ?`).run(row.principal, row.binding, id);
-      }
-    })();
+    return deliverBatch(this, id, evidence);
   }
   markBatchFailed(id, error) {
-    this.db.prepare(`UPDATE deliveries SET status = 'failed', error = ? WHERE id = ?`).run(error, id);
+    return markBatchFailed(this, id, error);
   }
   keepBatchPending(id) {
-    this.db.prepare(`UPDATE deliveries SET status = 'pending', error = NULL WHERE id = ?`).run(id);
+    return keepBatchPending(this, id);
   }
   deleteBatchRow(id) {
-    this.db.prepare("DELETE FROM deliveries WHERE id = ?").run(id);
+    return deleteBatchRow(this, id);
   }
-}
-function utf8Count(s) {
-  return new TextEncoder().encode(s).length;
-}
-function sha256Hex(s) {
-  const hasher = new Bun.CryptoHasher("sha256");
-  hasher.update(s);
-  return hasher.digest("hex");
 }
 
 // v6/cli/hook.ts

@@ -8,6 +8,7 @@ import { loadCredential, type Credential } from '../../client/credential.ts'
 import { bindingName } from '../../client/hooksocket.ts'
 import { INSTRUCTIONS, TOOL, parseSendArgs, readStdio, stdoutWriter } from '../../client/mcp.ts'
 import { READ_TOOL, parseReadArgs, readHistory } from '../../client/read.ts'
+import { negotiateProtocol } from '../../client/mcp-version.ts'
 import { CodexBridge } from './bridge.ts'
 import { StdioAppServer } from './appserver.ts'
 
@@ -47,7 +48,7 @@ async function main (): Promise<void> {
     const { id, method, params } = msg
     if (method === 'initialize') {
       await reply(id, {
-        protocolVersion: typeof params?.protocolVersion === 'string' ? params.protocolVersion : '2025-06-18',
+        protocolVersion: negotiateProtocol(params?.protocolVersion),
         capabilities: { tools: {} },
         serverInfo: { name: 'vortex', version: '6.0.0' },
         instructions: INSTRUCTIONS,

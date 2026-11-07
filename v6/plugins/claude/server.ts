@@ -10,6 +10,7 @@ import { Bridge } from './bridge.ts'
 import { bindingName } from '../../client/hooksocket.ts'
 import { INSTRUCTIONS, TOOL, parseSendArgs, readStdio, stdoutWriter } from '../../client/mcp.ts'
 import { READ_TOOL, parseReadArgs, readHistory } from '../../client/read.ts'
+import { negotiateProtocol } from '../../client/mcp-version.ts'
 
 export { TOOL, parseSendArgs }
 
@@ -46,7 +47,7 @@ async function main (): Promise<void> {
     const { id, method, params } = msg
     if (method === 'initialize') {
       await reply(id, {
-        protocolVersion: typeof params?.protocolVersion === 'string' ? params.protocolVersion : '2025-06-18',
+        protocolVersion: negotiateProtocol(params?.protocolVersion),
         capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
         serverInfo: { name: 'vortex', version: '6.0.0' },
         instructions: INSTRUCTIONS,

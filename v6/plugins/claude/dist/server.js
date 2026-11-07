@@ -874,6 +874,12 @@ async function readHistory(client, args) {
 [vx: next after=${next}; more=${more}]`;
 }
 
+// v6/client/mcp-version.ts
+var SUPPORTED_PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"];
+function negotiateProtocol(requested) {
+  return typeof requested === "string" && SUPPORTED_PROTOCOLS.includes(requested) ? requested : SUPPORTED_PROTOCOLS[0];
+}
+
 // v6/plugins/claude/server.ts
 function resolveCredential() {
   const file = process.env.VORTEX_CREDENTIAL_FILE;
@@ -906,7 +912,7 @@ async function main() {
     const { id, method, params } = msg;
     if (method === "initialize") {
       await reply(id, {
-        protocolVersion: typeof params?.protocolVersion === "string" ? params.protocolVersion : "2025-06-18",
+        protocolVersion: negotiateProtocol(params?.protocolVersion),
         capabilities: { tools: {}, experimental: { "claude/channel": {} } },
         serverInfo: { name: "vortex", version: "6.0.0" },
         instructions: INSTRUCTIONS

@@ -298,8 +298,11 @@ export class Api {
     const bindings = this.deps.store.allBindings().filter(b => operator || b.principal === principal)
     const openStreams = this.deps.delivery.openStreams().filter(s => operator || s.principal === principal)
     const now = Date.now()
-    // DM conversation keys name both principals: only the operator sees others' DMs.
-    const cooling = this.deps.store.coolingConversations(now).filter(c => operator || !c.conv.includes('|') || c.conv.slice(3).split('|').includes(principal))
+    // Only the operator sees every conversation; a peer sees its own DM pairs and
+    // its member rooms (room names are never confirmed to non-members, as in roomLog).
+    const cooling = this.deps.store.coolingConversations(now).filter(c => operator || (c.conv.startsWith('dm:')
+      ? c.conv.slice(3).split('|').includes(principal)
+      : this.deps.store.isMember(c.conv.slice('room:'.length), principal)))
     const payload = {
       seq: this.deps.store.seqHead(),
       bindings: bindings.map(b => {

@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { HubStore, type StoredMessage } from './store.ts'
 import { Delivery, type ServerFrame, type SocketLike } from './delivery.ts'
+import { Api } from './api.ts'
 import { DEFAULT_CONFIG, type HubConfig } from './config.ts'
 
 function withStore (over: Partial<HubConfig>, fn: (s: HubStore, cfg: HubConfig) => Promise<void> | void): () => Promise<void> {
@@ -59,5 +60,28 @@ test('F8: a retried wake batch whose messages are gone frees the slot for waitin
     const later = sock.frames.filter(f => f.type === 'batch' && f.messages.some(x => x.id === second.id))
     assert.ok(later.length > 0, 'the waiting wake row goes out once the empty batch is gone')
     assert.equal(new Set(later.map(f => f.type === 'batch' ? f.batch : '')).size, 1, 'in one batch (retries reuse its id)')
+  } finally { d.stop() }
+}))
+
+async function call (api: Api, token: string, method: string, path: string, body?: string): Promise<{ status: number; json: any }> {
+  const req = new Request(`http://hub${path}`, { method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, ...(body === undefined ? {} : { body }) })
+  const res = await api.handlers().fetch(req, {}) as Response
+  return { status: res.status, json: await res.json() }
+}
+
+test('F6: /v1/status shows a peer only the cooling rooms it is a member of', withStore({ loopBreakerLimit: 1 }, async (s, cfg) => {
+  const alice = s.createPrincipal('alice').token
+  s.createPrincipal('carol')
+  const d = new Delivery(s, cfg)
+  const api = new Api({ cfg, store: s, delivery: d, skipRateLimit: true })
+  try {
+    s.insertMessage({ from: 'carol', to: [], scope: 'room', room: 'secret-ops', text: 'x', human: false })
+    assert.ok(s.isCooling('room:secret-ops', Date.now()), 'precondition: the room is cooling')
+    const r = await call(api, alice, 'GET', '/v1/status')
+    assert.equal(r.status, 200)
+    assert.deepEqual(r.json.cooling.map((c: { conv: string }) => c.conv), [], 'a non-member learns no room name')
+    s.addMember('secret-ops', 'alice')
+    const member = await call(api, alice, 'GET', '/v1/status')
+    assert.deepEqual(member.json.cooling.map((c: { conv: string }) => c.conv), ['room:secret-ops'])
   } finally { d.stop() }
 }))

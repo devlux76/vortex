@@ -65,3 +65,23 @@ test('a unix path that only mentions p2p gives undefined', () => {
 test('one bad address rejects the whole list', () => {
   assert.equal(openContact(encodeContact([addr(7810), 'junk']), peer), undefined)
 })
+
+// Docs: VORTEX_v5.1.md section 4.2
+test('exactly eight addresses are accepted', () => {
+  const addrs = [1, 2, 3, 4, 5, 6, 7, 8].map(n => addr(7800 + n))
+  assert.deepEqual(openContact(encodeContact(addrs), peer), addrs)
+})
+
+// Docs: VORTEX_v5.1.md section 4.2
+test('an IPv6 address is accepted', () => {
+  const addrs = ['/ip6/::1/tcp/7810/p2p/' + peer]
+  assert.deepEqual(openContact(encodeContact(addrs), peer), addrs)
+})
+
+// Docs: VORTEX_v5.1.md section 4.2
+test('a relayed address belongs to the peer after the relay, not to the relay', async () => {
+  const relay = peerIdFromPrivateKey(await generateKeyPair('Ed25519')).toString()
+  const relayed = addr(7810, relay) + '/p2p-circuit/p2p/' + peer
+  assert.deepEqual(openContact(encodeContact([relayed]), peer), [relayed])
+  assert.equal(openContact(encodeContact([relayed]), relay), undefined)
+})

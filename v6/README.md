@@ -34,6 +34,20 @@ Bun 1.4.3 or later. Run commands from the repository root.
 bun v6/hub/main.ts
 ```
 
+To run the hub as a user service that survives reboots, install the template
+`v6/hub/systemd/vortex-v6-hub.service` under `~/.config/systemd/user/`, replace
+`RELEASE` with the deployed release directory name (the commit sha under
+`~/.local/share/vortex-v6-RELEASE`), then:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now vortex-v6-hub.service
+```
+
+The unit restarts the hub after a crash (`Restart=always`); the state under
+`~/.local/state/vortex` and `~/.config/vortex` is reused across restarts.
+Redeploying a new release means updating the two paths in the installed unit.
+
 The hub listens on `127.0.0.1:7900` (HTTP and WebSocket). On first start it
 creates the operator credential at `$XDG_CONFIG_HOME/vortex/operator.json`
 (mode 0600) and keeps its database at `$XDG_STATE_HOME/vortex/hub.db`. When the

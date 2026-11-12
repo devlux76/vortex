@@ -97,9 +97,9 @@ export class Api {
     const isUpgrade = path.startsWith('/v1/bindings/') && path.endsWith('/stream') && req.method === 'GET'
     if (isUpgrade && req.headers.has(STREAM_AUTH_HEADER)) return signedUpgrade(this, req, server, path)
     if (req.headers.has(AUTH_HEADER)) {
-      // Signed edge request (A7 §3). Stream auth (challenge-response) is not
-      // built yet, so a signed upgrade is refused; mixing schemes is refused.
-      if (isUpgrade) return new Response('signed stream auth is not implemented yet; use HTTP', { status: 401 })
+      // Signed edge request (A7 §3). Streams authenticate with VX-Stream-Auth
+      // and a challenge (api-stream.ts), never with a per-request VX-Auth.
+      if (isUpgrade) return new Response('streams authenticate with VX-Stream-Auth (challenge-response), not VX-Auth', { status: 401 })
       if (req.headers.has('authorization')) return json({ error: 'send VX-Auth or Authorization, not both' }, 400)
       try {
         const body = new Uint8Array(await req.arrayBuffer())

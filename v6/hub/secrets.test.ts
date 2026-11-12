@@ -46,6 +46,7 @@ const SAMPLES: Record<string, string> = {
   'stripe-key': 'sk' + '_live_' + r(24, 'z'),
   jwt: 'ey' + 'J' + mix(20) + '.ey' + 'J' + mix(20) + '.' + mix(20),
   'libp2p-key': LIBP2P_PRIVATE.ed25519,
+  'jwk-private-key': JSON.stringify({ crv: 'Ed25519', ['d']: mix(43), ext: true, key_ops: ['sign'], kty: 'OKP', x: mix(43) }),
   'bearer-credential': 'Authorization: Bear' + 'er ' + mix(32),
 }
 

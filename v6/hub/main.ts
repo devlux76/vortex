@@ -73,6 +73,7 @@ export async function startHub (over: { cfg?: Partial<HubConfig>; stateDir?: str
     fingerprint = hasher.digest('hex')
   }
 
+  api.hubId = fingerprint
   const listen = parseListen(cfg.listen)
   const handlers = api.handlers()
   const plain = Bun.serve({

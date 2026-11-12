@@ -9,6 +9,8 @@ import type { HubConfig } from './config.ts'
 import { PRINCIPAL_RE, ROOM_RE, BINDING_RE } from './config.ts'
 import { fitSingle, type Bounds } from '../client/render.ts'
 import { findSecret, SecretRefusals } from './secrets.ts'
+import { EdgeAuth, EdgeAuthError, type EdgeIdentity } from './edge-auth.ts'
+import { AUTH_HEADER } from '../client/edge-sign.ts'
 
 const EVIDENCE_KINDS: Evidence[] = ['host-accepted', 'transport-written', 'hook-returned']
 
@@ -42,9 +44,15 @@ export class Api {
   /** Refused credential-shaped sends per principal since start (A6 §2). */
   readonly refusals = new SecretRefusals()
   readonly deps: HubServerDeps
+  /** Hub id bound into signed requests: the TLS certificate fingerprint (A7 §3). */
+  hubId: string | undefined
+  readonly edgeAuth: EdgeAuth
+  /** Requests authenticated by signature, keyed by the rebuilt Request object. */
+  private signed = new WeakMap<Request, EdgeIdentity>()
 
   constructor (deps: HubServerDeps) {
     this.deps = deps
+    this.edgeAuth = new EdgeAuth(deps.store, () => this.hubId)
   }
 
   /** Test seam: clear the sliding send-rate windows. */
@@ -72,6 +80,8 @@ export class Api {
   }
 
   private authorized (req: Request): string | undefined {
+    const edge = this.signed.get(req)
+    if (edge !== undefined) return edge.principal
     const auth = req.headers.get('authorization') ?? ''
     if (!auth.startsWith('Bearer ')) return undefined
     return this.deps.store.verifyToken(auth.slice(7))
@@ -81,6 +91,21 @@ export class Api {
     const url = new URL(req.url)
     const path = url.pathname
     const isUpgrade = path.startsWith('/v1/bindings/') && path.endsWith('/stream') && req.method === 'GET'
+    if (req.headers.has(AUTH_HEADER)) {
+      // Signed edge request (A7 §3). Stream auth (challenge-response) is not
+      // built yet, so a signed upgrade is refused; mixing schemes is refused.
+      if (isUpgrade) return new Response('signed stream auth is not implemented yet; use HTTP', { status: 401 })
+      if (req.headers.has('authorization')) return json({ error: 'send VX-Auth or Authorization, not both' }, 400)
+      try {
+        const body = new Uint8Array(await req.arrayBuffer())
+        const identity = await this.edgeAuth.verify(req, body)
+        req = new Request(req.url, { method: req.method, headers: req.headers, body: body.length > 0 ? body : undefined })
+        this.signed.set(req, identity)
+      } catch (e) {
+        if (e instanceof EdgeAuthError) return json({ error: e.message }, e.status)
+        throw e
+      }
+    }
     if (isUpgrade) {
       const name = path.slice('/v1/bindings/'.length, -'/stream'.length)
       if (!BINDING_RE.test(name)) return new Response('bad binding name', { status: 400 })
@@ -161,8 +186,15 @@ export class Api {
         room = body.room
       } else room = 'all'
     }
+    // An unsealed edge key (A7 §2, cloud peers) posts only to its named rooms.
+    const edge = this.signed.get(req)
+    if (edge?.key.custody === 'unsealed') {
+      if (scope === 'dm') return json({ error: 'an unsealed key may not send DMs' }, 403)
+      if (!(edge.key.rooms ?? []).includes(room!)) return json({ error: `this key may post only to: ${(edge.key.rooms ?? []).join(', ')}` }, 403)
+    }
     let reply_to: string | undefined
-    let human_turn = body.human_turn === true
+    // An edge client is driven by a model, so it never reports a human turn (§8.5).
+    let human_turn = body.human_turn === true && edge === undefined
     let reply_author: string | undefined
     let reply_ts: number | undefined
     if (body.reply_to !== undefined) {
@@ -231,6 +263,7 @@ export class Api {
   private async putBinding (req: Request, _url: URL, name: string): Promise<Response> {
     const principal = this.authorized(req)
     if (principal === undefined) return json({ error: 'unauthorized' }, 401)
+    if (this.signed.get(req)?.key.custody === 'unsealed') return json({ error: 'an unsealed key may not create delivery bindings' }, 403)
     let body: { rooms?: unknown }
     try { body = await req.json() as { rooms?: unknown } } catch { return json({ error: 'invalid JSON body' }, 400) }
     if (body === null || typeof body !== 'object' || Array.isArray(body)) return json({ error: 'invalid body' }, 400)

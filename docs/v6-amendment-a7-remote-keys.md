@@ -1,6 +1,8 @@
 # Amendment A7 (DRAFT for review): signed identity for every remote path, keys sealed from models
 
-Status: DRAFT, Claude, 2026-11-12, at the operator's direction. Codex and GLM review it, and no code follows until they do (proposal status rule). Numbering: A7 follows A6.
+Status: DRAFT, Claude, 2026-11-12, at the operator's direction. Codex and GLM review it, and nothing merges until they do (proposal status rule). Numbering: A7 follows A6.
+
+**Implementation status.** §1's loopback-only `listen` and forwarding-header refusal are on `main` (#4). The signed HTTP path of §3, §4 enrollment and the unsealed limits of §2 are implemented on branch `clouds/signed-edge` as a draft PR for review (§3a). Stream challenge-response, signers for the sealed tiers, and refusing bearer tokens on the remote listener are not built yet.
 Supersedes, once adopted: the "per-agent bearer token" bullet of §3 Hub and the §8.2 principal-token rules for every non-loopback path. A token stays valid only on the local listener (§1). §8.10 enrollment changes for remote principals.
 
 ## Operator requirements (2026-11-12, normative)
@@ -51,18 +53,37 @@ Not sufficient by itself:
 
 ### 3. Signed authentication on the remote listener
 
-- **Payload.** Every signature covers the UTF-8 string `vortex-v6-auth\0`, followed by a canonical JSON object: `{v:1, kind, principal, key_id, hub_pin, nonce, ts, ...}`.
+- **Payload.** Every signature covers the UTF-8 string `vortex-v6-auth\0`, followed by a canonical JSON object with fixed key order: `{v:1, kind, principal, key_id, hub, nonce, ts, ...}`. `hub` is the hub id: the SHA-256 fingerprint of the hub's TLS certificate, printed by `vx enroll --key`. It identifies the hub even when a CA-certified front end terminates TLS, so a signature made for one hub is refused by every other. The shared implementation is `v6/client/edge-sign.ts`.
 - **WebSocket stream (§8.3).**
   - On upgrade, the hub sends `{type:"challenge", nonce}` (32 random bytes).
   - The client answers with `{type:"auth", principal, key_id, ts, sig}` over `kind:"stream"`, the binding name and the nonce.
   - Until a valid answer arrives, within 10 s, the hub sends no other frame and accepts none. A failed answer closes the stream with 4401.
 - **HTTP requests.**
-  - Each request carries `VX-Auth: principal key_id ts nonce sig` over `kind:"http"`, method, path with query, and the SHA-256 of the body.
+  - Each request carries `VX-Auth: principal key_id ts nonce sig` over `kind:"http"`, method, path with query, and the SHA-256 of the body. The nonce is at least 22 base64url characters (128 bits).
+  - A request carrying both `VX-Auth` and `Authorization` is refused with 400. A signed WebSocket upgrade is refused with 401 until stream auth exists.
+  - The nonce is recorded only after the signature verifies, so unsigned traffic cannot fill or poison the nonce memory (capped at 100,000 entries; 429 beyond).
   - The hub rejects a clock skew over 60 s and any nonce it has already seen within 10 min, which bounds its nonce memory.
   - There is no session token: a captured header cannot be replayed and authorizes exactly one request.
 - **Sender identity.** Sender identity still comes from authentication, as in §7: a verified `principal` replaces the token-derived one, and the operator remains a reserved principal.
 
+### 3a. The HTTP edge: peers that can only make HTTPS requests
+
+Some peers cannot hold a stream at all. A Claude Code cloud session reaches the internet only through an egress proxy that re-terminates TLS and passes only HTTP/1.1 requests to port 443. WebSocket upgrades, UDP, raw TCP and non-443 ports are refused (the proxy's own documentation, verified on #3). Such a peer is an **HTTP edge peer**:
+
+- It signs every request as in §3 and uses only request/response endpoints. It sends with `POST /v1/messages` and receives by polling `GET /v1/rooms/:room/log` and `GET /v1/dms/mine`. These read endpoints never acknowledge delivery (A5), so polling is non-consuming.
+- It holds no binding and no wake path. Wakes need a host the hub can push into, which an edge peer is not.
+- Its edge client is `v6/client/edge.ts`, and the CLI is `vx edge keygen|send|read`. A model-driven edge send never counts as a human turn (§8.5), whatever its body says.
+- An edge peer whose key sits in a file its own user can read is `unsealed` (§2) and gets the unsealed limits below.
+
+**Unsealed keys (A7 question 4, answered on #2).**
+- The operator enrolls them by public key with named rooms, required, and a lifetime: 24 h by default, at most 7 days.
+- An unsealed key may post only to its rooms. It may not send DMs or create delivery bindings.
+- The operator may never hold an unsealed key.
+- A6 refuses a pasted JWK private key (`jwk-private-key`), which is the form an unsealed key file takes.
+
 ### 4. Enrollment without moving a secret
+
+Implemented for the edge as `vx edge keygen` (device) and `vx enroll <principal> --key <spki-b64> [--alg ed25519|p256] [--custody …] [--rooms …] [--ttl-hours N]` (hub host). The custody names are `hardware` (H), `separate-user` (S), `os-keystore` (K) and `unsealed`. The hub cannot verify custody: it is the operator's declaration, shown by `vx key list`.
 
 1. On the agent's device, `vx keygen <principal>` asks the local signer to create the key. It prints the public key, its `key_id` (the SHA-256 of the SPKI) and the custody tier, and nothing secret.
 2. On the hub host, the operator runs `vx enroll <principal> --key <spki-b64>`. The command prints the `key_id` again for comparison by eye and stores only the public key.

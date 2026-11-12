@@ -27,6 +27,7 @@ The most direct target is VORTEX's own credential. Every agent holds a `vt_` hub
   - AWS access key ids
   - GitHub, Anthropic, OpenAI, Slack, Google API and Stripe live keys
   - JWTs
+  - JWK private keys (`jwk-private-key`): one JSON object holding both `kty` and a private `d` member of 40 or more base64url characters, in either order. This is the form of an A7 unsealed edge key file. Public JWKs have no `d` and pass.
   - marshalled libp2p private keys (`libp2p-key`): base64 protobuf `08 <type> 12 <len> <key>` (prefix `CAAS`, `CAES`, `CAIS` or `CAMS`) whose key bytes are a private key of that type: a 64-byte Ed25519 key, a 32-byte secp256k1 scalar, or a PKCS#1 RSA or SEC1 ECDSA DER key. Marshalled public keys use the same framing and pass.
   - `Bearer <credential>`
 

@@ -65,6 +65,13 @@ move the plain listener and add a TLS listener for other devices:
 With `tls.listen` set, the hub generates a self-signed certificate once and
 prints its SHA-256 fingerprint. Clients on other machines pin that fingerprint.
 
+The plain `listen` address must be loopback (`127.0.0.1`, `::1` or
+`localhost`); the hub refuses to start otherwise, because that listener carries
+bearer tokens unencrypted. It also refuses, with status 421, any request carrying
+a forwarding header (`X-Forwarded-For`, `Forwarded`, Cloudflare or Tailscale
+headers). Point a tunnel or reverse proxy at `tls.listen`, never at the loopback
+port.
+
 Default limits: 4 KiB per message, 16 recipients, 30 sends per minute; a
 delivery batch holds at most 20 messages or 8 KiB. Wakes are coalesced for 2 s,
 spaced at least 10 s apart, and capped at 60 per hour per binding.

@@ -74,7 +74,39 @@ export const PRINCIPAL_RE = /^[a-z][a-z0-9-]{0,31}$/
 export const ROOM_RE = /^[a-z0-9-]{1,32}$/
 export const BINDING_RE = /^[a-z][a-z0-9-]{0,31}$/
 
-/** Parse "host:port" or ":port"; a bare port parses as loopback. */
+/**
+ * The plain listener carries bearer tokens unencrypted, so it must be loopback
+ * (A7 §1): 127.0.0.0/8, ::1 or localhost. Other devices use `tls.listen`.
+ */
+export function isLoopbackHost (host: string): boolean {
+  const h = host.replace(/^\[|\]$/g, '').toLowerCase()
+  return h === 'localhost' || h === '::1' || /^127(?:\.\d{1,3}){3}$/.test(h)
+}
+
+/** Throws unless `listen` parses and names a loopback host. */
+export function assertLoopbackListen (s: string): void {
+  const { host } = parseListen(s)
+  if (!isLoopbackHost(host)) {
+    throw new Error(`hub config listen must be a loopback address (127.0.0.1, ::1 or localhost), got ${JSON.stringify(s)}; use tls.listen for other devices (A7 §1)`)
+  }
+}
+
+/**
+ * The `ws://` URL a client on the hub host uses to reach the plain listener: the
+ * bound host itself, bracketed for IPv6, so `[::1]` or `127.0.0.2` work and a
+ * client never points at an address the hub did not bind.
+ */
+export function localHubUrl (listen: string): string {
+  const { host, port } = parseListen(listen)
+  const h = host.replace(/^\[|\]$/g, '')
+  return `ws://${h.includes(':') ? `[${h}]` : h}:${port}`
+}
+
+/**
+ * Parse "host:port", ":port" or a bare port. A bare port parses as loopback;
+ * ":port" deliberately means every interface (0.0.0.0), which is valid for
+ * `tls.listen` and refused for `listen` by assertLoopbackListen.
+ */
 export function parseListen (s: string): { host: string; port: number } {
   const trimmed = s.trim()
   const at = trimmed.lastIndexOf(':')
@@ -146,7 +178,7 @@ export function parseHubConfig (raw: unknown): HubConfig {
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (key === 'listen') {
       if (typeof value !== 'string') throw new Error('hub config listen must be a string')
-      parseListen(value)
+      assertLoopbackListen(value)
       cfg.listen = value
       continue
     }

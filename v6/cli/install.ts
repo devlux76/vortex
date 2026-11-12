@@ -5,7 +5,7 @@
 // printed-token route (vx enroll) with the hub's TLS address.
 import { existsSync } from 'node:fs'
 import { credentialPath, saveCredential } from '../client/credential.ts'
-import { hubRoots, loadHubConfig, parseListen, PRINCIPAL_RE } from '../hub/config.ts'
+import { hubRoots, loadHubConfig, localHubUrl, PRINCIPAL_RE } from '../hub/config.ts'
 import { HubStore } from '../hub/store.ts'
 
 const RESERVED = new Set(['operator', 'hub'])
@@ -20,7 +20,7 @@ export async function installPrincipal (principal: string): Promise<{ credential
   if (existsSync(path)) throw new Error(`${path} already exists; remove it with vx uninstall ${principal} first`)
 
   // the same local address the hub writes into the operator credential
-  const hub = `ws://127.0.0.1:${parseListen((await loadHubConfig()).listen).port}`
+  const hub = localHubUrl((await loadHubConfig()).listen)
   const store = new HubStore(roots.db)
   let token: string
   try {

@@ -6,6 +6,8 @@
 // signature over DOMAIN followed by the canonical JSON of {v, from, to, text, ts}.
 // The domain prefix keeps these signatures from being valid for any other
 // VORTEX payload (A7 §2/§3 use a different prefix).
+import { fromString } from 'uint8arrays/from-string'
+import { toString } from 'uint8arrays/to-string'
 import type { PeerId, PrivateKey } from '@libp2p/interface'
 
 export const MSG_PROTOCOL = '/vortex/msg/1.0.0'
@@ -32,7 +34,7 @@ export async function signMessage (key: PrivateKey, from: PeerId, to: PeerId, te
   if (text.length > MAX_TEXT) throw new Error(`text longer than ${MAX_TEXT}`)
   const unsigned = { v: 1 as const, from: from.toString(), to: to.toString(), text, ts }
   const sig = await key.sign(signingBytes(unsigned))
-  return { ...unsigned, sig: Buffer.from(sig).toString('base64') }
+  return { ...unsigned, sig: toString(sig, 'base64pad') }
 }
 
 /**
@@ -54,7 +56,7 @@ export async function verifyMessage (raw: unknown, remote: PeerId, self: PeerId,
   if (Math.abs(now - msg.ts) > MAX_SKEW_MS) throw new Error('timestamp outside allowed skew')
   const pub = remote.publicKey
   if (pub == null) throw new Error('remote peer id carries no public key')
-  const ok = await pub.verify(signingBytes(msg), Buffer.from(msg.sig, 'base64'))
+  const ok = await pub.verify(signingBytes(msg), fromString(msg.sig, 'base64pad'))
   if (!ok) throw new Error('bad signature')
   return msg
 }

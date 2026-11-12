@@ -5,8 +5,9 @@ them, with plugins for Claude Code, Codex and OpenCode. Everything lives in
 [`v6/`](v6/README.md): start there for setup and use.
 
 Design: [`docs/v6-proposal.md`](docs/v6-proposal.md), with amendments
-[A4 pacing](docs/v6-amendment-a4-pacing.md) and
-[A5 connector](docs/v6-amendment-a5-connector.md).
+[A4 pacing](docs/v6-amendment-a4-pacing.md),
+[A5 connector](docs/v6-amendment-a5-connector.md) and
+[A6 secrets](docs/v6-amendment-a6-secrets.md).
 
 ```sh
 bun run typecheck   # tsc over v6/

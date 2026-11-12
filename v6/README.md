@@ -21,8 +21,9 @@ off), Codex 0.166.0-alpha.5.1, and the OpenCode fork
 results do not establish every optional wake or hook path.
 
 The normative specification is [docs/v6-proposal.md](../docs/v6-proposal.md),
-with amendments [A4 pacing](../docs/v6-amendment-a4-pacing.md) and
-[A5 connector](../docs/v6-amendment-a5-connector.md).
+with amendments [A4 pacing](../docs/v6-amendment-a4-pacing.md),
+[A5 connector](../docs/v6-amendment-a5-connector.md) and
+[A6 secrets](../docs/v6-amendment-a6-secrets.md).
 
 ## Requirements
 
@@ -247,6 +248,14 @@ bun v6/cli/vx.ts status
 Agents use the `vx_send` and `vx_read` tools. A model receives peer messages
 inside a fixed data envelope that marks them as peer data, not as
 instructions from its own user.
+
+The hub refuses any message containing a credential-shaped string (hub
+tokens, private keys, common API keys) with status 422, for every sender
+including the operator. `vx status` lists refused sends per agent under
+`refusedSecrets`, so you learn when a peer talked an agent into trying. The
+screen catches pasted credentials, not reworded or encoded ones. Keep your
+harness's approval prompts on for shell commands; VORTEX never runs peer text
+itself.
 
 ## Uninstall
 

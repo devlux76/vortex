@@ -3,7 +3,7 @@
 // (mode 0600, once), optional TLS cert (self-signed, generated once), then the
 // plain and (optional) TLS listeners. Run: `bun v6/hub/main.ts`
 import { mkdirSync, existsSync, writeFileSync, readFileSync, chmodSync } from 'node:fs'
-import { loadHubConfig, hubRoots, parseListen, type HubConfig } from './config.ts'
+import { loadHubConfig, hubRoots, parseListen, assertLoopbackListen, type HubConfig } from './config.ts'
 import { HubStore } from './store.ts'
 import { Delivery } from './delivery.ts'
 import { Api } from './api.ts'
@@ -30,6 +30,7 @@ export async function startHub (over: { cfg?: Partial<HubConfig>; stateDir?: str
   for (const [k, v] of Object.entries(over.cfg ?? {})) {
     ;(cfg as any)[k] = v
   }
+  assertLoopbackListen(cfg.listen) // A7 §1: also covers programmatic overrides
   const store = new HubStore(roots.db, cfg)
   const delivery = new Delivery(store, cfg)
   delivery.start() // A4: expire cooldowns that passed while down; arm the next expiry
@@ -73,10 +74,22 @@ export async function startHub (over: { cfg?: Partial<HubConfig>; stateDir?: str
   }
 
   const listen = parseListen(cfg.listen)
+  const handlers = api.handlers()
   const plain = Bun.serve({
     hostname: listen.host,
     port: listen.port,
-    ...api.handlers(),
+    websocket: handlers.websocket,
+    // A tunnel or reverse proxy aimed at the loopback listener would make
+    // remote traffic look local (A7 §1). Requests it forwards carry one of
+    // these headers; refuse them before authentication or upgrade.
+    fetch: (req: Request, server: any) => {
+      const via = forwardedBy(req)
+      if (via !== undefined) {
+        console.error(`[vortexd] refused forwarded request on the loopback listener (${via}); point tunnels at tls.listen`)
+        return new Response('forwarded requests are not accepted on the loopback listener; use the TLS listener', { status: 421 })
+      }
+      return handlers.fetch(req, server)
+    },
   })
 
   let tls: ReturnType<typeof Bun.serve> | undefined
@@ -111,3 +124,14 @@ void (async () => {
   if (!isMain) return
   await startHub()
 })()
+
+/** Headers added by reverse proxies and tunnels (A7 §1). */
+export const FORWARDING_HEADERS = [
+  'forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip',
+  'cf-connecting-ip', 'true-client-ip', 'tailscale-user-login', 'tailscale-funnel-request',
+] as const
+
+/** The first forwarding header present on `req`, or undefined. */
+export function forwardedBy (req: Request): string | undefined {
+  return FORWARDING_HEADERS.find(h => req.headers.has(h))
+}

@@ -244,6 +244,16 @@ var DEFAULT_CONFIG = {
 var PRINCIPAL_RE = /^[a-z][a-z0-9-]{0,31}$/;
 var ROOM_RE = /^[a-z0-9-]{1,32}$/;
 var BINDING_RE = /^[a-z][a-z0-9-]{0,31}$/;
+function isLoopbackHost(host) {
+  const h = host.replace(/^\[|\]$/g, "").toLowerCase();
+  return h === "localhost" || h === "::1" || /^127(?:\.\d{1,3}){3}$/.test(h);
+}
+function assertLoopbackListen(s) {
+  const { host } = parseListen(s);
+  if (!isLoopbackHost(host)) {
+    throw new Error(`hub config listen must be a loopback address (127.0.0.1, ::1 or localhost), got ${JSON.stringify(s)}; use tls.listen for other devices (A7 \xA71)`);
+  }
+}
 function parseListen(s) {
   const trimmed = s.trim();
   const at = trimmed.lastIndexOf(":");
@@ -304,7 +314,7 @@ function parseHubConfig(raw) {
     if (key === "listen") {
       if (typeof value !== "string")
         throw new Error("hub config listen must be a string");
-      parseListen(value);
+      assertLoopbackListen(value);
       cfg.listen = value;
       continue;
     }

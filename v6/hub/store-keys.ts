@@ -90,15 +90,17 @@ export function listKeys (s: HubStore, principal?: string): KeyRow[] {
  * table survives restarts, so a signed request cannot be replayed after the
  * hub restarts within its skew window (Sun's QA finding 1 on #7).
  */
-export function claimNonce (s: HubStore, keyId: string, nonce: string, expires: number, now = Date.now()): boolean {
+export function claimNonce (s: HubStore, keyId: string, nonce: string, expires: number, cap: number, now = Date.now()): 'ok' | 'used' | 'full' {
   ensureKeysSchema(s)
-  s.db.prepare('DELETE FROM edge_nonces WHERE expires <= ?').run(now)
-  return s.db.prepare('INSERT OR IGNORE INTO edge_nonces (key_id, nonce, expires) VALUES (?, ?, ?)').run(keyId, nonce, expires).changes === 1
-}
-
-export function nonceCount (s: HubStore): number {
-  ensureKeysSchema(s)
-  return (s.db.prepare('SELECT COUNT(*) AS n FROM edge_nonces').get() as { n: number }).n
+  // One transaction: prune expired rows first, so a table that reached the cap
+  // drains as its rows expire (Sun, #7 re-QA), then check the cap and claim.
+  return s.db.transaction((): 'ok' | 'used' | 'full' => {
+    s.db.prepare('DELETE FROM edge_nonces WHERE expires <= ?').run(now)
+    if (s.db.prepare('SELECT 1 FROM edge_nonces WHERE key_id = ? AND nonce = ?').get(keyId, nonce) != null) return 'used'
+    if ((s.db.prepare('SELECT COUNT(*) AS n FROM edge_nonces').get() as { n: number }).n >= cap) return 'full'
+    s.db.prepare('INSERT INTO edge_nonces (key_id, nonce, expires) VALUES (?, ?, ?)').run(keyId, nonce, expires)
+    return 'ok'
+  }).immediate()
 }
 
 /** Revocation takes effect on the next request (A7 §4). Returns false if unknown. */

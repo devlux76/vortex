@@ -29,6 +29,18 @@ export function recentFor (s: HubStore, principal: string, limit: number): Store
   return rows.map(r => rowToStoredMessage(r))
 }
 
+/** Newest messages in the given rooms that the principal belongs to; the room scope applies before the limit. */
+export function recentInRooms (s: HubStore, principal: string, rooms: string[], limit: number): StoredMessage[] {
+  if (rooms.length === 0) return []
+  const rows = s.db.prepare(
+    `SELECT * FROM messages
+     WHERE scope = 'room' AND room IN (${rooms.map(() => '?').join(',')})
+       AND room IN (SELECT room FROM members WHERE principal = ?)
+     ORDER BY seq DESC LIMIT ?`,
+  ).all(...rooms, principal, limit) as any[]
+  return rows.map(r => rowToStoredMessage(r))
+}
+
 /** Operator-sovereign recent: every message, newest-first (§8.2 operator). */
 export function recentGlobal (s: HubStore, limit: number): StoredMessage[] {
   return (s.db.prepare('SELECT * FROM messages ORDER BY seq DESC LIMIT ?').all(limit) as any[])

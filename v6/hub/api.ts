@@ -11,6 +11,7 @@ import { fitSingle, type Bounds } from '../client/render.ts'
 import { findSecret, SecretRefusals } from './secrets.ts'
 import { EdgeAuth, EdgeAuthError, type EdgeIdentity } from './edge-auth.ts'
 import { AUTH_HEADER } from '../client/edge-sign.ts'
+import { recentInRooms } from './store-log.ts'
 
 const EVIDENCE_KINDS: Evidence[] = ['host-accepted', 'transport-written', 'hook-returned']
 
@@ -345,11 +346,14 @@ export class Api {
     const limit = clampInt(url.searchParams.get('limit'), 1, this.deps.cfg.logLimitMax, 200)
     // Visible to the caller: member rooms + own DMs (A1 /vx-recent source);
     // the operator reads everything (§8.2 operator sovereignty).
-    const messages = principal === 'operator'
-      ? this.deps.store.recentGlobal(limit)
-      : this.deps.store.recentFor(principal, limit)
+    // An unsealed key's rooms scope the query itself, before the limit (Sun, #7 re-QA).
     const keyRooms = this.unsealedRooms(req)
-    return json({ messages: keyRooms === undefined ? messages : messages.filter(m => m.scope === 'room' && keyRooms.includes(m.room!)) }, 200)
+    const messages = keyRooms !== undefined
+      ? recentInRooms(this.deps.store, principal, keyRooms, limit)
+      : principal === 'operator'
+        ? this.deps.store.recentGlobal(limit)
+        : this.deps.store.recentFor(principal, limit)
+    return json({ messages }, 200)
   }
 
   private async status (req: Request): Promise<Response> {

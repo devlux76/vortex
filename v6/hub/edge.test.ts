@@ -188,3 +188,36 @@ test('#7 QA 3: with both listeners up, signed requests are refused on the plaint
     assert.equal(log.messages.length, 1)
   } finally { await e.stop() }
 })
+
+// Regressions for Sun's re-QA on #7 (comment 6838914885).
+test('#7 re-QA 1: a full nonce store drains as rows expire; it never locks signed requests out', async () => {
+  const e = await setup()
+  try {
+    e.hub.api.edgeAuth.nonceCap = 5
+    const p = await edgePeer(e)
+    const seed = e.hub.store.db.prepare('INSERT INTO edge_nonces (key_id, nonce, expires) VALUES (?, ?, ?)')
+    for (let i = 0; i < 5; i++) seed.run('a'.repeat(64), `expired-nonce-${i}`, Date.now() - 1)
+    assert.equal((await raw(e, p)).res.status, 200, 'expired rows at the cap are pruned before the cap check')
+    for (let i = 0; i < 4; i++) seed.run('b'.repeat(64), `live-nonce-${i}`, Date.now() + 60_000)
+    const full = (await raw(e, p)).res
+    assert.equal(full.status, 429, 'five live rows: at the cap')
+    e.hub.store.db.prepare('UPDATE edge_nonces SET expires = ?').run(Date.now() - 1)
+    assert.equal((await raw(e, p)).res.status, 200, 'once they expire, signed requests work again')
+    const results = await Promise.all(Array.from({ length: 8 }, () => raw(e, p).then(r => r.res.status)))
+    assert.equal(results.filter(s => s === 200).length, 4, 'concurrent claims respect the cap')
+    assert.ok(results.every(s => s === 200 || s === 429))
+  } finally { await e.stop() }
+})
+
+test('#7 re-QA 2: /v1/recent applies the key room scope before the limit', async () => {
+  const e = await setup()
+  try {
+    const p = await edgePeer(e, { rooms: ['edge'] })
+    await p.client.send({ room: 'edge', text: 'older, visible' })
+    e.hub.store.db.prepare('INSERT INTO members (room, principal) VALUES (?, ?)').run('private-room', 'clouds')
+    const op = await fetch(`http://127.0.0.1:${e.hub.port}/v1/messages`, { method: 'POST', headers: { authorization: `Bearer ${e.operator}`, 'content-type': 'application/json' }, body: JSON.stringify({ room: 'private-room', text: 'newer, out of scope' }) })
+    assert.equal(op.status, 200)
+    const recent = await p.client.request('GET', '/v1/recent?limit=1')
+    assert.deepEqual(recent.messages.map((m: any) => m.text), ['older, visible'])
+  } finally { await e.stop() }
+})

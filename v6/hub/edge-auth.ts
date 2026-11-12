@@ -4,12 +4,12 @@
 // signature verifies, so unsigned noise cannot fill or poison the store, and
 // it is persisted, so a restart does not reopen the replay window.
 import { ALGS, AUTH_HEADER, parseAuthHeader, sha256Hex, signedBytes } from '../client/edge-sign.ts'
-import { claimNonce, getKey, nonceCount, type KeyRow } from './store-keys.ts'
+import { claimNonce, getKey, type KeyRow } from './store-keys.ts'
 import type { HubStore } from './store.ts'
 
 export const MAX_SKEW_MS = 60_000
 export const NONCE_TTL_MS = 10 * 60_000
-const NONCE_CAP = 100_000
+export const NONCE_CAP = 100_000
 
 export class EdgeAuthError extends Error {
   readonly status: number
@@ -23,6 +23,8 @@ export class EdgeAuth {
 
   private readonly store: HubStore
   private readonly hubId: () => string | undefined
+  /** Test seam: the nonce-store cap. */
+  nonceCap = NONCE_CAP
 
   constructor (store: HubStore, hubId: () => string | undefined) {
     this.store = store
@@ -49,8 +51,9 @@ export class EdgeAuth {
       .catch(() => false)
     if (!ok) throw new EdgeAuthError(401, 'bad signature')
     // Persisted (SQLite), so a restart does not reopen the replay window.
-    if (nonceCount(this.store) >= NONCE_CAP) throw new EdgeAuthError(429, 'too many signed requests; retry shortly')
-    if (!claimNonce(this.store, f.key_id, f.nonce, now + NONCE_TTL_MS, now)) throw new EdgeAuthError(401, 'nonce already used')
+    const claim = claimNonce(this.store, f.key_id, f.nonce, now + NONCE_TTL_MS, this.nonceCap, now)
+    if (claim === 'used') throw new EdgeAuthError(401, 'nonce already used')
+    if (claim === 'full') throw new EdgeAuthError(429, 'too many signed requests; retry shortly')
     return { principal: f.principal, key }
   }
 

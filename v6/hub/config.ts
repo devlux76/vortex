@@ -91,7 +91,22 @@ export function assertLoopbackListen (s: string): void {
   }
 }
 
-/** Parse "host:port" or ":port"; a bare port parses as loopback. */
+/**
+ * The `ws://` URL a client on the hub host uses to reach the plain listener: the
+ * bound host itself, bracketed for IPv6, so `[::1]` or `127.0.0.2` work and a
+ * client never points at an address the hub did not bind.
+ */
+export function localHubUrl (listen: string): string {
+  const { host, port } = parseListen(listen)
+  const h = host.replace(/^\[|\]$/g, '')
+  return `ws://${h.includes(':') ? `[${h}]` : h}:${port}`
+}
+
+/**
+ * Parse "host:port", ":port" or a bare port. A bare port parses as loopback;
+ * ":port" deliberately means every interface (0.0.0.0), which is valid for
+ * `tls.listen` and refused for `listen` by assertLoopbackListen.
+ */
 export function parseListen (s: string): { host: string; port: number } {
   const trimmed = s.trim()
   const at = trimmed.lastIndexOf(':')

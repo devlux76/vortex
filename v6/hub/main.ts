@@ -3,7 +3,7 @@
 // (mode 0600, once), optional TLS cert (self-signed, generated once), then the
 // plain and (optional) TLS listeners. Run: `bun v6/hub/main.ts`
 import { mkdirSync, existsSync, writeFileSync, readFileSync, chmodSync } from 'node:fs'
-import { loadHubConfig, hubRoots, parseListen, assertLoopbackListen, type HubConfig } from './config.ts'
+import { loadHubConfig, hubRoots, parseListen, assertLoopbackListen, localHubUrl, type HubConfig } from './config.ts'
 import { HubStore } from './store.ts'
 import { Delivery } from './delivery.ts'
 import { Api } from './api.ts'
@@ -43,7 +43,7 @@ export async function startHub (over: { cfg?: Partial<HubConfig>; stateDir?: str
     // Operator messages must be human (§8.5) and only the operator socket
     // carries that identity (§8.2/§8.10); the credential file is mode 0600.
     const { token } = store.createPrincipalUnchecked('operator')
-    const credential = { principal: 'operator', token, hub: `ws://127.0.0.1:${parseListen(cfg.listen).port}` }
+    const credential = { principal: 'operator', token, hub: localHubUrl(cfg.listen) }
     writeFileSync(operatorPath, JSON.stringify(credential, null, 2), { mode: 0o600 })
     chmodSync(operatorPath, 0o600)
   } else if (!existsSync(operatorPath)) {
@@ -127,8 +127,9 @@ void (async () => {
 
 /** Headers added by reverse proxies and tunnels (A7 §1). */
 export const FORWARDING_HEADERS = [
-  'forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip',
-  'cf-connecting-ip', 'true-client-ip', 'tailscale-user-login', 'tailscale-funnel-request',
+  'forwarded', 'via', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-port',
+  'x-forwarded-server', 'x-real-ip', 'x-client-ip', 'cf-connecting-ip', 'true-client-ip', 'fastly-client-ip',
+  'tailscale-user-login', 'tailscale-funnel-request',
 ] as const
 
 /** The first forwarding header present on `req`, or undefined. */

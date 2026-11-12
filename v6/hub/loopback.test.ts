@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startHub, FORWARDING_HEADERS } from './main.ts'
-import { parseHubConfig, isLoopbackHost } from './config.ts'
+import { parseHubConfig, isLoopbackHost, localHubUrl } from './config.ts'
 
 test('A7 §1: listen must be a loopback address', () => {
   for (const ok of ['127.0.0.1:7900', '127.0.0.2:1', 'localhost:7900', '[::1]:7900', '7900']) {
@@ -17,7 +17,16 @@ test('A7 §1: listen must be a loopback address', () => {
     assert.throws(() => parseHubConfig({ listen: bad }), /loopback/, bad)
   }
   assert.equal(isLoopbackHost('LOCALHOST'), true)
+  assert.equal(isLoopbackHost('::ffff:127.0.0.1'), false)
   assert.equal(isLoopbackHost('128.0.0.1'), false)
+})
+
+test('A7 §1: local clients get the address the hub bound, not a hardcoded 127.0.0.1', () => {
+  assert.equal(localHubUrl('127.0.0.1:7900'), 'ws://127.0.0.1:7900')
+  assert.equal(localHubUrl('127.0.0.2:7910'), 'ws://127.0.0.2:7910')
+  assert.equal(localHubUrl('localhost:7900'), 'ws://localhost:7900')
+  assert.equal(localHubUrl('[::1]:7900'), 'ws://[::1]:7900')
+  assert.equal(localHubUrl('7900'), 'ws://127.0.0.1:7900')
 })
 
 test('A7 §1: startHub refuses a non-loopback listen passed programmatically', async () => {

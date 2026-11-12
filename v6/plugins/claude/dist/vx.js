@@ -254,6 +254,11 @@ function assertLoopbackListen(s) {
     throw new Error(`hub config listen must be a loopback address (127.0.0.1, ::1 or localhost), got ${JSON.stringify(s)}; use tls.listen for other devices (A7 \xA71)`);
   }
 }
+function localHubUrl(listen) {
+  const { host, port } = parseListen(listen);
+  const h = host.replace(/^\[|\]$/g, "");
+  return `ws://${h.includes(":") ? `[${h}]` : h}:${port}`;
+}
 function parseListen(s) {
   const trimmed = s.trim();
   const at = trimmed.lastIndexOf(":");
@@ -1382,7 +1387,7 @@ async function installPrincipal(principal) {
   const path = credentialPath(principal);
   if (existsSync4(path))
     throw new Error(`${path} already exists; remove it with vx uninstall ${principal} first`);
-  const hub = `ws://127.0.0.1:${parseListen((await loadHubConfig()).listen).port}`;
+  const hub = localHubUrl((await loadHubConfig()).listen);
   const store = new HubStore(roots.db);
   let token;
   try {

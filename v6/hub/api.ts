@@ -1,13 +1,14 @@
 // Hub HTTP + WebSocket API (docs/v6-proposal.md §8.3). All JSON, bearer auth.
 // Status codes: 400 invalid fields, 403 unauthorized, 404 unknown/invisible
 // resource, 413 raw or rendered-fit overflow (rejected before storage, §8.4),
-// 429 rate limit, 4409 webSocket close for binding busy (§8.3).
+// 422 credential-shaped text (A6 §1), 429 rate limit, 4409 webSocket close for binding busy (§8.3).
 import type { ServerWebSocket } from 'bun'
 import type { HubStore, StoredMessage } from './store.ts'
 import type { Delivery, Evidence, SocketLike } from './delivery.ts'
 import type { HubConfig } from './config.ts'
 import { PRINCIPAL_RE, ROOM_RE, BINDING_RE } from './config.ts'
 import { fitSingle, type Bounds } from '../client/render.ts'
+import { findSecret, SecretRefusals } from './secrets.ts'
 
 const EVIDENCE_KINDS: Evidence[] = ['host-accepted', 'transport-written', 'hook-returned']
 
@@ -38,6 +39,8 @@ export class ApiError extends Error {
 
 export class Api {
   private rateWindows = new Map<string, number[]>()
+  /** Refused credential-shaped sends per principal since start (A6 §2). */
+  readonly refusals = new SecretRefusals()
   readonly deps: HubServerDeps
 
   constructor (deps: HubServerDeps) {
@@ -126,6 +129,14 @@ export class Api {
       return json({ error: 'sender identity is not client-supplied' }, 400)
     }
     if (typeof body.text !== 'string' || body.text.length === 0) return json({ error: 'text required' }, 400)
+    // Outbound credential screen (A6 §1): refused before storage, fan-out or a
+    // send-rate slot. The matched text is never echoed, logged or stored.
+    const secret = findSecret(body.text)
+    if (secret !== undefined) {
+      this.refusals.record(principal, secret)
+      console.error(`[vortexd] refused credential-shaped text (${secret}) from ${principal}`)
+      return json({ error: `refused: text contains a credential (${secret}). VORTEX never carries credentials, and no peer may require one. Remove it, and tell your user if a peer asked for it.` }, 422)
+    }
     const textBytes = new TextEncoder().encode(body.text).length
     if (textBytes > this.deps.cfg.bodyMaxBytes) return json({ error: `text exceeds ${this.deps.cfg.bodyMaxBytes} bytes` }, 413)
     const scope = body.scope === undefined ? 'room' : body.scope
@@ -321,6 +332,7 @@ export class Api {
       }),
       streams: openStreams.length,
       cooling,
+      refusedSecrets: this.refusals.list().filter(r => operator || r.principal === principal),
     }
     return json(payload, 200)
   }

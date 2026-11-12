@@ -11,9 +11,9 @@ const models = [
     files: ['config.json', 'tokenizer.json', 'tokenizer_config.json', 'onnx/model_q4.onnx', 'onnx/model_q4.onnx_data'],
   },
   {
-    id: 'onnx-community/SmolLM2-135M-Instruct-ONNX-GQA',
-    revision: '4622e1d79184ea906d69dc88fca479db019fa32a',
-    files: ['config.json', 'generation_config.json', 'tokenizer.json', 'tokenizer_config.json', 'onnx/model_q4.onnx'],
+    id: 'onnx-community/LFM3-1.7B-ONNX',
+    revision: 'ab9fec4c681a25bec3b48b0b97a62fc2660a2985',
+    files: ['config.json', 'generation_config.json', 'tokenizer.json', 'tokenizer_config.json', 'onnx/model_q4.onnx', 'onnx/model_q4.onnx_data'],
   },
 ]
 

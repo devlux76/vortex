@@ -66,7 +66,7 @@ const routes = new Map([
 const roots = [
   ['/ort/', `${installed}/onnxruntime-web/dist`],
   ['/models/onnx-community/embeddinggemma-2-ONNX/', gemma],
-  ['/models/onnx-community/SmolLM2-135M-Instruct-ONNX-GQA/', resolve(models, 'onnx-community/SmolLM2-135M-Instruct-ONNX-GQA/4622e1d79184ea906d69dc88fca479db019fa32a')],
+  ['/models/onnx-community/LFM3-1.7B-ONNX/', resolve(models, 'onnx-community/LFM3-1.7B-ONNX/ab9fec4c681a25bec3b48b0b97a62fc2660a2985')],
 ]
 const headers = {
   'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Embedder-Policy': 'require-corp',

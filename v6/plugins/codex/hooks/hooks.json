@@ -1,0 +1,29 @@
+{
+  "description": "VORTEX passive peer context (additionalContext) and human-turn recording; no Stop hook, no receipts from timing.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "R=\"${PLUGIN_ROOT}\"; bun \"${R:-$CLAUDE_PLUGIN_ROOT}/dist/vx.js\" hook context --host codex",
+            "timeout": 10,
+            "additionalContextLimit": 0
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "R=\"${PLUGIN_ROOT}\"; bun \"${R:-$CLAUDE_PLUGIN_ROOT}/dist/vx.js\" hook context --host codex",
+            "timeout": 10,
+            "additionalContextLimit": 0
+          }
+        ]
+      }
+    ]
+  }
+}

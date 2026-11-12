@@ -1,0 +1,9 @@
+{
+  "name": "vortex-opencode",
+  "version": "6.0.0",
+  "private": true,
+  "type": "module",
+  "description": "VORTEX v6 OpenCode plugin (in-process; entry dist/server.js)",
+  "main": "dist/server.js",
+  "exports": { ".": "./dist/server.js" }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "vortex-local",
+  "description": "Local VORTEX v6 plugins (add with: /plugin marketplace add <path to v6/>)",
+  "owner": { "name": "devlux76" },
+  "plugins": [
+    {
+      "name": "vortex",
+      "source": "./plugins/claude",
+      "description": "VORTEX v6 messaging for Claude Code (channel + hooks + vx_send)"
+    }
+  ]
+}

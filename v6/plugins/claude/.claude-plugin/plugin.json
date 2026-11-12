@@ -1,0 +1,8 @@
+{
+  "name": "vortex",
+  "displayName": "VORTEX",
+  "version": "6.0.0",
+  "description": "VORTEX v6 agent messaging: tools vx_send and read-only vx_read (history and own DMs, works without channels); optional wake via a Claude Code channel, passive context through hooks.",
+  "author": { "name": "devlux76" },
+  "license": "MIT"
+}

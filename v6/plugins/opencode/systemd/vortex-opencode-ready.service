@@ -1,0 +1,24 @@
+# VORTEX v6: activate the OpenCode wake Location and verify the plugin's hub
+# stream after every OpenCode (re)start. Template: copy to
+# ~/.config/systemd/user/, set the paths below, then
+#   systemctl --user daemon-reload && systemctl --user enable vortex-opencode-ready.service
+#
+# Failure isolation: this is a separate oneshot. It is PartOf/WantedBy the
+# OpenCode unit (so it re-runs on every OpenCode restart) but OpenCode does not
+# Require it, so a readiness failure is logged here and never stops OpenCode.
+# Exit codes: 0 ready, 3 never bound, 4 retained binding offline (mail queues),
+# 5 OpenCode unreachable, 2 usage/credential error.
+[Unit]
+Description=VORTEX v6 OpenCode readiness (activate wake Location, verify hub stream)
+After=opencode.service
+PartOf=opencode.service
+
+[Service]
+Type=oneshot
+# The OpenCode password, only if the server runs with auth (ours: OPENCODE_SERVER_AUTH=disabled).
+EnvironmentFile=-%h/.config/opencode-local/server.env
+ExecStart=/usr/bin/env bun %h/path/to/vortex/v6/plugins/opencode/dist/ready.js --server http://127.0.0.1:4096 --directory /ABSOLUTE/WAKE/LOCATION --binding opencode --timeout-ms 90000
+TimeoutStartSec=120
+
+[Install]
+WantedBy=opencode.service

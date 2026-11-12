@@ -1,0 +1,24 @@
+# VORTEX v6 hub (vortexd) — user systemd unit (docs/v6-proposal.md §3).
+# Template: copy to ~/.config/systemd/user/, replace RELEASE with the deployed
+# release directory name (the commit sha under ~/.local/share/vortex-v6-RELEASE),
+# then run:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vortex-v6-hub.service
+#
+# The hub is the single message hub every VORTEX plugin connects to, so it must
+# survive reboots. Its SQLite state and operator credential live under
+# ~/.local/state/vortex and ~/.config/vortex and are reused across restarts.
+# Restart=always also recovers from a crash; the hub keeps no other state.
+[Unit]
+Description=VORTEX v6 hub (vortexd)
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/vortex-v6-RELEASE
+Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.bun/bin/bun %h/.local/share/vortex-v6-RELEASE/v6/hub/main.ts
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

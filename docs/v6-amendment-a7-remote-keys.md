@@ -62,6 +62,8 @@ Not sufficient by itself:
   - Each request carries `VX-Auth: principal key_id ts nonce sig` over `kind:"http"`, method, path with query, and the SHA-256 of the body. The nonce is at least 22 base64url characters (128 bits).
   - A request carrying both `VX-Auth` and `Authorization` is refused with 400. A signed WebSocket upgrade is refused with 401 until stream auth exists.
   - The nonce is recorded only after the signature verifies, so unsigned traffic cannot fill or poison the nonce memory (capped at 100,000 entries; 429 beyond).
+  - Used nonces are persisted in the hub database until they expire, so a restart does not reopen the replay window.
+  - Signed requests are accepted only on the TLS listener. The plaintext loopback listener refuses them with 421, even when both listeners run, because the signature binds the TLS listener's identity.
   - The hub rejects a clock skew over 60 s and any nonce it has already seen within 10 min, which bounds its nonce memory.
   - There is no session token: a captured header cannot be replayed and authorizes exactly one request.
 - **Sender identity.** Sender identity still comes from authentication, as in §7: a verified `principal` replaces the token-derived one, and the operator remains a reserved principal.
@@ -77,7 +79,12 @@ Some peers cannot hold a stream at all. A Claude Code cloud session reaches the 
 
 **Unsealed keys (A7 question 4, answered on #2).**
 - The operator enrolls them by public key with named rooms, required, and a lifetime: 24 h by default, at most 7 days.
-- An unsealed key may post only to its rooms. It may not send DMs or create delivery bindings.
+- An unsealed key reaches exactly three routes:
+  - `POST /v1/messages`, to its rooms only;
+  - `GET /v1/rooms/:room/log`, for its rooms only (any other room answers 404, as for a non-member);
+  - `GET /v1/recent`, filtered to its rooms.
+
+  Every other route (DMs, own DMs, status, bindings) answers 403. The limit binds the key, not the principal: an unsealed key never inherits rooms or DMs that its principal can reach with another key.
 - The operator may never hold an unsealed key.
 - A6 refuses a pasted JWK private key (`jwk-private-key`), which is the form an unsealed key file takes.
 

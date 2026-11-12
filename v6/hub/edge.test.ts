@@ -71,7 +71,7 @@ test('A7 §2: an unsealed key is held to its rooms, sends no DMs and opens no bi
     const p = await edgePeer(e)
     await assert.rejects(p.client.send({ room: 'all', text: 'x' }), /403.*may post only to: edge/)
     await assert.rejects(p.client.request('POST', '/v1/messages', { scope: 'dm', to: ['operator'], text: 'x' }), /403.*DMs/)
-    await assert.rejects(p.client.request('PUT', '/v1/bindings/default', { rooms: ['edge'] }), /403.*bindings/)
+    await assert.rejects(p.client.request('PUT', '/v1/bindings/default', { rooms: ['edge'] }), /403/)
     // A model-driven edge client cannot claim a human turn (§8.5).
     await p.client.request('POST', '/v1/messages', { room: 'edge', text: 'claims human', human_turn: true })
     assert.equal((await p.client.roomLog('edge')).at(-1).human, false)
@@ -126,8 +126,65 @@ test('A7 §3: without a TLS listener there is no hub id and signed requests are 
   try {
     const p = await edgePeer(e)
     const res = await fetch(`${e.base}/v1/messages`, { method: 'POST', headers: { [AUTH_HEADER]: 'x', 'content-type': 'application/json' }, body: '{}' })
-    assert.equal(res.status, 401)
+    assert.equal(res.status, 421, 'the plaintext listener never takes signed requests')
     assert.match((await res.json()).error, /TLS listener/)
     assert.equal(p.row.custody, 'unsealed')
+  } finally { await e.stop() }
+})
+
+// Regressions for Sun's QA on #7 (comment 6838782804).
+test('#7 QA 1: a signed request cannot be replayed after the hub restarts', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vx-edge-restart-'))
+  const start = () => startHub({ stateDir: join(dir, 's'), configDir: join(dir, 'c'), cfg: { listen: '127.0.0.1:0', tlsListen: '127.0.0.1:0' } })
+  let hub = await start()
+  try {
+    const operator = (await Bun.file(join(dir, 'c', 'vortex', 'operator.json')).json()).token
+    const e: Env = { hub, operator, base: `https://127.0.0.1:${hub.tlsPort}`, stop: async () => {} }
+    const p = await edgePeer(e)
+    const first = await raw(e, p)
+    assert.equal(first.res.status, 200)
+    await hub.stop()
+    hub = await start()
+    assert.equal(hub.fingerprint, e.hub.fingerprint, 'same certificate, same hub id')
+    const replay = await fetch(`https://127.0.0.1:${hub.tlsPort}/v1/messages`, {
+      method: 'POST', headers: { [AUTH_HEADER]: first.auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ room: 'edge', text: 'hi' }), tls: { rejectUnauthorized: false },
+    } as RequestInit)
+    assert.equal(replay.status, 401)
+    assert.match((await replay.json()).error, /nonce/)
+    const log = await fetch(`http://127.0.0.1:${hub.port}/v1/rooms/edge/log`, { headers: { authorization: `Bearer ${operator}` } }).then(r => r.json() as Promise<any>)
+    assert.equal(log.messages.length, 1, 'exactly one message stored')
+  } finally { await hub.stop(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('#7 QA 2: an unsealed key reads only its own rooms, whatever its principal may read', async () => {
+  const e = await setup()
+  try {
+    const p = await edgePeer(e, { rooms: ['edge'] })
+    // The principal already belongs to a private room (e.g. via another key).
+    e.hub.store.db.prepare('INSERT INTO members (room, principal) VALUES (?, ?)').run('private-room', 'clouds')
+    const opPost = (body: unknown) => fetch(`http://127.0.0.1:${e.hub.port}/v1/messages`, { method: 'POST', headers: { authorization: `Bearer ${e.operator}`, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    assert.equal((await opPost({ room: 'private-room', text: 'private test message' })).status, 200)
+    await p.client.send({ room: 'edge', text: 'edge message' })
+    await assert.rejects(p.client.roomLog('private-room'), /404/)
+    const recent = await p.client.request('GET', '/v1/recent')
+    assert.deepEqual(recent.messages.map((m: any) => m.text), ['edge message'])
+    for (const [method, path] of [['GET', '/v1/dms/mine'], ['GET', '/v1/status'], ['GET', '/v1/dms'], ['DELETE', '/v1/bindings/clouds/default']]) {
+      await assert.rejects(p.client.request(method, path), /403/, `${method} ${path}`)
+    }
+  } finally { await e.stop() }
+})
+
+test('#7 QA 3: with both listeners up, signed requests are refused on the plaintext one', async () => {
+  const e = await setup()
+  try {
+    const p = await edgePeer(e)
+    const plain: Env = { ...e, base: `http://127.0.0.1:${e.hub.port}` }
+    const res = (await raw(plain, p)).res
+    assert.equal(res.status, 421)
+    assert.match((await res.json()).error, /TLS listener/)
+    assert.equal((await raw(e, p)).res.status, 200, 'the TLS listener still accepts it')
+    const log = await fetch(`http://127.0.0.1:${e.hub.port}/v1/rooms/edge/log`, { headers: { authorization: `Bearer ${e.operator}` } }).then(r => r.json() as Promise<any>)
+    assert.equal(log.messages.length, 1)
   } finally { await e.stop() }
 })

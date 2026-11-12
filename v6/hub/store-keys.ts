@@ -37,14 +37,25 @@ CREATE TABLE IF NOT EXISTS principal_keys (
   revoked INTEGER
 );
 CREATE INDEX IF NOT EXISTS principal_keys_principal ON principal_keys(principal);
+CREATE TABLE IF NOT EXISTS edge_nonces (
+  key_id TEXT NOT NULL,
+  nonce TEXT NOT NULL,
+  expires INTEGER NOT NULL,
+  PRIMARY KEY (key_id, nonce)
+);
+CREATE INDEX IF NOT EXISTS edge_nonces_expires ON edge_nonces(expires);
 `
 
 function rowOf (r: any): KeyRow {
   return { ...r, rooms: r.rooms === null ? null : JSON.parse(r.rooms) }
 }
 
+const ready = new WeakSet<HubStore>()
+
 export function ensureKeysSchema (s: HubStore): void {
+  if (ready.has(s)) return
   s.db.exec(KEYS_SCHEMA)
+  ready.add(s)
 }
 
 export function addKey (s: HubStore, k: Omit<KeyRow, 'created' | 'revoked'>, now = Date.now()): KeyRow {
@@ -72,6 +83,22 @@ export function listKeys (s: HubStore, principal?: string): KeyRow[] {
     ? s.db.prepare('SELECT * FROM principal_keys ORDER BY principal, created').all()
     : s.db.prepare('SELECT * FROM principal_keys WHERE principal = ? ORDER BY created').all(principal)
   return (rows as any[]).map(rowOf)
+}
+
+/**
+ * Records a nonce as used until `expires`; false if it was already used. The
+ * table survives restarts, so a signed request cannot be replayed after the
+ * hub restarts within its skew window (Sun's QA finding 1 on #7).
+ */
+export function claimNonce (s: HubStore, keyId: string, nonce: string, expires: number, now = Date.now()): boolean {
+  ensureKeysSchema(s)
+  s.db.prepare('DELETE FROM edge_nonces WHERE expires <= ?').run(now)
+  return s.db.prepare('INSERT OR IGNORE INTO edge_nonces (key_id, nonce, expires) VALUES (?, ?, ?)').run(keyId, nonce, expires).changes === 1
+}
+
+export function nonceCount (s: HubStore): number {
+  ensureKeysSchema(s)
+  return (s.db.prepare('SELECT COUNT(*) AS n FROM edge_nonces').get() as { n: number }).n
 }
 
 /** Revocation takes effect on the next request (A7 §4). Returns false if unknown. */

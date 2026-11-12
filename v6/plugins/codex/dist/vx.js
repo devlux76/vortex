@@ -1418,12 +1418,23 @@ CREATE TABLE IF NOT EXISTS principal_keys (
   revoked INTEGER
 );
 CREATE INDEX IF NOT EXISTS principal_keys_principal ON principal_keys(principal);
+CREATE TABLE IF NOT EXISTS edge_nonces (
+  key_id TEXT NOT NULL,
+  nonce TEXT NOT NULL,
+  expires INTEGER NOT NULL,
+  PRIMARY KEY (key_id, nonce)
+);
+CREATE INDEX IF NOT EXISTS edge_nonces_expires ON edge_nonces(expires);
 `;
 function rowOf(r) {
   return { ...r, rooms: r.rooms === null ? null : JSON.parse(r.rooms) };
 }
+var ready = new WeakSet;
 function ensureKeysSchema(s) {
+  if (ready.has(s))
+    return;
   s.db.exec(KEYS_SCHEMA);
+  ready.add(s);
 }
 function addKey(s, k, now = Date.now()) {
   if (k.custody === "unsealed") {

@@ -1,9 +1,10 @@
 // Verifies signed HTTP requests (A7 §3). Order of checks: header shape, clock
 // skew, hub id, key (exists, owned by the principal, not revoked, not expired),
 // signature, then nonce freshness. A nonce is recorded only after its
-// signature verifies, so unsigned noise cannot fill or poison the cache.
+// signature verifies, so unsigned noise cannot fill or poison the store, and
+// it is persisted, so a restart does not reopen the replay window.
 import { ALGS, AUTH_HEADER, parseAuthHeader, sha256Hex, signedBytes } from '../client/edge-sign.ts'
-import { getKey, type KeyRow } from './store-keys.ts'
+import { claimNonce, getKey, nonceCount, type KeyRow } from './store-keys.ts'
 import type { HubStore } from './store.ts'
 
 export const MAX_SKEW_MS = 60_000
@@ -18,7 +19,6 @@ export class EdgeAuthError extends Error {
 export interface EdgeIdentity { principal: string; key: KeyRow }
 
 export class EdgeAuth {
-  private nonces = new Map<string, number>()
   private keyCache = new Map<string, CryptoKey>()
 
   private readonly store: HubStore
@@ -48,11 +48,9 @@ export class EdgeAuth {
     const ok = await crypto.subtle.verify(ALGS[key.alg].signParams, await this.publicKey(key), sig as BufferSource, bytes as BufferSource)
       .catch(() => false)
     if (!ok) throw new EdgeAuthError(401, 'bad signature')
-    this.prune(now)
-    const seen = `${f.key_id}:${f.nonce}`
-    if (this.nonces.has(seen)) throw new EdgeAuthError(401, 'nonce already used')
-    if (this.nonces.size >= NONCE_CAP) throw new EdgeAuthError(429, 'too many signed requests; retry shortly')
-    this.nonces.set(seen, now + NONCE_TTL_MS)
+    // Persisted (SQLite), so a restart does not reopen the replay window.
+    if (nonceCount(this.store) >= NONCE_CAP) throw new EdgeAuthError(429, 'too many signed requests; retry shortly')
+    if (!claimNonce(this.store, f.key_id, f.nonce, now + NONCE_TTL_MS, now)) throw new EdgeAuthError(401, 'nonce already used')
     return { principal: f.principal, key }
   }
 
@@ -63,13 +61,5 @@ export class EdgeAuth {
       this.keyCache.set(k.key_id, pk)
     }
     return pk
-  }
-
-  private prune (now: number): void {
-    // Map iteration follows insertion order, which is expiry order.
-    for (const [n, exp] of this.nonces) {
-      if (exp > now) break
-      this.nonces.delete(n)
-    }
   }
 }

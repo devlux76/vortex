@@ -126,6 +126,14 @@ export class Api {
 
   private async apiFetch (req: Request, url: URL, path: string): Promise<Response> {
     const method = req.method
+    // An unsealed key reaches only what its named rooms need (A7 §3a): post,
+    // read its rooms, and recent (filtered). Not DMs, status or bindings,
+    // whatever the principal itself may do with another key (Sun, #7 finding 2).
+    if (this.signed.get(req)?.key.custody === 'unsealed' &&
+      !((method === 'POST' && path === '/v1/messages') ||
+        (method === 'GET' && (/^\/v1\/rooms\/[^/]+\/log$/.test(path) || path === '/v1/recent')))) {
+      return json({ error: 'an unsealed key may only post to and read its named rooms' }, 403)
+    }
     if (method === 'POST' && path === '/v1/messages') return this.postMessages(req)
     if (method === 'PUT' && /^\/v1\/bindings\/[^/]+$/.test(path)) return this.putBinding(req, url, path.slice('/v1/bindings/'.length))
     if (method === 'DELETE' && /^\/v1\/bindings\/[^/]+\/[^/]+$/.test(path)) return this.deleteBinding(req, path)
@@ -238,6 +246,12 @@ export class Api {
     return json({ id: stored.id, seq: stored.seq }, 200)
   }
 
+  /** The room list of an unsealed signing key, or undefined when the request is not one. */
+  private unsealedRooms (req: Request): string[] | undefined {
+    const key = this.signed.get(req)?.key
+    return key?.custody === 'unsealed' ? (key.rooms ?? []) : undefined
+  }
+
   canRead (principal: string, m: StoredMessage): boolean {
     if (principal === 'operator') return true // explicit privileged access (§8.2)
     if (m.scope === 'dm') return m.from === principal || (m.to.length === 1 && m.to[0] === principal)
@@ -296,7 +310,8 @@ export class Api {
     if (principal === undefined) return json({ error: 'unauthorized' }, 401)
     const room = path.slice('/v1/rooms/'.length, -'/log'.length)
     if (!ROOM_RE.test(room)) return json({ error: 'invalid room' }, 400)
-    if (principal !== 'operator' && !this.deps.store.isMember(room, principal)) {
+    const keyRooms = this.unsealedRooms(req)
+    if (principal !== 'operator' && (!this.deps.store.isMember(room, principal) || (keyRooms !== undefined && !keyRooms.includes(room)))) {
       // Membership exists; never confirm room contents to non-members.
       return json({ error: 'not a member of this room' }, 404)
     }
@@ -333,7 +348,8 @@ export class Api {
     const messages = principal === 'operator'
       ? this.deps.store.recentGlobal(limit)
       : this.deps.store.recentFor(principal, limit)
-    return json({ messages }, 200)
+    const keyRooms = this.unsealedRooms(req)
+    return json({ messages: keyRooms === undefined ? messages : messages.filter(m => m.scope === 'room' && keyRooms.includes(m.room!)) }, 200)
   }
 
   private async status (req: Request): Promise<Response> {

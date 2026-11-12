@@ -148,10 +148,36 @@ bun v6/cli/vx.ts codex bind [<thread-id>]
 ```
 
 Without an argument it uses `$CODEX_THREAD_ID`; the command verifies the chat
-through the app-server before saving the local binding. The tested desktop
-build exposes no reachable app-server proxy, so this verification currently
-fails there. Automatic wakes and native passive-hook delivery on that desktop
-remain unproven; the ordinary MCP read/send tools are verified independently
+through the app-server before saving the local binding.
+
+On a desktop build, bind from inside the chat, using the native current chat:
+
+```sh
+bun v6/cli/vx.ts codex bind --desktop
+```
+
+This relies on `$CODEX_THREAD_ID` alone (a thread argument must equal it), so
+it needs no app-server verification and refuses with a plain error outside a
+chat. Trust the plugin's hook definitions in the desktop app and reload the
+app after installing or editing the plugin before relying on hook delivery.
+
+Wakes are then delivered through the hooks, with two further requirements.
+First, the machine-provided wake step calls the helper script `ping-codex`,
+which must be the owner-provided helper found on `PATH`; without it the
+binding fails its wake with an explicit error instead of inventing a window
+or notification. Second, the hook of the bound chat must be trusted, because
+the notice intentionally carries no peer text: a batch is announced by one
+fixed `ping-codex` notice (the batch id only), acknowledged as delivered only
+when the hook returns its additional context, and re-announced never across
+restarts (announced ids persist in the plugin's local state). A batch remains
+unacknowledged until the hook returns it, and a still-unacknowledged batch
+is re-offered by the hook of the currently bound chat — after a rebind or an
+app restart — without a second notice, while the hub holds the batch open
+until the hook returns it.
+
+These desktop paths are covered by unit tests, but a live native chat has
+not been exercised on this setup; treat them as unproven until an acceptance
+run lands, while the ordinary MCP read/send tools are verified independently
 (see A5). VORTEX never creates a new chat to receive mail.
 
 ### OpenCode

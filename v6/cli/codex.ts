@@ -35,10 +35,22 @@ export async function bindThread (thread: string | undefined, server: AppServer,
   return { ok: true, message: `bound binding "${binding}" to the chat ${thread} (stored locally only; never sent to the hub)` }
 }
 
+export function bindDesktopThread (thread: string | undefined, current: string | undefined, binding = bindingName()): BindResult {
+  if (!current || !/^[0-9a-f-]{36}$/i.test(current) || (thread !== undefined && thread !== current)) {
+    return { ok: false, message: 'desktop binding must run inside the selected Codex chat ($CODEX_THREAD_ID); nothing stored' }
+  }
+  saveThreadBinding(binding, current, true)
+  return { ok: true, message: `bound binding "${binding}" to the current desktop chat (native notice + hook context)` }
+}
+
 export async function codexBind (args: string[]): Promise<number> {
   const server = new StdioAppServer()
   try {
-    const r = await bindThread(args[0] ?? process.env.CODEX_THREAD_ID, server)
+    const desktop = args.includes('--desktop')
+    const thread = args.filter(a => a !== '--desktop')[0]
+    const r = desktop
+      ? bindDesktopThread(thread, process.env.CODEX_THREAD_ID)
+      : await bindThread(thread ?? process.env.CODEX_THREAD_ID, server)
     ;(r.ok ? console.log : console.error)(r.ok ? r.message : `vx: ${r.message}`)
     return r.ok ? 0 : 1
   } finally { server.close() }

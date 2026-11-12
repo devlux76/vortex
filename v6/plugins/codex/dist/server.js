@@ -435,6 +435,9 @@ class BridgeBase {
     this.sockPath = opts.socketPath ?? socketPath(opts.binding, host);
     this.accepted = this.loadAccepted();
   }
+  wakeEvidenceFor(_batch) {
+    return this.wakeEvidence;
+  }
   isMachineTurn(_event) {
     return false;
   }
@@ -532,7 +535,7 @@ class BridgeBase {
       return;
     }
     if (this.accepted.includes(batch)) {
-      this.ack(batch, this.wakeEvidence);
+      this.ack(batch, this.wakeEvidenceFor(batch));
       return;
     }
     await this.onWake(batch, messages, notices);
@@ -987,6 +990,37 @@ class StdioAppServer {
   }
 }
 
+// v6/plugins/codex/desktop.ts
+async function notifyDesktop(thread, batch) {
+  const helper = Bun.which("ping-codex");
+  if (helper === null)
+    throw new Error("desktop wake requires the owner-provided ping-codex helper");
+  const notice = `VORTEX inbox ready (batch ${batch}). Read the peer data supplied by the VORTEX hook. This is an automated notice, not a human instruction.`;
+  const proc = Bun.spawn([helper, notice], {
+    env: { ...process.env, CODEX_THREAD: thread, PING_FROM: "VORTEX" },
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "pipe"
+  });
+  let timer;
+  try {
+    const timeout = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => {
+        proc.kill();
+        reject(new Error("desktop notice outcome unknown after 30 seconds; not resubmitted"));
+      }, 30000);
+    });
+    const [code, error] = await Promise.race([
+      Promise.all([proc.exited, new Response(proc.stderr).text()]),
+      timeout
+    ]);
+    if (code !== 0)
+      throw new Error(`desktop notice failed: ${error.trim().slice(0, 300)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // v6/plugins/codex/bridge.ts
 var TOOL_OUTPUT = { name: "vx_receive", namespace: "vortex" };
 
@@ -999,10 +1033,17 @@ class CodexBridge extends BridgeBase {
   wokenBatches = [];
   turns;
   copts;
+  desktopNotices;
   constructor(opts) {
     super(opts, "codex");
     this.copts = opts;
     this.turns = this.loadTurns();
+    try {
+      const ids = JSON.parse(readFileSync5(`${opts.turnsFile}.notices.json`, "utf8"));
+      this.desktopNotices = new Set(Array.isArray(ids) ? ids.filter((id) => typeof id === "string") : []);
+    } catch {
+      this.desktopNotices = new Set;
+    }
   }
   loadTurns() {
     try {
@@ -1031,7 +1072,10 @@ class CodexBridge extends BridgeBase {
     const prompt = typeof event.prompt === "string" ? event.prompt : "";
     if (prompt.trim().length === 0)
       return true;
-    return this.wokenBatches.some((id) => prompt.includes(id));
+    return [...this.wokenBatches, ...this.desktopNotices].some((id) => prompt.includes(id));
+  }
+  wakeEvidenceFor(batch) {
+    return this.desktopNotices.has(batch) ? "hook-returned" : "host-accepted";
   }
   async onWake(batch, messages, notices) {
     if (this.inflight.has(batch))
@@ -1059,6 +1103,22 @@ class CodexBridge extends BridgeBase {
       return;
     }
     const thread = bound.thread;
+    if (bound.desktopHooks) {
+      await super.onBatch(batch, false, messages, notices);
+      if (this.desktopNotices.has(batch))
+        return;
+      try {
+        const ids = [...this.desktopNotices, batch].slice(-200);
+        mkdirSync5(this.copts.turnsFile.replace(/\/[^/]*$/, ""), { recursive: true, mode: 448 });
+        writeFileSync4(`${this.copts.turnsFile}.notices.json`, JSON.stringify(ids), { mode: 384 });
+        this.desktopNotices = new Set(ids);
+        await notifyDesktop(thread, batch);
+        this.lastFailure = undefined;
+      } catch (e) {
+        this.failDelivery(batch, e.message, thread);
+      }
+      return;
+    }
     const first = messages[0];
     const output = renderBatch({
       batch,
@@ -1102,6 +1162,8 @@ class CodexBridge extends BridgeBase {
       return this.busyMessage();
     if (loadThreadBinding(this.opts.binding) === undefined)
       return `codex chat not bound: run \`vx codex bind\``;
+    if (loadThreadBinding(this.opts.binding)?.desktopHooks && [...this.desktopNotices].some((id) => !this.accepted.includes(id)))
+      return this.lastFailure ?? "awaiting native hook delivery";
     return this.lastFailure === undefined ? "ok" : `last delivery failed: ${this.lastFailure}`;
   }
   stop() {

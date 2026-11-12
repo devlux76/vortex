@@ -3,7 +3,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { vortexConfigDir } from '../../client/credential.ts'
 
-export interface ThreadBinding { thread: string; binding: string; boundAt: number }
+export interface ThreadBinding { thread: string; binding: string; boundAt: number; desktopHooks?: true }
 
 export function bindingFile (binding: string): string {
   return `${vortexConfigDir()}/codex-thread-${binding.replace(/[^A-Za-z0-9_.-]/g, '_')}.json`
@@ -20,9 +20,9 @@ export function loadThreadBinding (binding: string): ThreadBinding | undefined {
   } catch { return undefined }
 }
 
-export function saveThreadBinding (binding: string, thread: string): void {
+export function saveThreadBinding (binding: string, thread: string, desktopHooks = false): void {
   mkdirSync(vortexConfigDir(), { recursive: true, mode: 0o700 })
   const path = bindingFile(binding)
-  writeFileSync(path, JSON.stringify({ thread, binding, boundAt: Date.now() } satisfies ThreadBinding, null, 2) + '\n', { mode: 0o600 })
+  writeFileSync(path, JSON.stringify({ thread, binding, boundAt: Date.now(), ...(desktopHooks ? { desktopHooks: true as const } : {}) } satisfies ThreadBinding, null, 2) + '\n', { mode: 0o600 })
   chmodSync(path, 0o600)
 }

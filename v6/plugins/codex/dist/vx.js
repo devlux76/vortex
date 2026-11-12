@@ -1,6 +1,6 @@
 // @bun
 // v6/cli/vx.ts
-import { mkdirSync as mkdirSync5, existsSync as existsSync3 } from "fs";
+import { mkdirSync as mkdirSync5, existsSync as existsSync5 } from "fs";
 
 // v6/client/client.ts
 function derDigest(raw) {
@@ -174,6 +174,13 @@ function loadCredential(name) {
   }
   return parsed;
 }
+function saveCredential(name, credential) {
+  mkdirSync(vortexConfigDir(), { recursive: true, mode: 448 });
+  const path = credentialPath(name);
+  writeFileSync(path, JSON.stringify(credential, null, 2) + `
+`, { mode: 384 });
+  chmodSync(path, 384);
+}
 
 // v6/client/render.ts
 var DEFAULT_BOUNDS = { maxMessages: 20, maxCodePoints: 6000, maxBytes: 8 * 1024 };
@@ -237,6 +244,21 @@ var DEFAULT_CONFIG = {
 var PRINCIPAL_RE = /^[a-z][a-z0-9-]{0,31}$/;
 var ROOM_RE = /^[a-z0-9-]{1,32}$/;
 var BINDING_RE = /^[a-z][a-z0-9-]{0,31}$/;
+function parseListen(s) {
+  const trimmed = s.trim();
+  const at = trimmed.lastIndexOf(":");
+  if (at < 0) {
+    const p = Number(trimmed);
+    if (!Number.isInteger(p) || p < 0 || p > 65535)
+      throw new Error(`invalid listen: ${s}`);
+    return { host: "127.0.0.1", port: p };
+  }
+  const host = trimmed.slice(0, at);
+  const port = Number(trimmed.slice(at + 1));
+  if (!Number.isInteger(port) || port < 0 || port > 65535)
+    throw new Error(`invalid listen: ${s}`);
+  return { host: host === "" ? "0.0.0.0" : host, port };
+}
 function hubRoots() {
   return {
     config: configDir(),
@@ -261,6 +283,55 @@ function configDir() {
   return `${xdg.replace(/\/$/, "")}/vortex`;
 }
 var ZERO_OK = new Set(["wakeCoalesceMs", "wakeMinIntervalMs"]);
+var TLS_KEYS = { listen: "tlsListen", certPath: "tlsCertPath", keyPath: "tlsKeyPath" };
+async function loadHubConfig() {
+  const roots = hubRoots();
+  let text;
+  try {
+    text = await Bun.file(roots.hubConfigPath).text();
+  } catch (e) {
+    if (e.code === "ENOENT")
+      return { ...DEFAULT_CONFIG };
+    throw e;
+  }
+  return parseHubConfig(JSON.parse(text));
+}
+function parseHubConfig(raw) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+    throw new Error("hub config must be a JSON object");
+  const cfg = { ...DEFAULT_CONFIG };
+  for (const [key, value] of Object.entries(raw)) {
+    if (key === "listen") {
+      if (typeof value !== "string")
+        throw new Error("hub config listen must be a string");
+      parseListen(value);
+      cfg.listen = value;
+      continue;
+    }
+    if (key === "tls") {
+      if (typeof value !== "object" || value === null || Array.isArray(value))
+        throw new Error("hub config tls must be an object");
+      for (const [tk, tv] of Object.entries(value)) {
+        if (!Object.hasOwn(TLS_KEYS, tk))
+          throw new Error(`unknown hub config key: tls.${tk}`);
+        if (typeof tv !== "string" || tv.length === 0)
+          throw new Error(`hub config tls.${tk} must be a non-empty string`);
+        if (tk === "listen")
+          parseListen(tv);
+        cfg[TLS_KEYS[tk]] = tv;
+      }
+      continue;
+    }
+    if (!Object.hasOwn(DEFAULT_CONFIG, key) || typeof DEFAULT_CONFIG[key] !== "number")
+      throw new Error(`unknown hub config key: ${key}`);
+    const min = ZERO_OK.has(key) ? 0 : 1;
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < min) {
+      throw new Error(`hub config ${key} must be a whole number >= ${min}, got ${JSON.stringify(value)}`);
+    }
+    cfg[key] = value;
+  }
+  return cfg;
+}
 
 // v6/client/ulid.ts
 var ENCODING = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -1053,10 +1124,10 @@ import { chmodSync as chmodSync2, existsSync as existsSync2, mkdirSync as mkdirS
 function bindingFile(binding) {
   return `${vortexConfigDir()}/codex-thread-${binding.replace(/[^A-Za-z0-9_.-]/g, "_")}.json`;
 }
-function saveThreadBinding(binding, thread) {
+function saveThreadBinding(binding, thread, desktopHooks = false) {
   mkdirSync4(vortexConfigDir(), { recursive: true, mode: 448 });
   const path = bindingFile(binding);
-  writeFileSync2(path, JSON.stringify({ thread, binding, boundAt: Date.now() }, null, 2) + `
+  writeFileSync2(path, JSON.stringify({ thread, binding, boundAt: Date.now(), ...desktopHooks ? { desktopHooks: true } : {} }, null, 2) + `
 `, { mode: 384 });
   chmodSync2(path, 384);
 }
@@ -1244,10 +1315,19 @@ ${listing}`)
   saveThreadBinding(binding, thread);
   return { ok: true, message: `bound binding "${binding}" to the chat ${thread} (stored locally only; never sent to the hub)` };
 }
+function bindDesktopThread(thread, current, binding = bindingName()) {
+  if (!current || !/^[0-9a-f-]{36}$/i.test(current) || thread !== undefined && thread !== current) {
+    return { ok: false, message: "desktop binding must run inside the selected Codex chat ($CODEX_THREAD_ID); nothing stored" };
+  }
+  saveThreadBinding(binding, current, true);
+  return { ok: true, message: `bound binding "${binding}" to the current desktop chat (native notice + hook context)` };
+}
 async function codexBind(args) {
   const server = new StdioAppServer;
   try {
-    const r = await bindThread(args[0] ?? process.env.CODEX_THREAD_ID, server);
+    const desktop = args.includes("--desktop");
+    const thread = args.filter((a) => a !== "--desktop")[0];
+    const r = desktop ? bindDesktopThread(thread, process.env.CODEX_THREAD_ID) : await bindThread(thread ?? process.env.CODEX_THREAD_ID, server);
     (r.ok ? console.log : console.error)(r.ok ? r.message : `vx: ${r.message}`);
     return r.ok ? 0 : 1;
   } finally {
@@ -1255,15 +1335,66 @@ async function codexBind(args) {
   }
 }
 
+// v6/cli/uninstall.ts
+import { existsSync as existsSync3, readdirSync, rmSync } from "fs";
+import { join as join2 } from "path";
+var RESERVED = new Set(["operator", "hub"]);
+var STATE_SUFFIXES = [".batches.json", ".turns.json", ".unused.json"];
+function matching(dir, keep) {
+  if (!existsSync3(dir))
+    return [];
+  return readdirSync(dir).filter(keep).map((name) => join2(dir, name));
+}
+function uninstallFiles(principal, roots) {
+  if (!PRINCIPAL_RE.test(principal) || RESERVED.has(principal)) {
+    throw new Error(`not an agent principal: ${JSON.stringify(principal)}`);
+  }
+  const prefix = `${principal}-`;
+  const files = [
+    ...matching(roots.config, (name) => name === `${principal}.json` || principal === "codex" && name.startsWith("codex-thread-") && name.endsWith(".json")),
+    ...matching(roots.state, (name) => name.startsWith(prefix) && STATE_SUFFIXES.some((s) => name.endsWith(s)))
+  ].sort();
+  for (const f of files)
+    rmSync(f, { force: true });
+  return files;
+}
+
+// v6/cli/install.ts
+import { existsSync as existsSync4 } from "fs";
+var RESERVED2 = new Set(["operator", "hub"]);
+async function installPrincipal(principal) {
+  if (!PRINCIPAL_RE.test(principal) || RESERVED2.has(principal)) {
+    throw new Error(`not an agent principal: ${JSON.stringify(principal)}`);
+  }
+  const roots = hubRoots();
+  if (!existsSync4(roots.db))
+    throw new Error(`no hub database at ${roots.db}; start the hub on this host first`);
+  const path = credentialPath(principal);
+  if (existsSync4(path))
+    throw new Error(`${path} already exists; remove it with vx uninstall ${principal} first`);
+  const hub = `ws://127.0.0.1:${parseListen((await loadHubConfig()).listen).port}`;
+  const store = new HubStore(roots.db);
+  let token;
+  try {
+    token = store.createPrincipal(principal).token;
+  } finally {
+    store.close();
+  }
+  saveCredential(principal, { hub, token, principal });
+  return { credentialPath: path, hub };
+}
+
 // v6/cli/vx.ts
 var USAGE = `vx \u2014 operator CLI for VORTEX v6
 
   vx enroll <name>                          enroll a principal (hub host)
+  vx install <principal>                    enroll and write its credential file (hub host, local agent)
   vx say [--to a,b] [--room r] [--scope room|dm] [--reply-to <id>] <text>
   vx log [<room>]|--dm [--after seq] [--limit n]   ids + refs printed (A1)
   vx status
   vx binding release <principal>/<name>
   vx codex bind [<thread-id>]               select the Codex chat for wakes (default $CODEX_THREAD_ID)
+  vx uninstall <principal>                  remove that agent's local credential and state files
   vx hook context [--host claude|codex]     (plugins only: hook event JSON on stdin)
 `;
 function die(message) {
@@ -1309,7 +1440,7 @@ async function main() {
     if (name === undefined || !PRINCIPAL_RE.test(name))
       die(`enroll takes a principal name matching ${PRINCIPAL_RE}`);
     const roots = hubRoots();
-    if (!existsSync3(roots.db))
+    if (!existsSync5(roots.db))
       die(`no hub database at ${roots.db}; run vortexd on this host first`);
     mkdirSync5(roots.config, { recursive: true, mode: 448 });
     const store = new HubStore(roots.db);
@@ -1328,7 +1459,7 @@ async function main() {
     }
     let fingerprint;
     const certPath = `${roots.state}/cert.pem`;
-    if (existsSync3(certPath)) {
+    if (existsSync5(certPath)) {
       const der = Bun.spawnSync(["openssl", "x509", "-in", certPath, "-outform", "DER"]).stdout;
       const hasher = new Bun.CryptoHasher("sha256");
       hasher.update(der);
@@ -1400,6 +1531,26 @@ async function main() {
     const client = operatorClient();
     await client.release(principal, name);
     console.log(`released ${principal}/${name}`);
+    return;
+  }
+  if (command === "install") {
+    try {
+      const { credentialPath, hub } = await installPrincipal(rest[0] ?? "");
+      console.log(`enrolled ${rest[0]}; credential for ${hub} written to ${credentialPath}`);
+    } catch (e) {
+      die(e.message);
+    }
+    return;
+  }
+  if (command === "uninstall") {
+    let removed = [];
+    try {
+      removed = uninstallFiles(rest[0] ?? "", hubRoots());
+    } catch (e) {
+      die(e.message);
+    }
+    console.log(removed.length === 0 ? "nothing to remove" : removed.map((p) => `removed ${p}`).join(`
+`));
     return;
   }
   if (command === "codex") {

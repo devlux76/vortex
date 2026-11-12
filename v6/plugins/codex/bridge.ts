@@ -7,6 +7,7 @@ import { renderBatch } from '../../client/render.ts'
 import { BridgeBase, type BaseOptions } from '../../client/bridge-base.ts'
 import { loadThreadBinding } from './binding.ts'
 import { AppServerError, type AppServer } from './appserver.ts'
+import { notifyDesktop } from './desktop.ts'
 
 export { INSTRUCTIONS, type SendArgs } from '../../client/mcp.ts'
 
@@ -28,11 +29,16 @@ export class CodexBridge extends BridgeBase {
   private wokenBatches: string[] = []
   private turns: Record<string, { turn: string; at: number }>
   private readonly copts: CodexBridgeOptions
+  private desktopNotices: Set<string>
 
   constructor (opts: CodexBridgeOptions) {
     super(opts, 'codex')
     this.copts = opts
     this.turns = this.loadTurns()
+    try {
+      const ids: unknown = JSON.parse(readFileSync(`${opts.turnsFile}.notices.json`, 'utf8'))
+      this.desktopNotices = new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : [])
+    } catch { this.desktopNotices = new Set() }
   }
 
   private loadTurns (): Record<string, { turn: string; at: number }> {
@@ -61,7 +67,11 @@ export class CodexBridge extends BridgeBase {
   protected override isMachineTurn (event: Record<string, unknown>): boolean {
     const prompt = typeof event.prompt === 'string' ? event.prompt : ''
     if (prompt.trim().length === 0) return true
-    return this.wokenBatches.some(id => prompt.includes(id))
+    return [...this.wokenBatches, ...this.desktopNotices].some(id => prompt.includes(id))
+  }
+
+  protected override wakeEvidenceFor (batch: string): 'hook-returned' | 'host-accepted' {
+    return this.desktopNotices.has(batch) ? 'hook-returned' : 'host-accepted'
   }
 
   protected async onWake (batch: string, messages: WireApiMessage[], notices: string[]): Promise<void> {
@@ -92,6 +102,22 @@ export class CodexBridge extends BridgeBase {
       return
     }
     const thread = bound.thread
+    if (bound.desktopHooks) {
+      // Keep peer content in the hook channel. A notice alone acknowledges nothing.
+      await super.onBatch(batch, false, messages, notices)
+      if (this.desktopNotices.has(batch)) return
+      try {
+        const ids = [...this.desktopNotices, batch].slice(-200)
+        mkdirSync(this.copts.turnsFile.replace(/\/[^/]*$/, ''), { recursive: true, mode: 0o700 })
+        writeFileSync(`${this.copts.turnsFile}.notices.json`, JSON.stringify(ids), { mode: 0o600 })
+        this.desktopNotices = new Set(ids) // persist before the possibly ambiguous external effect
+        await notifyDesktop(thread, batch)
+        this.lastFailure = undefined
+      } catch (e) {
+        this.failDelivery(batch, (e as Error).message, thread)
+      }
+      return
+    }
     const first = messages[0]
     const output = renderBatch({
       batch, scope: first?.scope ?? 'room', room: first?.room, notices, messages: this.toWire(messages),
@@ -130,6 +156,7 @@ export class CodexBridge extends BridgeBase {
   override status (): string {
     if (this.busy) return this.busyMessage()
     if (loadThreadBinding(this.opts.binding) === undefined) return `codex chat not bound: run \`vx codex bind\``
+    if (loadThreadBinding(this.opts.binding)?.desktopHooks && [...this.desktopNotices].some(id => !this.accepted.includes(id))) return this.lastFailure ?? 'awaiting native hook delivery'
     return this.lastFailure === undefined ? 'ok' : `last delivery failed: ${this.lastFailure}`
   }
 

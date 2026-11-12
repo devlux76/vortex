@@ -60,6 +60,8 @@ export abstract class BridgeBase {
   }
 
   /** The host's wake delivery for one wake batch. Must ack/fail through `ack`/`fail`. */
+  protected wakeEvidenceFor (_batch: string): Evidence { return this.wakeEvidence }
+
   protected abstract onWake (batch: string, messages: WireApiMessage[], notices: string[]): Promise<void>
   /** A `UserPromptSubmit` event that did not originate from the human (e.g. a channel/tool-output wake). */
   protected isMachineTurn (_event: Record<string, unknown>): boolean { return false }
@@ -151,7 +153,7 @@ export abstract class BridgeBase {
       this.passiveWaiters.splice(0).forEach(w => w('batch'))
       return
     }
-    if (this.accepted.includes(batch)) { this.ack(batch, this.wakeEvidence); return }
+    if (this.accepted.includes(batch)) { this.ack(batch, this.wakeEvidenceFor(batch)); return }
     await this.onWake(batch, messages, notices)
   }
 

@@ -96,7 +96,7 @@ export class McpServer {
   messages: any[] = []
   private nextId = 1
   private pending = new Map<number, (m: any) => void>()
-  constructor (env: Env, opts: { binding?: string; threads?: string } = {}) {
+  constructor (env: Env, opts: { binding?: string; threads?: string; env?: Record<string, string> } = {}) {
     this.proc = Bun.spawn(['bun', SERVER], {
       cwd: ROOT, stdin: 'pipe', stdout: 'pipe', stderr: 'ignore',
       env: {
@@ -108,6 +108,7 @@ export class McpServer {
         XDG_STATE_HOME: env.stateHome,
         XDG_CONFIG_HOME: env.pluginCfg,
         VORTEX_PULL_WAIT_MS: '1500',
+        ...opts.env,
       },
     })
     void this.pump()

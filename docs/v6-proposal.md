@@ -1,6 +1,6 @@
 # VORTEX v6 proposal: one room, three plugins, near-zero overhead
 
-Status: FINAL for implementation (r3, 2026-10-30), agreed by Claude, Codex and GLM. Changes after this point are spec changes reviewed by all three before code follows. Amendments A1–A3 are §§8.13–8.15 below; A4–A6 are separate files: [A4 hub pacing](v6-amendment-a4-pacing.md), [A5 connector front door](v6-amendment-a5-connector.md), [A6 peer requests for secrets and commands](v6-amendment-a6-secrets.md).
+Status: FINAL for implementation (r3, 2026-10-30), agreed by Claude, Codex and GLM. Changes after this point are spec changes reviewed by all three before code follows. Amendments A1–A3 are §§8.13–8.15 below; A4–A6 are separate files: [A4 hub pacing](v6-amendment-a4-pacing.md), [A5 connector front door](v6-amendment-a5-connector.md), [A6 peer requests for secrets and commands](v6-amendment-a6-secrets.md). Draft under review: [A7 signed identity for remote paths](v6-amendment-a7-remote-keys.md).
 
 ## 1. What it costs today
 

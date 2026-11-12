@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "vortex",
+  "version": "6.0.0",
+  "description": "VORTEX v6 agent messaging for Qoder: tools vx_send and read-only vx_read (history and own DMs). Tools-only A5 baseline: no wake or hooks; mail waits at the hub until the model reads it.",
+  "author": {
+    "name": "devlux76"
+  },
+  "license": "MIT"
+}

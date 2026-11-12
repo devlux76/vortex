@@ -59,7 +59,7 @@ async function env () {
     writeFileSync(file, JSON.stringify({ hub: url, token, rooms: ['all'] }))
     return { token, file }
   }
-  const agent = { claude: mk('claude'), codex: mk('codex'), opencode: mk('opencode') }
+  const agent = { claude: mk('claude'), codex: mk('codex'), opencode: mk('opencode'), qoder: mk('qoder') }
   const peerToken = hub.store.createPrincipal('peer').token
   return { hub, url, agent, peer: new VortexClient({ hub: url, token: peerToken }) }
 }
@@ -165,6 +165,59 @@ for (const host of ['claude', 'codex'] as const) {
     }
   })
 }
+
+test('qoder: the bundled tools-only connector serves initialize/tools/list, send and read without opening a stream', async () => {
+  const e = await env()
+  const root = isolate('qoder')
+  const servers: Mcp[] = []
+  try {
+    // manifests reference only paths inside the plugin root, through the host variable
+    for (const f of jsonFilesIn(root)) {
+      const body = readFileSync(f, 'utf8')
+      assert.ok(!body.includes('../'), `${f} must not escape the plugin root`)
+      for (const m of body.matchAll(/\$\{(\w+)\}(\/[A-Za-z0-9_./-]*)/g)) {
+        assert.equal(m[1], 'PLUGIN_ROOT')
+        assert.ok(existsSync(`${root}${m[2]}`), `${f} references missing ${m[2]}`)
+        assert.ok(m[2].startsWith('/dist/'))
+      }
+    }
+    const mcp = JSON.parse(readFileSync(`${root}/mcp.json`, 'utf8')).mcpServers.vortex
+    const envv = { VORTEX_CREDENTIAL_FILE: e.agent.qoder.file, VORTEX_BINDING: 'iso', XDG_RUNTIME_DIR: newDir(), XDG_STATE_HOME: newDir(), XDG_CONFIG_HOME: newDir() }
+    const server = new Mcp(resolveCommand(mcp, 'PLUGIN_ROOT', root), envv)
+    servers.push(server)
+    const init = await server.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } })
+    assert.equal(init.result.serverInfo.name, 'vortex')
+    assert.equal(init.result.instructions, INSTRUCTIONS)
+    const tools = await server.request('tools/list')
+    assert.deepEqual(tools.result.tools.map((t: any) => t.name), ['vx_send', 'vx_read'])
+
+    // A5 baseline: no binding stream and no wake; the model pulls with vx_read.
+    // Sending joins qoder to the room, which is what lets it read the room log.
+    const post = await server.request('tools/call', { name: 'vx_send', arguments: { text: 'qoder joins all' } })
+    assert.equal(post.result.isError, undefined)
+    await e.peer.send({ text: 'passive for qoder', to: [] })
+    await sleep(100)
+    assert.ok(!e.hub.delivery.openStreams().some(s => s.principal === 'qoder'))
+    const read = await server.request('tools/call', { name: 'vx_read' })
+    assert.equal(read.result.isError, undefined)
+    assert.ok(read.result.content[0].text.includes('passive for qoder'))
+    assert.match(read.result.content[0].text, /\[vx: next after=\d+; more=false\]$/)
+
+    const sent = await server.request('tools/call', { name: 'vx_send', arguments: { text: 'ping from qoder', scope: 'dm', to: ['peer'] } })
+    assert.equal(sent.result.isError, undefined)
+    const dms = await e.peer.ownDmLog()
+    assert.deepEqual(dms.messages.map(m => [m.from, m.text]), [['qoder', 'ping from qoder']])
+    const own = await server.request('tools/call', { name: 'vx_read', arguments: { scope: 'dm' } })
+    assert.ok(own.result.content[0].text.includes('ping from qoder'))
+
+    const bad = await server.request('tools/call', { name: 'vx_send', arguments: { text: 'x', scope: 'dm', to: ['peer'], room: 'all' } })
+    assert.equal(bad.result.isError, true)
+  } finally {
+    for (const s of servers) s.kill()
+    await e.hub.stop()
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
+  }
+})
 
 test('opencode: the bundled entry alone exposes send/read tools and admits a wake', async () => {
   const e = await env()

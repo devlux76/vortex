@@ -3,7 +3,7 @@
 // signature, then nonce freshness. A nonce is recorded only after its
 // signature verifies, so unsigned noise cannot fill or poison the store, and
 // it is persisted, so a restart does not reopen the replay window.
-import { ALGS, AUTH_HEADER, parseAuthHeader, sha256Hex, signedBytes } from '../client/edge-sign.ts'
+import { ALGS, AUTH_HEADER, KEY_ID_RE, b64url, parseAuthHeader, sha256Hex, signedBytes, signedStreamBytes } from '../client/edge-sign.ts'
 import { claimNonce, getKey, type KeyRow } from './store-keys.ts'
 import type { HubStore } from './store.ts'
 
@@ -55,6 +55,38 @@ export class EdgeAuth {
     if (claim === 'used') throw new EdgeAuthError(401, 'nonce already used')
     if (claim === 'full') throw new EdgeAuthError(429, 'too many signed requests; retry shortly')
     return { principal: f.principal, key }
+  }
+
+  /** Checks a key for use right now: exists, owned by `principal`, not revoked or expired. */
+  usableKey (principal: string, keyId: string, now = Date.now()): KeyRow {
+    if (!KEY_ID_RE.test(keyId)) throw new EdgeAuthError(401, 'malformed key id')
+    const key = getKey(this.store, keyId)
+    if (key === undefined || key.principal !== principal) throw new EdgeAuthError(401, 'unknown key')
+    if (key.revoked !== null) throw new EdgeAuthError(401, 'key revoked')
+    if (key.expires !== null && now >= key.expires) throw new EdgeAuthError(401, 'key expired')
+    return key
+  }
+
+  /** A fresh one-time challenge nonce for a stream (A7 §3); never reused, so no store is needed. */
+  challengeNonce (): string {
+    return b64url(crypto.getRandomValues(new Uint8Array(32)))
+  }
+
+  /** Verifies a stream challenge answer. The key is re-checked, so a revocation during the handshake counts. */
+  async verifyStream (principal: string, keyId: string, binding: string, nonce: string, answer: unknown, now = Date.now()): Promise<KeyRow> {
+    const hub = this.hubId()
+    if (hub === undefined) throw new EdgeAuthError(401, 'signed streams need the hub TLS listener')
+    const a = answer as { type?: unknown; ts?: unknown; sig?: unknown }
+    if (a?.type !== 'auth' || typeof a.ts !== 'number' || !Number.isSafeInteger(a.ts) || typeof a.sig !== 'string' || !/^[A-Za-z0-9_-]{40,200}$/.test(a.sig)) {
+      throw new EdgeAuthError(401, 'expected {type:"auth", ts, sig}')
+    }
+    if (Math.abs(now - a.ts) > MAX_SKEW_MS) throw new EdgeAuthError(401, 'answer timestamp outside the 60 s window')
+    const key = this.usableKey(principal, keyId, now)
+    const bytes = signedStreamBytes({ principal, key_id: keyId, hub, nonce, ts: a.ts }, binding)
+    const ok = await crypto.subtle.verify(ALGS[key.alg].signParams, await this.publicKey(key), Buffer.from(a.sig, 'base64url') as BufferSource, bytes as BufferSource)
+      .catch(() => false)
+    if (!ok) throw new EdgeAuthError(401, 'bad signature')
+    return key
   }
 
   private async publicKey (k: KeyRow): Promise<CryptoKey> {

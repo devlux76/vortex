@@ -82,3 +82,24 @@ export async function signRequest (
   const sig = await crypto.subtle.sign(ALGS[alg].signParams, key, signedBytes(f, method, path, await sha256Hex(body)) as BufferSource)
   return formatAuthHeader(f, sig)
 }
+
+export const STREAM_AUTH_HEADER = 'vx-stream-auth'
+
+/** Signed bytes answering a stream challenge (A7 §3): bound to the binding and the hub's one-time nonce. */
+export function signedStreamBytes (f: AuthFields, binding: string): Uint8Array {
+  const payload = JSON.stringify({
+    v: 1, kind: 'stream', principal: f.principal, key_id: f.key_id, hub: f.hub,
+    nonce: f.nonce, ts: f.ts, binding,
+  })
+  return enc.encode(AUTH_DOMAIN + payload)
+}
+
+/** The client's answer frame to `{type:"challenge", nonce, hub}`. */
+export async function answerChallenge (
+  key: CryptoKey, alg: KeyAlg, ids: { principal: string; key_id: string; hub: string },
+  binding: string, nonce: string, now = Date.now(),
+): Promise<{ type: 'auth'; ts: number; sig: string }> {
+  const f: AuthFields = { ...ids, nonce, ts: now }
+  const sig = await crypto.subtle.sign(ALGS[alg].signParams, key, signedStreamBytes(f, binding) as BufferSource)
+  return { type: 'auth', ts: now, sig: b64url(sig) }
+}

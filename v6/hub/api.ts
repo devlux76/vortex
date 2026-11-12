@@ -10,8 +10,9 @@ import { PRINCIPAL_RE, ROOM_RE, BINDING_RE } from './config.ts'
 import { fitSingle, type Bounds } from '../client/render.ts'
 import { findSecret, SecretRefusals } from './secrets.ts'
 import { EdgeAuth, EdgeAuthError, type EdgeIdentity } from './edge-auth.ts'
-import { AUTH_HEADER } from '../client/edge-sign.ts'
+import { AUTH_HEADER, STREAM_AUTH_HEADER } from '../client/edge-sign.ts'
 import { recentInRooms } from './store-log.ts'
+import { signedUpgrade, openPendingStream, answerPendingStream, closePendingStream } from './api-stream.ts'
 
 const EVIDENCE_KINDS: Evidence[] = ['host-accepted', 'transport-written', 'hook-returned']
 
@@ -48,6 +49,8 @@ export class Api {
   /** Hub id bound into signed requests: the TLS certificate fingerprint (A7 §3). */
   hubId: string | undefined
   readonly edgeAuth: EdgeAuth
+  /** Time a signed stream has to answer its challenge (A7 §3); a test seam. */
+  streamAuthTimeoutMs = 10_000
   /** Requests authenticated by signature, keyed by the rebuilt Request object. */
   private signed = new WeakMap<Request, EdgeIdentity>()
 
@@ -92,6 +95,7 @@ export class Api {
     const url = new URL(req.url)
     const path = url.pathname
     const isUpgrade = path.startsWith('/v1/bindings/') && path.endsWith('/stream') && req.method === 'GET'
+    if (isUpgrade && req.headers.has(STREAM_AUTH_HEADER)) return signedUpgrade(this, req, server, path)
     if (req.headers.has(AUTH_HEADER)) {
       // Signed edge request (A7 §3). Stream auth (challenge-response) is not
       // built yet, so a signed upgrade is refused; mixing schemes is refused.
@@ -395,6 +399,7 @@ export class Api {
   // ------------------------------------------------------------------
 
   private onOpen (ws: ServerWebSocket): void {
+    if (openPendingStream(this, ws)) return
     const data = ws.data as unknown as { principal: string; name: string }
     const socket = socketOf(ws)
     if (this.deps.delivery.attach(socket, data.principal, data.name)) return
@@ -402,6 +407,7 @@ export class Api {
   }
 
   private async onMessage (ws: ServerWebSocket, raw: string | Buffer): Promise<void> {
+    if (await answerPendingStream(this, ws, raw)) return
     const data = ws.data as unknown as { principal: string; name: string }
     let frame: any
     try { frame = JSON.parse(typeof raw === 'string' ? raw : raw.toString('utf8')) } catch {
@@ -445,6 +451,7 @@ export class Api {
   }
 
   private onClose (ws: ServerWebSocket): void {
+    if (closePendingStream(ws)) return // never attached
     const data = ws.data as unknown as { principal: string; name: string }
     this.deps.delivery.detach(socketOf(ws), data.principal, data.name)
   }
@@ -467,7 +474,7 @@ function clampInt (raw: string | null, min: number, max: number, fallback: numbe
  * identity to decide ownership, so a fresh wrapper per frame would make every
  * acknowledgment look stale and every close look foreign (§8.3 takeover).
  */
-function socketOf (ws: ServerWebSocket): SocketLike {
+export function socketOf (ws: ServerWebSocket): SocketLike {
   const data = ws.data as unknown as { sock?: SocketLike }
   return (data.sock ??= bunSocket(ws))
 }

@@ -2,7 +2,7 @@
 
 Status: DRAFT, Claude, 2026-11-12, at the operator's direction. Codex and GLM review it, and nothing merges until they do (proposal status rule). Numbering: A7 follows A6.
 
-**Implementation status.** §1's loopback-only `listen` and forwarding-header refusal are on `main` (#4). The signed HTTP path of §3, §4 enrollment and the unsealed limits of §2 are implemented on branch `clouds/signed-edge` as a draft PR for review (§3a). Stream challenge-response, signers for the sealed tiers, and refusing bearer tokens on the remote listener are not built yet.
+**Implementation status.** §1's loopback-only `listen` and forwarding-header refusal are on `main` (#4). The signed HTTP path and the signed stream challenge-response of §3, §4 enrollment and the unsealed limits of §2 are implemented on branch `clouds/signed-edge` (draft #7). Signers for the sealed tiers, and refusing bearer tokens on the remote listener, are not built yet. The latter can follow now that signed streams exist.
 Supersedes, once adopted: the "per-agent bearer token" bullet of §3 Hub and the §8.2 principal-token rules for every non-loopback path. A token stays valid only on the local listener (§1). §8.10 enrollment changes for remote principals.
 
 ## Operator requirements (2026-11-12, normative)
@@ -55,9 +55,10 @@ Not sufficient by itself:
 
 - **Payload.** Every signature covers the UTF-8 string `vortex-v6-auth\0`, followed by a canonical JSON object with fixed key order: `{v:1, kind, principal, key_id, hub, nonce, ts, ...}`. `hub` is the hub id: the SHA-256 fingerprint of the hub's TLS certificate, printed by `vx enroll --key`. It identifies the hub even when a CA-certified front end terminates TLS, so a signature made for one hub is refused by every other. The shared implementation is `v6/client/edge-sign.ts`.
 - **WebSocket stream (§8.3).**
-  - On upgrade, the hub sends `{type:"challenge", nonce}` (32 random bytes).
-  - The client answers with `{type:"auth", principal, key_id, ts, sig}` over `kind:"stream"`, the binding name and the nonce.
-  - Until a valid answer arrives, within 10 s, the hub sends no other frame and accepts none. A failed answer closes the stream with 4401.
+  - The upgrade carries `VX-Stream-Auth: <principal> <key_id>`. The hub checks the key: it must exist, be owned by the principal, be neither revoked nor expired, and not be unsealed (403). The binding must exist. It accepts the upgrade only on the TLS listener; the plaintext listener answers 421.
+  - On open, the hub sends `{type:"challenge", nonce, hub}`, with 32 random bytes of nonce, used once.
+  - The client answers `{type:"auth", ts, sig}`, signing `kind:"stream"`, principal, key_id, hub, nonce, ts and the binding name.
+  - The hub accepts exactly one frame before authentication. Until a valid answer arrives, within 10 s, it attaches nothing and sends no other frame. A wrong answer, a stale `ts`, a key revoked during the handshake, any other frame or the timeout closes the stream with 4401. The challenge nonce changes with every connection, so a captured answer is useless.
 - **HTTP requests.**
   - Each request carries `VX-Auth: principal key_id ts nonce sig` over `kind:"http"`, method, path with query, and the SHA-256 of the body. The nonce is at least 22 base64url characters (128 bits).
   - A request carrying both `VX-Auth` and `Authorization` is refused with 400. A signed WebSocket upgrade is refused with 401 until stream auth exists.

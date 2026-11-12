@@ -86,7 +86,7 @@ export async function startHub (over: { cfg?: Partial<HubConfig>; stateDir?: str
     fetch: (req: Request, server: any) => {
       // Signed requests are bound to the TLS listener's identity (A7 §3);
       // the plaintext loopback listener is for local bearer clients only.
-      if (req.headers.has('vx-auth')) {
+      if (req.headers.has('vx-auth') || req.headers.has('vx-stream-auth')) {
         return new Response(JSON.stringify({ error: 'signed requests are accepted only on the TLS listener' }), { status: 421, headers: { 'content-type': 'application/json' } })
       }
       const via = forwardedBy(req)

@@ -127,17 +127,17 @@ const mine = async (rec: Record<string, unknown>, min: number, max: number): Pro
 describe('§12 stamp, acceptance', () => {
   test('a stamp made at 20 bits verifies at 20 (and the ruled formula reproduces it independently)', T, async () => {
     const { rec, fields, s } = await stampless()
-    const stamp = makeStamp(rec, 20, MEMBERS_ORDER)
+    const stamp = await makeStamp(rec, 20)
     expect(stamp.length).toBeGreaterThanOrEqual(1)
     expect(leadingZeroBits(await stampDigest({ ...rec, stamp }))).toBeGreaterThanOrEqual(20)
     const full = await stamped(fields, stamp, s)
-    expect(verifyStamp(full, 20, MEMBERS_ORDER)).toBe(true)
+    expect(await verifyStamp(full, 20)).toBe(true)
     // a 20-bit-deep stamp below 24 bits does not verify at 24
     const shallowStamp = await mine(rec, 20, 24)
     const shallow = await stamped(fields, shallowStamp, s)
     expect(leadingZeroBits(await stampDigest(shallow))).toBeLessThan(24)
-    expect(verifyStamp(shallow, 20, MEMBERS_ORDER)).toBe(true)
-    expect(verifyStamp(shallow, 24, MEMBERS_ORDER)).toBe(false)
+    expect(await verifyStamp(shallow, 20)).toBe(true)
+    expect(await verifyStamp(shallow, 24)).toBe(false)
   })
 
   test('a 21-bit stamp verifies at 21 and fails at 22 and 24 (deterministic, no mining flake)', T, async () => {
@@ -145,53 +145,53 @@ describe('§12 stamp, acceptance', () => {
     const stamp = await mine(rec, 21, 22)
     const full = await stamped(fields, stamp, s)
     expect(leadingZeroBits(await stampDigest(full))).toBe(21)
-    expect(verifyStamp(full, 21, MEMBERS_ORDER)).toBe(true)
-    expect(verifyStamp(full, 22, MEMBERS_ORDER)).toBe(false)
-    expect(verifyStamp(full, 24, MEMBERS_ORDER)).toBe(false)
+    expect(await verifyStamp(full, 21)).toBe(true)
+    expect(await verifyStamp(full, 22)).toBe(false)
+    expect(await verifyStamp(full, 24)).toBe(false)
   })
 
   test('a stamp copied onto a different record fails', T, async () => {
     const { rec, fields, s } = await stampless()
-    const stamp = makeStamp(rec, 20, MEMBERS_ORDER)
+    const stamp = await makeStamp(rec, 20)
     const other = { ...fields, room: 'f'.repeat(64) }
     const bogus = await stamped(other, stamp, s)
-    expect(verifyStamp(bogus, 20, MEMBERS_ORDER)).toBe(false)
+    expect(await verifyStamp(bogus, 20)).toBe(false)
   })
 
   test('a signed field mutated after stamping voids the stamp (the stampless id changes)', T, async () => {
     const { rec, fields, s } = await stampless()
-    const stamp = makeStamp(rec, 20, MEMBERS_ORDER)
+    const stamp = await makeStamp(rec, 20)
     const mutated = await stamped({ ...fields, epoch: 2 }, stamp, s)
-    expect(verifyStamp(mutated, 20, MEMBERS_ORDER)).toBe(false)
+    expect(await verifyStamp(mutated, 20)).toBe(false)
     // and so does a record whose members list changed after stamping
     const tampered = { ...(await stamped(fields, stamp, s)) }
     ;(tampered.members as Array<{ id: string }>)[0]!.id = 'd'.repeat(64)
-    expect(verifyStamp(tampered, 20, MEMBERS_ORDER)).toBe(false)
+    expect(await verifyStamp(tampered, 20)).toBe(false)
   })
 
   test('difficulty 0 accepts the empty string and any well-formed stamp; makeStamp returns the empty string', T, async () => {
     const { rec, fields, s } = await stampless()
-    expect(makeStamp(rec, 0, MEMBERS_ORDER)).toBe('')
+    expect(await makeStamp(rec, 0)).toBe('')
     const empty = await stamped(fields, '', s)
-    expect(verifyStamp(empty, 0, MEMBERS_ORDER)).toBe(true)
+    expect(await verifyStamp(empty, 0)).toBe(true)
     const real = await stamped(fields, 'A2_-z9', s)
-    expect(verifyStamp(real, 0, MEMBERS_ORDER)).toBe(true)
+    expect(await verifyStamp(real, 0)).toBe(true)
     // the ruling keeps the encoding at every difficulty: outside the alphabet is refused even at 0
     const odd = await stamped(fields, '@@@', s)
-    expect(verifyStamp(odd, 0, MEMBERS_ORDER)).toBe(false)
+    expect(await verifyStamp(odd, 0)).toBe(false)
     // and a record with no `stamp` field carries no stamp at all
     const bare = await sign({ v: 1, kind: 'refuse', ts: 1794537600, exp: 1794537600 + 7 * 86400, room: 'a'.repeat(64) }, await signer())
-    expect(verifyStamp(bare, 0, REFUSE_ORDER)).toBe(false)
+    expect(await verifyStamp(bare, 0)).toBe(false)
   })
 
   test('an empty or absent stamp is refused when the difficulty is above zero', T, async () => {
     const { fields, s } = await stampless()
     const empty = await stamped(fields, '', s)
-    expect(verifyStamp(empty, 1, MEMBERS_ORDER)).toBe(false)
-    expect(verifyStamp(empty, 20, MEMBERS_ORDER)).toBe(false)
+    expect(await verifyStamp(empty, 1)).toBe(false)
+    expect(await verifyStamp(empty, 20)).toBe(false)
     // a kind whose order has no stamp can never carry one
     const bare = await sign({ v: 1, kind: 'refuse', ts: 1794537600, exp: 1794537600 + 7 * 86400, room: 'a'.repeat(64) }, await signer())
-    expect(verifyStamp(bare, 20, REFUSE_ORDER)).toBe(false)
+    expect(await verifyStamp(bare, 20)).toBe(false)
   })
 
   test('the stamp is at most 22 base64url characters with no padding, whatever its digest', T, async () => {
@@ -206,26 +206,25 @@ describe('§12 stamp, acceptance', () => {
     expect(deep.length).toBe(23)
     expect(leadingZeroBits(await stampDigest({ ...rec, stamp: deep }))).toBeGreaterThanOrEqual(20)
     const overstayed = await stamped(fields, deep, s)
-    expect(verifyStamp(overstayed, 20, MEMBERS_ORDER)).toBe(false)
+    expect(await verifyStamp(overstayed, 20)).toBe(false)
     // padding characters are outside the base64url stamp alphabet
     const padded = await stamped(fields, 'AA==', s)
-    expect(verifyStamp(padded, 20, MEMBERS_ORDER)).toBe(false)
+    expect(await verifyStamp(padded, 20)).toBe(false)
   })
 
-  test('makeStamp ignores an existing stamp and sig: the result is the stampless id\'s stamp', T, async () => {
-    const { fields, s } = await stampless()
+  test('makeStamp refuses a record that already carries a stamp (no stamp is made for a different id silently)', T, async () => {
+    const { rec, fields, s } = await stampless()
     const already = await stamped(fields, 'AAAA', s)
-    const restamped = makeStamp(already, 20, MEMBERS_ORDER)
-    expect(restamped).not.toBe('AAAA')
-    // inserted on the stampless form, it verifies
-    const fresh = await stamped(fields, restamped, s)
-    expect(verifyStamp(fresh, 20, MEMBERS_ORDER)).toBe(true)
+    await expect(makeStamp(already, 20)).rejects.toThrow(/already carries a stamp/)
+    // the stampless form stamps and verifies
+    const fresh = await stamped(fields, await makeStamp(rec, 20), s)
+    expect(await verifyStamp(fresh, 20)).toBe(true)
   })
 
   test('making a 20-bit stamp finishes within a few seconds on CI', T, async () => {
     const { rec } = await stampless()
     const t0 = Date.now()
-    makeStamp(rec, 20, MEMBERS_ORDER)
+    await makeStamp(rec, 20)
     expect(Date.now() - t0).toBeLessThan(10_000)
   })
 })

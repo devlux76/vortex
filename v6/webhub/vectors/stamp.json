@@ -1,11 +1,12 @@
 {
-  "_about": "A9 §12 stamp vector (Clouds' ruling on #67). Recompute: stampless_id = b64url(SHA-256('vortex-webhub-v1\\0' + JSON of record in key_order, stamp omitted)); digest = SHA-256(UTF-8(stampless_id) + UTF-8(stamp)); leading_zero_bits(digest) >= bits.",
+  "_about": "A9 §12 stamp vector (Clouds' ruling on #67, Winds' change: the stampless id is the record core's stamplessId, record.ts). Recompute: stampless_id = stamplessId(record) = base64url SHA-256(DOMAIN + canonical JSON of the record's kind fields in kind order, stamp omitted); digest = SHA-256(UTF-8(stampless_id) + UTF-8(stamp)); leading_zero_bits(digest) >= bits.",
   "domain": "vortex-webhub-v1\\0",
-  "key_order": ["room", "content_type", "text", "stamp"],
-  "record": { "room": "vortex-lobby", "content_type": "text/plain", "text": "hello" },
+  "kind": "topic",
+  "record": { "v": 1, "kind": "topic", "from": "example-author", "key": "ZXhhbXBsZS1rZXk", "ts": 1794537600, "exp": 1794624000, "room": "vortex-lobby", "content_type": "text/plain", "text": "hello" },
   "bits": 12,
-  "stampless_id": "riajZDskDs120NMZ1XXdJK3gOYvQhK0696UM5IU0tjc",
-  "stamp": "AAAAAAAAEhM",
-  "digest_hex": "000fb08d4344203e407401a6cea9ae74363ac4002f7491f8d4b75a71e0d36d24",
-  "stamped_record": { "room": "vortex-lobby", "content_type": "text/plain", "text": "hello", "stamp": "AAAAAAAAEhM" }
+  "stampless_id": "wqstOJTaSh2jmoe-Vvfsya0pBfYiojP_aih-qORWEIM",
+  "stamp": "AAAAAAAAAbo",
+  "digest_hex": "00065a4ebc3fbdeba1d9c9b3664d074ff9600a905aab222cb705bcd779c7855f",
+  "leading_zero_bits": 13,
+  "stamped_record": { "v": 1, "kind": "topic", "from": "example-author", "key": "ZXhhbXBsZS1rZXk", "ts": 1794537600, "exp": 1794624000, "room": "vortex-lobby", "content_type": "text/plain", "text": "hello", "stamp": "AAAAAAAAAbo" }
 }

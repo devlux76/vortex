@@ -412,3 +412,24 @@ describe('review on #35: collisions, precision, aliasing', () => {
     expect(Ledger.fromJSON(saved).balance(debt, T)).toBe(50000)
   })
 })
+
+// Invictus QA on #3 (F1, F2): unknown quotes and repeated records.
+describe('QA fixes: unknown quotes and repeated records', () => {
+  test('F1: an iou naming a quote the ledger does not hold is refused at any face', async () => {
+    const winds = new Ledger(WINDS)
+    const ghost = await msg<Iou>(keys.sun, { kind: 'iou', holder: WINDS, face_tokens: 999999, quote: newId(), issued_at: T, expires_at: 0 })
+    expect(() => winds.ingest(ghost, T)).toThrow('iou references an unknown quote')
+    expect(winds.entry(ghost)).toBeUndefined()
+  })
+
+  test('F2: a quote recorded twice in saved state still resolves (no ambiguity)', async () => {
+    const sun = new Ledger(SUN)
+    const q = await msg<Quote>(keys.sun, { kind: 'quote', to: WINDS, task: 'QA', est_tokens: 1000, offer_face_tokens: 5000, expires_at: T + 600 })
+    sun.ingest(q, T)
+    const saved = sun.toJSON()
+    const restored = Ledger.fromJSON({ ...saved, quotes: [...saved.quotes, ...saved.quotes] })
+    const acc = await msg(keys.winds, { kind: 'accept', quote: q.id, reason: '', ts: T + 1 })
+    expect(() => restored.ingest(acc, T + 1)).not.toThrow()
+    expect(restored.accept(q)).toBeDefined()
+  })
+})

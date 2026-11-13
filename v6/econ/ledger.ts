@@ -74,8 +74,14 @@ class PairMap<T extends Ref> {
   get (from: string, id: string): T | undefined { return this.byKey.get(pairKey(from, id)) }
   has (from: string, id: string): boolean { return this.byKey.has(pairKey(from, id)) }
   set (v: T): void {
-    this.byKey.set(pairKey(v.from, v.id), v)
-    this.byId.set(v.id, [...(this.byId.get(v.id) ?? []), v])
+    const key = pairKey(v.from, v.id)
+    this.byKey.set(key, v)
+    // A repeat of the same (from, id) replaces its entry, so an id never resolves to two records.
+    const list = this.byId.get(v.id) ?? []
+    const i = list.findIndex(x => pairKey(x.from, x.id) === key)
+    if (i >= 0) list[i] = v
+    else list.push(v)
+    this.byId.set(v.id, list)
   }
 
   /** The one record with `id` that `ok` accepts; throws when the id is ambiguous. */
@@ -159,11 +165,11 @@ export class Ledger {
       // One IOU per quote (A8 §6.2): a second one for the same quote is refused, whatever its face.
       if (this.quoteUsed(m.from, m.quote)) throw new LedgerError('quote already has an iou from this issuer')
       const q = this.quotes.get(m.from, m.quote)
-      if (q !== undefined) {
-        if (q.to !== m.holder) throw new LedgerError('quote is not addressed to the holder')
-        if (m.face_tokens > q.offer_face_tokens) {
-          throw new LedgerError(`face ${m.face_tokens} exceeds the ${q.offer_face_tokens} agreed in the quote`)
-        }
+      // A named quote must be one this ledger holds; otherwise the face ceiling cannot be checked.
+      if (q === undefined) throw new LedgerError('iou references an unknown quote')
+      if (q.to !== m.holder) throw new LedgerError('quote is not addressed to the holder')
+      if (m.face_tokens > q.offer_face_tokens) {
+        throw new LedgerError(`face ${m.face_tokens} exceeds the ${q.offer_face_tokens} agreed in the quote`)
       }
       this.issuedQuotes.add(pairKey(m.from, m.quote))
     }

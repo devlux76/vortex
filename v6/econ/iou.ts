@@ -4,7 +4,7 @@
 // Canonical bytes follow the A7/#8 pattern (v6/p2p/message.ts): fixed key
 // order per kind, compact JSON, not sorted keys. Common fields `v, kind, id,
 // from, ts` lead; the per-kind fields follow in the order A8 §6.2 lists them.
-// Optional fields (beacon only) are omitted when absent. The signature is
+// Optional fields (marked ? in A8 §6.2) are omitted when absent. The signature is
 // Ed25519 over DOMAIN + canonical(body without sig), base64url, made with the
 // sender's VORTEX identity key (A7 key / libp2p peer id, A8 §6.1).
 //
@@ -14,8 +14,8 @@
 // (v6/hub/secrets.ts) and the whole message fits the 4096-byte text bound.
 //
 // Not here: carrier skew (the carrier's rule applies), (from,id) dedupe and
-// balances (v6/econ/ledger.ts), identity binding of beacon `agent` to the
-// carrier principal (the carrier knows it).
+// balances (v6/econ/ledger.ts), binding beacon `agent` to the carrier principal
+// (the carrier knows it; here `agent` must equal the signed `from`).
 import { publicKeyFromRaw } from '@libp2p/crypto/keys'
 import { peerIdFromString } from '@libp2p/peer-id'
 import type { PeerId, PublicKey } from '@libp2p/interface'
@@ -41,9 +41,9 @@ const COMMON: readonly FieldSpec[] = [['v', 'int'], ['kind', 'str'], ['id', 'str
 export const KIND_FIELDS = {
   beacon: [['agent', 'str'], ['pool', 'str'], ['used_pct', 'int'], ['resets_at', 'int'], ['floor_pct', 'int', true],
     ['callin_pct', 'int', true], ['lending', 'bool'], ['cost_hint', 'str', true]],
-  quote: [['to', 'str'], ['task', 'str'], ['est_tokens', 'int'], ['offer_face_tokens', 'int'], ['expires', 'int']],
+  quote: [['to', 'str'], ['task', 'str'], ['est_tokens', 'int'], ['offer_face_tokens', 'int'], ['expires_at', 'int']],
   accept: [['quote', 'str'], ['reason', 'text']],
-  decline: [['quote', 'str'], ['reason', 'text']],
+  decline: [['ref', 'str'], ['reason', 'text'], ['remaining', 'int', true]],
   receipt: [['quote', 'str'], ['spent_tokens', 'int']],
   iou: [['holder', 'str'], ['face_tokens', 'int'], ['quote', 'text'], ['issued_at', 'int'], ['expires_at', 'int']],
   redeem: [['iou', 'str'], ['task', 'str'], ['est_tokens', 'int']],
@@ -59,9 +59,10 @@ export interface Beacon extends Common {
   kind: 'beacon'; agent: string; pool: string; used_pct: number; resets_at: number
   floor_pct?: number; callin_pct?: number; lending: boolean; cost_hint?: typeof COST_HINTS[number]
 }
-export interface Quote extends Common { kind: 'quote'; to: string; task: string; est_tokens: number; offer_face_tokens: number; expires: number }
+export interface Quote extends Common { kind: 'quote'; to: string; task: string; est_tokens: number; offer_face_tokens: number; expires_at: number }
 export interface Accept extends Common { kind: 'accept'; quote: string; reason: string }
-export interface Decline extends Common { kind: 'decline'; quote: string; reason: string }
+/** `ref` is the quote or redeem id declined; `remaining` is the IOU balance when declining a redeem. */
+export interface Decline extends Common { kind: 'decline'; ref: string; reason: string; remaining?: number }
 export interface Receipt extends Common { kind: 'receipt'; quote: string; spent_tokens: number }
 export interface Iou extends Common { kind: 'iou'; holder: string; face_tokens: number; quote: string; issued_at: number; expires_at: number }
 export interface Redeem extends Common { kind: 'redeem'; iou: string; task: string; est_tokens: number }
@@ -117,6 +118,7 @@ function checkKind (kind: unknown): EconKind {
 }
 
 function checkBeacon (m: Record<string, unknown>): void {
+  if (m.agent !== m.from) throw new EconError('beacon agent must equal from')
   const used = m.used_pct as number
   if (used > 100) throw new EconError('used_pct must be in 0..100')
   const floor = m.floor_pct as number | undefined

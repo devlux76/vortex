@@ -90,11 +90,11 @@ function canon (value: unknown, listName?: string): unknown {
 }
 
 /** The record's fields in signing order (no `sig`), after form checks. */
-function ordered (rec: Record<string, unknown>): Record<string, unknown> {
+function ordered (rec: Record<string, unknown>, omit: ReadonlySet<string> = new Set()): Record<string, unknown> {
   if (rec.v !== VERSION) throw new RecordError(`unknown v: ${String(rec.v)}`)
   if (!isKind(rec.kind)) throw new RecordError(`unknown kind: ${String(rec.kind)}`)
-  const order = [...COMMON, ...KINDS[rec.kind]]
-  const allowed = new Set<string>([...order, 'sig'])
+  const order = [...COMMON, ...KINDS[rec.kind]].filter(k => !omit.has(k))
+  const allowed = new Set<string>([...order, ...omit, 'sig'])
   const extra = Object.keys(rec).filter(k => !allowed.has(k))
   if (extra.length > 0) throw new RecordError(`unknown field: ${extra.join(', ')}`)
   for (const k of order) if (!Object.hasOwn(rec, k)) throw new RecordError(`missing field: ${k}`)
@@ -124,6 +124,26 @@ async function sha256 (bytes: Uint8Array): Promise<Uint8Array> {
 /** A9 §5.1: base64url SHA-256 of the signing bytes. */
 export async function recordId (rec: Record<string, unknown>): Promise<string> {
   return b64url.encode(await sha256(signingBytes(rec)))
+}
+
+const NO_STAMP: ReadonlySet<string> = new Set(['stamp'])
+
+/**
+ * A9 §12 (Clouds' ruling on #67): the signing bytes of a record with `stamp`
+ * (and `sig`) omitted, from the same canonical encoder as the signature, so a
+ * stamp computed by any implementation agrees with this one. Only for kinds
+ * that carry a stamp; the key order comes from the kind, never the caller.
+ */
+export function stamplessSigningBytes (rec: Record<string, unknown>): Uint8Array {
+  if (!isKind(rec.kind) || !(KINDS[rec.kind] as readonly string[]).includes('stamp')) {
+    throw new RecordError(`kind ${String(rec.kind)} carries no stamp`)
+  }
+  return enc.encode(DOMAIN + JSON.stringify(ordered(rec, NO_STAMP)))
+}
+
+/** The stampless id: base64url SHA-256 of `stamplessSigningBytes`. */
+export async function stamplessId (rec: Record<string, unknown>): Promise<string> {
+  return b64url.encode(await sha256(stamplessSigningBytes(rec)))
 }
 
 /** The full wire form: canonical fields, then `sig`. */

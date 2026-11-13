@@ -5,7 +5,7 @@
 import { test, expect } from 'bun:test'
 import { b64pad } from '../client/b64.ts'
 import {
-  DOMAIN, KINDS, type Kind, canonical, decode, encode, recordId, sign, signerFromSeed, signingBytes, verify,
+  DOMAIN, KINDS, type Kind, canonical, decode, encode, recordId, sign, signerFromSeed, signingBytes, stamplessId, stamplessSigningBytes, verify,
 } from './record.ts'
 
 const SEED = Uint8Array.from({ length: 32 }, (_, i) => i + 1)
@@ -100,6 +100,24 @@ test('unknown v, unknown kind, unknown or missing fields are refused', async () 
   expect((await verify(missing)).ok).toBe(false)
   expect((await verify({ ...rec, key: rec.key.replace(/=+$/, '') })).ok).toBe(false)
   expect(() => canonical({ ...rec, ts: 1.5 })).toThrow(/integer/)
+})
+
+test('stampless bytes use the canonical encoder with stamp omitted (A9 §12, #67 ruling)', async () => {
+  const dec = new TextDecoder()
+  for (const kind of ['members', 'topic', 'hub', 'seed'] as const) {
+    const rec = await sign(fields(kind), await signerFromSeed(SEED))
+    const stampless = dec.decode(stamplessSigningBytes(rec))
+    // Same as the signing bytes with only the "stamp" member removed.
+    const full = JSON.parse(dec.decode(signingBytes(rec)).slice(DOMAIN.length))
+    delete full.stamp
+    expect(stampless).toBe(DOMAIN + JSON.stringify(full))
+    // Independent of whether stamp is present, and of input key order (members wrap-first, limits unsorted).
+    const { stamp: _s, sig: _g, ...noStamp } = rec
+    expect(dec.decode(stamplessSigningBytes(noStamp))).toBe(stampless)
+    expect(await stamplessId(rec)).toBe(await stamplessId({ ...rec, stamp: 'different' }))
+  }
+  expect(dec.decode(stamplessSigningBytes(await sign(fields('members'), await signerFromSeed(SEED))))).toContain('"members":[{"id":')
+  expect(() => stamplessSigningBytes(fields('msg'))).toThrow(/no stamp/)
 })
 
 test('committed vectors fix the signing bytes, id and signature for one record of each kind', async () => {

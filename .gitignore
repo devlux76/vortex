@@ -33,3 +33,9 @@ endpoint.json
 .DS_Store
 *.swp
 *.swo
+
+# Transient problem-solving plans. One-off drafts, addressed when the work
+# lands; the answer belongs in the issue, the code or the spec. Never
+# committed: tools/check-no-transient-plans.sh runs in CI on every pull
+# request and fails if any such path is tracked.
+superpowers/

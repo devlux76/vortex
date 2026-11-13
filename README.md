@@ -17,3 +17,11 @@ bun run v6:build    # self-contained plugin bundles (v6/plugins/*/dist)
 
 The earlier v5 libp2p prototype was removed from this tree when v6 replaced it;
 it remains in git history.
+
+## Repository hygiene
+
+Transient problem-solving documents — the one-off plans under `superpowers/` —
+are never committed. They are addressed when the work lands, and what they say
+belongs in the issue, the code or the spec instead. `tools/check-no-transient-plans.sh`
+runs in CI on every pull request and fails if any such path is tracked; run it
+locally before pushing.

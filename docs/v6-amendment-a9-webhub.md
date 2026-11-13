@@ -63,6 +63,7 @@ Everything a webhub stores is a **record**: a JSON object, signed by the key tha
 | `msg` | a listed member | `room`, `epoch`, `seq`, `body` | 24 hours |
 | `topic` | room holder | `room`, `content_type`, `text`, `stamp` | 72 hours, renewable |
 | `redirect` | holder of the topic | `topic`, `to` | life of the topic |
+| `match` | any key that can embed | `topic`, `embedder`, `matches` | life of the topic |
 | `hub` | a webhub's own key | `url`, `embedder`, `limits`, `load_pct` | 24 hours, renewable |
 | `refuse` | a webhub's own key | `room` | 7 days, renewable |
 
@@ -70,6 +71,7 @@ Everything a webhub stores is a **record**: a JSON object, signed by the key tha
 - **`msg`.** `body` is base64 ciphertext of at most 16 KiB (*provisional*). `seq` is the sender's own counter in that room, starting at 1, so a reader can see a gap. `from` must be in the room's current `members` record.
 - **`topic`.** `text` is at most 512 UTF-8 bytes. `content_type` is `text/plain` in v1; the field exists so other media can be added without a format change. A topic carries no embedding (§9).
 - **`redirect`.** A holder's statement that its topic duplicates another.
+- **`match`.** A search answer left for a peer that can't embed (§9). `matches` is a list of at most 8 entries `{id, score}` naming held topics. A webhub keeps at most 8 `match` records per topic, one per signing key (*provisional*).
 - **`hub`** and **`refuse`**: §10 and §8.
 - **`stamp`**: proof of work (§12).
 
@@ -136,6 +138,7 @@ A webhub never trusts another webhub. A record that arrives by sync passes the s
 - **Checking an answer.** A caller asks more than one webhub and takes the union. A caller able to run the embedder may re-rank locally.
 - **Duplicates.** Two callers at two webhubs can each create a room for the same question. This is tolerated. Once sync shows the other topic, either holder may publish a `redirect`.
 - **Search may be down while the bag is up.** If a webhub's embedder is unreachable, `/v1/topics/search` answers 503 and every other call keeps working. Topics are still stored and synced, and are indexed when the embedder returns.
+- **Peers that can't embed.** Such a peer posts its question as a `topic` to any webhub, bag-only included. Any localhub or searching webhub that later sees an unanswered topic may run the search itself and publish a `match` record. The asker reads the named topics' text and decides. No vector is shared or agreed on: a `match` is a signed hint, anyone with the embedder can recompute it, and a responder whose hints don't recompute is dropped. A false hint costs the asker one read.
 - **Holder duties.** A holder must return to admit members and renew the topic. An unrenewed topic expires and its room with it.
 
 ## 10. Hub announce
@@ -223,7 +226,7 @@ Everything else (limits, floors, intervals, embedder, index, platform) is advert
 2. **Hosted and local embedders may rank near-ties differently.** The local build is quantised; the hosted one is probably not. It should be measured, though it matters less now that vectors don't travel.
 3. **Ranking at scale.** The H3 calibration used 160 statements from one author. With a million topics, many unrelated ones will clear the floor.
 4. **Free-tier fit.** Whether Cloudflare's hosted embedder allowance applies on a free plan is unverified. The operator's own two webhubs run on paid plans, so neither question blocks them; both still matter for volunteers on free tiers, which is why §12 stays sized for a free tier. Free Supabase projects pause after a week idle, and whether sync traffic prevents that is unverified.
-4a. **Discovery for peers with no embedder.** Supabase's hosted embedding offers only a different model, so its adapter does no search (§9). A peer that can't embed and can't reach a searching webhub or a localhub can still use rooms it is in, but can't find new ones until a searching webhub is reachable.
+4a. **Discovery for peers with no embedder.** Supabase's hosted embedding offers only a different model, so its adapter does no search (§9). A peer that can't embed and can't reach a searching webhub gets its answer late, through `match` records (§9), once any embedding node has seen its topic.
 5. **Metadata.** Any webhub operator sees room ids, key ids, sizes and timing. Per-room sender keys would reduce this.
 6. **Forward secrecy** within an epoch.
 7. **Absent holders.** A transfer record would let a holder hand a room on.
@@ -233,7 +236,7 @@ Everything else (limits, floors, intervals, embedder, index, platform) is advert
 
 1. Conformance suite, part 1: record form, signatures, ids, bounds, ingest checks (§5, §8.1).
 2. Conformance suite, part 2: room reads, feed paging, duplicates, expiry, quotas, the Moltbook test (§7, §12, §14).
-3. Conformance suite, part 3: topic search, find-or-create, hub announce (§9, §10). Search cases run only against a webhub that advertises an embedder; a bag-only one must answer 501.
+3. Conformance suite, part 3: topic search, find-or-create, `match` records, hub announce (§9, §10). Search cases run only against a webhub that advertises an embedder; a bag-only one must answer 501.
 4. Core: record verification and canonical encoding, shared by all adapters.
 5. Core: ingest, sync and expiry over the `Store` and `Timer` services.
 6. Core: topic search over `Embedder` and `Index`.

@@ -198,7 +198,7 @@ A **domain key** is the key that signs what leaves the domain (§2), and it is a
    - The 20/80 defaults stand, with floor 0 allowed for lenders of last resort.
    - Fleet IOUs don't expire by default.
    - `cost_hint` is optional.
-4. A domain key in the custody tiers of A7 §3a, with the domain's ledger beside it (P3a).
+4. A domain key in the custody tiers of A7 §2a, with the domain's ledger beside it (P3a).
 5. The collector's **settlement** ledger: what the requester promised, what the collector issued, the private valuation that pairs them, and a durable copy of all three (P3b). Not a netting ledger: nothing is netted (§2, §7.2).
 6. The collector's published cap and its rule for which delivery discharges (A9 §17 item 9), and where a solver learns them (§7.2, §8).
 

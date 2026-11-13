@@ -39,8 +39,8 @@ const COMMON: readonly FieldSpec[] = [['v', 'int'], ['kind', 'str'], ['id', 'str
 
 /** A hub principal name (A7 §3): lowercase, short. A peer id never matches (52 chars, mixed case). */
 const HUB_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/
-/** The A7 `key_id`: sha256(spki). A7 stores hex; A8 §6.1 says base64url — both shapes are accepted until #33 settles it. */
-const KEY_ID_RE = /^(?:[0-9a-f]{64}|[A-Za-z0-9_-]{43})$/
+/** The `key` field: sha256(spki) in base64url only, one canonical encoding per key (A8 §6.1). */
+const KEY_ID_RE = /^[A-Za-z0-9_-]{43}$/
 
 /** Per-kind fields in canonical order (A8 §4, §6.2). */
 export const KIND_FIELDS = {
@@ -169,7 +169,7 @@ export function validateBody (raw: unknown): Unsigned {
   // `ts`) so verifiers resolve the exact key and revocation applies per key.
   // A p2p sender omits it (the peer id embeds the Ed25519 key).
   if (out.key !== undefined) {
-    if (!KEY_ID_RE.test(out.key as string)) throw new EconError('field key must be an A7 key_id (64-char hex or 43-char base64url)')
+    if (!KEY_ID_RE.test(out.key as string)) throw new EconError('field key must be an A7 key_id in base64url (43 chars); hex is refused')
   } else if (HUB_NAME_RE.test(out.from as string)) {
     throw new EconError('a hub principal sender carries its key id (A8 §6.1)')
   }

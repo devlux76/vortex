@@ -7,7 +7,7 @@
 // the acceptance, A8 §6.2 item 5). The face value is the one agreed in the
 // quote; the worker's claimed spend is never checked against it.
 import type { Decline, EconInput, Iou, Quote, Redeem } from './iou.ts'
-import { statusOf, type IngestOptions, type Ledger } from './ledger.ts'
+import { statusOf, type Ledger } from './ledger.ts'
 
 export interface EconPolicy {
   /** Members of this operator's fleet (agent / peer ids). Everyone else is outside it. */
@@ -38,7 +38,6 @@ export function checkIssue (l: Ledger, p: EconPolicy, iou: Pick<Iou, 'holder' | 
   if (q !== undefined) {
     if (q.to !== iou.holder) return no('quote is not addressed to the holder')
     if (iou.face_tokens > q.offer_face_tokens) return no(`face ${iou.face_tokens} exceeds the ${q.offer_face_tokens} agreed in the quote`)
-    if (q.expires_at > 0 && now >= q.expires_at) return no('quote has expired')
     if (l.quoteUsed(l.self, iou.quote)) return no('quote already has an iou from this agent (one iou per quote)')
   }
   if (!p.fleet.has(iou.holder)) {
@@ -68,8 +67,8 @@ export function checkQuote (l: Ledger, p: EconPolicy, quote: Pick<Quote, 'from' 
  * Can this agent (the issuer) take `redeem`? When it can't over the balance,
  * the result carries `remaining` (0 once retired) for the decline.
  */
-export function checkRedeem (l: Ledger, redeem: Pick<Redeem, 'iou' | 'from' | 'est_tokens'>, now: number, opts: IngestOptions = {}): PolicyResult {
-  const e = l.resolveHeld(redeem.iou, redeem.from, opts)
+export function checkRedeem (l: Ledger, redeem: Pick<Redeem, 'issuer' | 'iou' | 'from' | 'est_tokens'>, now: number): PolicyResult {
+  const e = l.held(redeem.issuer, redeem.iou, redeem.from)
   if (e === undefined) return no('no iou with this id held by the signer')
   const s = statusOf(e, now)
   if (s !== 'live') return no(`iou is retired (${s})`, 0)
@@ -82,8 +81,8 @@ export function checkRedeem (l: Ledger, redeem: Pick<Redeem, 'iou' | 'from' | 'e
  * The decline (A8 §6.2: ref, reason, remaining?) for `redeem`, or undefined
  * when it can be taken. Sign the result with iou.ts `sign`.
  */
-export function declineRedeem (l: Ledger, redeem: Pick<Redeem, 'id' | 'iou' | 'from' | 'est_tokens'>, now: number, opts: IngestOptions = {}): EconInput<Decline> | undefined {
-  const c = checkRedeem(l, redeem, now, opts)
+export function declineRedeem (l: Ledger, redeem: Pick<Redeem, 'id' | 'issuer' | 'iou' | 'from' | 'est_tokens'>, now: number): EconInput<Decline> | undefined {
+  const c = checkRedeem(l, redeem, now)
   if (c.ok) return undefined
   const d: EconInput<Decline> = { kind: 'decline', from: l.self, ref: redeem.id, reason: c.reason }
   if (c.remaining !== undefined) d.remaining = c.remaining

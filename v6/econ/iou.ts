@@ -35,7 +35,12 @@ const SIG_RE = /^[A-Za-z0-9_-]{86}$/ // 64 bytes, base64url, unpadded
 type FieldType = 'str' | 'text' | 'int' | 'bool'
 type FieldSpec = readonly [name: string, type: FieldType, optional?: true]
 
-const COMMON: readonly FieldSpec[] = [['v', 'int'], ['kind', 'str'], ['id', 'str'], ['from', 'str'], ['ts', 'int']]
+const COMMON: readonly FieldSpec[] = [['v', 'int'], ['kind', 'str'], ['id', 'str'], ['from', 'str'], ['ts', 'int'], ['key', 'str', true]]
+
+/** A hub principal name (A7 §3): lowercase, short. A peer id never matches (52 chars, mixed case). */
+const HUB_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/
+/** The A7 `key_id`: sha256(spki). A7 stores hex; A8 §6.1 says base64url — both shapes are accepted until #33 settles it. */
+const KEY_ID_RE = /^(?:[0-9a-f]{64}|[A-Za-z0-9_-]{43})$/
 
 /** Per-kind fields in canonical order (A8 §4, §6.2). */
 export const KIND_FIELDS = {
@@ -46,15 +51,15 @@ export const KIND_FIELDS = {
   decline: [['ref', 'str'], ['reason', 'text'], ['remaining', 'int', true]],
   receipt: [['quote', 'str'], ['spent_tokens', 'int']],
   iou: [['holder', 'str'], ['face_tokens', 'int'], ['quote', 'text'], ['issued_at', 'int'], ['expires_at', 'int']],
-  redeem: [['iou', 'str'], ['task', 'str'], ['est_tokens', 'int']],
-  redeemed: [['iou', 'str'], ['redeem', 'str'], ['credited_tokens', 'int']],
-  release: [['iou', 'str']],
+  redeem: [['issuer', 'str'], ['iou', 'str'], ['task', 'str'], ['est_tokens', 'int']],
+  redeemed: [['issuer', 'str'], ['iou', 'str'], ['redeem', 'str'], ['credited_tokens', 'int']],
+  release: [['issuer', 'str'], ['iou', 'str']],
 } as const satisfies Record<string, readonly FieldSpec[]>
 
 export type EconKind = keyof typeof KIND_FIELDS
 export const ECON_KINDS = Object.keys(KIND_FIELDS) as EconKind[]
 
-interface Common { v: 1; id: string; from: string; ts: number; sig: string }
+interface Common { v: 1; id: string; from: string; ts: number; key?: string; sig: string }
 export interface Beacon extends Common {
   kind: 'beacon'; agent: string; pool: string; used_pct: number; resets_at: number
   floor_pct?: number; callin_pct?: number; lending: boolean; cost_hint?: typeof COST_HINTS[number]
@@ -65,9 +70,9 @@ export interface Accept extends Common { kind: 'accept'; quote: string; reason: 
 export interface Decline extends Common { kind: 'decline'; ref: string; reason: string; remaining?: number }
 export interface Receipt extends Common { kind: 'receipt'; quote: string; spent_tokens: number }
 export interface Iou extends Common { kind: 'iou'; holder: string; face_tokens: number; quote: string; issued_at: number; expires_at: number }
-export interface Redeem extends Common { kind: 'redeem'; iou: string; task: string; est_tokens: number }
-export interface Redeemed extends Common { kind: 'redeemed'; iou: string; redeem: string; credited_tokens: number }
-export interface Release extends Common { kind: 'release'; iou: string }
+export interface Redeem extends Common { kind: 'redeem'; issuer: string; iou: string; task: string; est_tokens: number }
+export interface Redeemed extends Common { kind: 'redeemed'; issuer: string; iou: string; redeem: string; credited_tokens: number }
+export interface Release extends Common { kind: 'release'; issuer: string; iou: string }
 export type EconMessage = Beacon | Quote | Accept | Decline | Receipt | Iou | Redeem | Redeemed | Release
 
 /** What a caller passes to sign: the body without v and sig; id and ts are filled in when absent. */
@@ -77,8 +82,12 @@ export type Unsigned<M extends EconMessage = EconMessage> = M extends EconMessag
 
 /** Anything that signs bytes with Ed25519: a libp2p PrivateKey, or a signer client (A7 §2). */
 export interface EconSigner { sign (data: Uint8Array): Uint8Array | Promise<Uint8Array> }
-/** A verify key: a libp2p PublicKey or PeerId, or a raw 32-byte Ed25519 public key (A7 edge keys). */
-export type VerifyKey = PublicKey | PeerId | Uint8Array
+/**
+ * A verify key: a libp2p PublicKey or PeerId, a raw 32-byte Ed25519 public key
+ * (A7 edge keys), or a WebCrypto ECDSA/P-256 public key (ES256, for principals
+ * whose A7 key is P-256 — hardware tiers; A8 §6.1).
+ */
+export type VerifyKey = PublicKey | PeerId | Uint8Array | CryptoKey
 
 export class EconError extends Error {}
 
@@ -156,6 +165,14 @@ export function validateBody (raw: unknown): Unsigned {
     out[name] = value
   }
   if (!ID_RE.test(out.id as string)) throw new EconError('malformed message id')
+  // A8 §6.1: a hub-principal sender names its A7 key (the `key` field, after
+  // `ts`) so verifiers resolve the exact key and revocation applies per key.
+  // A p2p sender omits it (the peer id embeds the Ed25519 key).
+  if (out.key !== undefined) {
+    if (!KEY_ID_RE.test(out.key as string)) throw new EconError('field key must be an A7 key_id (64-char hex or 43-char base64url)')
+  } else if (HUB_NAME_RE.test(out.from as string)) {
+    throw new EconError('a hub principal sender carries its key id (A8 §6.1)')
+  }
   if (kind === 'beacon') checkBeacon(out)
   return out as Unsigned
 }
@@ -190,7 +207,7 @@ export async function sign<M extends EconMessage> (signer: EconSigner, input: Ec
   return m
 }
 
-function toPublicKey (key: VerifyKey | undefined, from: string): PublicKey {
+function toPublicKey (key: Exclude<VerifyKey, CryptoKey> | undefined, from: string): PublicKey {
   if (key instanceof Uint8Array) {
     if (key.length !== 32) throw new EconError('raw Ed25519 public key must be 32 bytes')
     return publicKeyFromRaw(key)
@@ -206,20 +223,29 @@ function toPublicKey (key: VerifyKey | undefined, from: string): PublicKey {
   return pid.publicKey
 }
 
+const isWebCryptoKey = (k: unknown): k is CryptoKey =>
+  typeof CryptoKey !== 'undefined' && k instanceof CryptoKey
+
 /**
  * With an explicit key, `from` must be the authenticated sender. A trusted
  * `sender` (a peer id or hub principal the caller resolved from that key) must
  * equal `from`. Without one, a peer-id `from` must be the id derived from the
- * key. Anything else is refused.
+ * key. A WebCrypto key (ES256) has no derivable peer id, so `sender` is
+ * required. Anything else is refused.
  */
-function checkSender (from: string, key: VerifyKey | undefined, pub: PublicKey, sender: string | undefined): void {
+function checkSender (from: string, key: VerifyKey | undefined, pub: PublicKey | CryptoKey, sender: string | undefined): void {
   if (key === undefined) return // from is a peer id; its embedded key verified the signature
+  if (isWebCryptoKey(key)) {
+    if (sender === undefined) throw new EconError('pass the expected sender for an ES256 key')
+    if (sender !== from) throw new EconError('from does not match the expected sender')
+    return
+  }
   if (sender !== undefined) {
     if (sender !== from) throw new EconError('from does not match the expected sender')
     return
   }
   const derived = key instanceof Uint8Array || 'verify' in key
-    ? peerIdFromPublicKey(pub).toString()
+    ? peerIdFromPublicKey(pub as PublicKey).toString()
     : key.toString()
   if (derived !== from) throw new EconError('from does not match the key; pass the expected sender')
 }
@@ -227,8 +253,9 @@ function checkSender (from: string, key: VerifyKey | undefined, pub: PublicKey, 
 /**
  * Parse (JSON text or object), validate and verify a message. With no `key`,
  * `from` must be a libp2p peer id that embeds its Ed25519 key. With a `key`,
- * `from` must match `sender` (when given) or the peer id derived from the key.
- * The canonical signed bytes are bounded for both text and object input.
+ * `from` must match `sender` (when given) or the peer id derived from the key;
+ * a WebCrypto ECDSA/P-256 key verifies as ES256 and requires `sender`. The
+ * canonical signed bytes are bounded for both text and object input.
  * Returns the message in canonical key order, or throws EconError with the reason.
  */
 export async function verify (raw: unknown, key?: VerifyKey, sender?: string): Promise<EconMessage> {
@@ -241,7 +268,16 @@ export async function verify (raw: unknown, key?: VerifyKey, sender?: string): P
   const sig = (obj as Record<string, unknown>).sig
   if (typeof sig !== 'string' || !SIG_RE.test(sig)) throw new EconError('malformed signature')
   encode({ ...body, sig } as EconMessage) // size bound on the canonical bytes, for object input too
-  const pub = toPublicKey(key, body.from)
+  const bytes = signingBytes(body)
+  if (key !== undefined && isWebCryptoKey(key)) {
+    // ES256: the A7 key resolved to a P-256 WebCrypto key (hardware tiers).
+    checkSender(body.from, key, key, sender)
+    const ok = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, fromString(sig, 'base64url') as BufferSource, bytes as BufferSource)
+      .catch(() => false)
+    if (!ok) throw new EconError('bad signature')
+    return { ...body, sig } as EconMessage
+  }
+  const pub = toPublicKey(key as Exclude<VerifyKey, CryptoKey> | undefined, body.from)
   if (pub.type !== 'Ed25519') throw new EconError('econ messages are signed with Ed25519')
   checkSender(body.from, key, pub, sender)
   const ok = await pub.verify(signingBytes(body), fromString(sig, 'base64url'))

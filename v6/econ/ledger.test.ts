@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { generateKeyPair } from '@libp2p/crypto/keys'
 import { peerIdFromPrivateKey } from '@libp2p/peer-id'
 import type { PrivateKey } from '@libp2p/interface'
-import { newId, sign, verify, type EconInput, type EconMessage, type Iou, type Quote, type Redeem } from './iou.ts'
+import { newId, sign, verify, type EconInput, type EconMessage, type Iou, type Quote, type Receipt, type Redeem } from './iou.ts'
 import { Ledger, LedgerError } from './ledger.ts'
 import { checkIssue, checkQuote, checkRedeem, declineRedeem, type EconPolicy } from './policy.ts'
 
@@ -21,10 +21,11 @@ async function msg<M extends EconMessage> (k: PrivateKey, body: Record<string, u
 }
 const iou = (k: PrivateKey, holder: string, face: number, extra: Record<string, unknown> = {}): Promise<Iou> =>
   msg<Iou>(k, { kind: 'iou', holder, face_tokens: face, quote: '', issued_at: T, expires_at: 0, ...extra })
-const redeem = (k: PrivateKey, iouId: string, est: number): Promise<Redeem> =>
-  msg<Redeem>(k, { kind: 'redeem', iou: iouId, task: 'QA PR #12', est_tokens: est })
-const redeemed = (k: PrivateKey, iouId: string, redeemId: string, credited: number): Promise<EconMessage> =>
-  msg(k, { kind: 'redeemed', iou: iouId, redeem: redeemId, credited_tokens: credited })
+// `issuer` is the signed issuer of the IOU (A8 §6.1); Sun issued the default debt.
+const redeem = (k: PrivateKey, iouId: string, est: number, issuer = SUN): Promise<Redeem> =>
+  msg<Redeem>(k, { kind: 'redeem', issuer, iou: iouId, task: 'QA PR #12', est_tokens: est })
+const redeemed = (k: PrivateKey, iouId: string, redeemId: string, credited: number, issuer = SUN): Promise<EconMessage> =>
+  msg(k, { kind: 'redeemed', issuer, iou: iouId, redeem: redeemId, credited_tokens: credited })
 
 // Sun owes Winds 50,000 (A8 §7). `sun` is Sun's ledger (issuer side), `winds` is Winds' (holder side).
 async function setup (face = 50000, extra: Record<string, unknown> = {}) {
@@ -151,14 +152,13 @@ describe('dedupe on (from, id)', () => {
     // On each issuer's side the reference resolves within the pair.
     const moon = new Ledger(MOON)
     moon.ingest(moonDebt, T)
-    const r = await redeem(keys.winds, debt.id, 700)
+    // The redeem names its issuer in its signature, so it resolves without any carrier context.
+    const r = await redeem(keys.winds, debt.id, 700, MOON)
     moon.ingest(r, T)
-    moon.ingest(await redeemed(keys.winds, debt.id, r.id, 700), T)
+    moon.ingest(await redeemed(keys.winds, debt.id, r.id, 700, MOON), T)
     expect(moon.status(moonDebt, T)).toBe('paid')
-    // Winds' own copy of its redeem is ambiguous until it names the carrier peer.
-    await expect((async () => winds.ingest(r, T))()).rejects.toThrow('ambiguous')
-    winds.ingest(r, T, { peer: MOON })
-    winds.ingest(await redeemed(keys.winds, debt.id, r.id, 700), T, { peer: MOON })
+    winds.ingest(r, T)
+    winds.ingest(await redeemed(keys.winds, debt.id, r.id, 700, MOON), T)
     expect(winds.status(moonDebt, T)).toBe('paid')
     expect(winds.balance(debt, T)).toBe(50000)
   })
@@ -175,7 +175,7 @@ describe('dedupe on (from, id)', () => {
 describe('retirement', () => {
   test('release forgives the rest', async () => {
     const { sun, winds, debt, both } = await setup()
-    both(await msg(keys.winds, { kind: 'release', iou: debt.id }))
+    both(await msg(keys.winds, { kind: 'release', issuer: SUN, iou: debt.id }))
     expect(sun.status(debt, T)).toBe('released')
     expect(sun.owedTo(WINDS, T)).toBe(0)
     expect(winds.owedBy(SUN, T)).toBe(0)
@@ -204,7 +204,7 @@ describe('signer roles', () => {
     await expect((async () => sun.ingest(await redeemed(keys.sun, debt.id, r.id, 100), T))()).rejects.toThrow('not signed by the iou holder')
     await expect((async () => sun.ingest(await redeemed(keys.moon, debt.id, r.id, 100), T))()).rejects.toThrow('not signed by the iou holder')
     await expect((async () => sun.ingest(await redeem(keys.moon, debt.id, 100), T))()).rejects.toThrow('not signed by the iou holder')
-    await expect((async () => sun.ingest(await msg(keys.sun, { kind: 'release', iou: debt.id }), T))()).rejects.toThrow('not signed by the iou holder')
+    await expect((async () => sun.ingest(await msg(keys.sun, { kind: 'release', issuer: SUN, iou: debt.id }), T))()).rejects.toThrow('not signed by the iou holder')
     expect(sun.balance(debt, T)).toBe(50000)
   })
 
@@ -222,6 +222,7 @@ describe('signer roles', () => {
     const q = await msg<Quote>(keys.winds, { kind: 'quote', to: MOON, task: 'docs', est_tokens: 1000, offer_face_tokens: 1000, expires_at: T + 600 })
     l.ingest(q, T)
     await expect((async () => l.ingest(await msg(keys.sun, { kind: 'receipt', quote: q.id, spent_tokens: 1 }), T))()).rejects.toThrow('quoted worker')
+    l.ingest(await msg(keys.moon, { kind: 'accept', quote: q.id, reason: '' }), T)
     l.ingest(await msg(keys.moon, { kind: 'receipt', quote: q.id, spent_tokens: 1 }), T)
     expect(l.receipt(q)!.from).toBe(MOON)
   })
@@ -259,6 +260,7 @@ describe('policy (A8 §8)', () => {
     const early = checkIssue(l, policy, { holder: MOON, face_tokens: 5000, quote: q.id }, T)
     expect(early).toEqual({ ok: false, reason: 'outside the fleet an iou is issued only after the work is delivered (no receipt yet)' })
     // the worker's claimed spend is not checked against the agreed face
+    l.ingest(await msg(keys.moon, { kind: 'accept', quote: q.id, reason: '' }), T)
     l.ingest(await msg(keys.moon, { kind: 'receipt', quote: q.id, spent_tokens: 999999 }), T)
     expect(checkIssue(l, policy, { holder: MOON, face_tokens: 5000, quote: q.id }, T)).toEqual({ ok: true })
     expect(checkIssue(l, policy, { holder: MOON, face_tokens: 5001, quote: q.id }, T))
@@ -285,17 +287,19 @@ describe('settlement and quotes (Sun QA on #35)', () => {
     const fromB = await msg<Iou>(keys.moon, { kind: 'iou', id: SHARED, holder: WINDS, face_tokens: 100, quote: '', issued_at: T, expires_at: 0 })
     holder.ingest(fromA, T)
     holder.ingest(fromB, T)
-    // The redeem resolves to A's IOU through the carrier peer A.
-    const r = await msg<Redeem>(keys.winds, { kind: 'redeem', iou: SHARED, task: 'QA', est_tokens: 75 })
-    holder.ingest(r, T, { peer: SUN })
-    // The proof is then ingested with carrier peer B: it must still settle A's IOU only.
-    holder.ingest(await msg(keys.winds, { kind: 'redeemed', iou: SHARED, redeem: r.id, credited_tokens: 75 }), T, { peer: MOON })
+    // The redeem is signed against A's IOU, and its proof names A too.
+    const r = await msg<Redeem>(keys.winds, { kind: 'redeem', issuer: SUN, iou: SHARED, task: 'QA', est_tokens: 75 })
+    holder.ingest(r, T)
+    // A proof naming B cannot settle a redeem signed against A (no redeem on B's IOU).
+    await expect((async () => holder.ingest(await msg(keys.winds, { kind: 'redeemed', issuer: MOON, iou: SHARED, redeem: r.id, credited_tokens: 75 }), T))())
+      .rejects.toThrow('names no redeem')
+    holder.ingest(await msg(keys.winds, { kind: 'redeemed', issuer: SUN, iou: SHARED, redeem: r.id, credited_tokens: 75 }), T)
     expect(holder.balance(fromA, T)).toBe(25)
     expect(holder.balance(fromB, T)).toBe(100)
     // Settlement survives serialisation and stays per issuer.
     const copy = Ledger.fromJSON(JSON.parse(JSON.stringify(holder)))
     expect(copy.balance(fromB, T)).toBe(100)
-    await expect((async () => copy.ingest(await msg(keys.winds, { kind: 'redeemed', iou: SHARED, redeem: r.id, credited_tokens: 1 }), T))())
+    await expect((async () => copy.ingest(await msg(keys.winds, { kind: 'redeemed', issuer: SUN, iou: SHARED, redeem: r.id, credited_tokens: 1 }), T))())
       .rejects.toThrow('already credited')
   })
 
@@ -313,14 +317,45 @@ describe('settlement and quotes (Sun QA on #35)', () => {
     expect(() => sun.ingest(second, T)).toThrow('quote already has an iou from this issuer')
   })
 
-  test('face may not exceed the quote offer, and issuance must precede quote expiry', async () => {
+  test('face may not exceed the quote offer', async () => {
     const winds = new Ledger(WINDS)
-    const q = await msg<Quote>(keys.sun, { kind: 'quote', to: WINDS, task: 'QA', est_tokens: 1000, offer_face_tokens: 5000, expires_at: T + 100 })
+    const q = await msg<Quote>(keys.sun, { kind: 'quote', to: WINDS, task: 'QA', est_tokens: 1000, offer_face_tokens: 5000, expires_at: T + 600 })
     winds.ingest(q, T)
     const over = await msg<Iou>(keys.sun, { kind: 'iou', holder: WINDS, face_tokens: 5001, quote: q.id, issued_at: T, expires_at: 0 })
     expect(() => winds.ingest(over, T)).toThrow('exceeds the 5000 agreed in the quote')
-    const late = await msg<Iou>(keys.sun, { kind: 'iou', holder: WINDS, face_tokens: 5000, quote: q.id, issued_at: T + 100, expires_at: 0 })
-    expect(() => winds.ingest(late, T + 100)).toThrow('quote expired before the iou was issued')
-    expect(checkIssue(new Ledger(SUN), qpolicy, { holder: WINDS, face_tokens: 1, quote: 'missing' }, T).ok).toBe(false)
+  })
+
+  test('accept gates on time, not issuance (A8 §6.2, Sun QA on #35)', async () => {
+    const winds = new Ledger(WINDS)
+    const q = await msg<Quote>(keys.sun, { kind: 'quote', to: WINDS, task: 'QA', est_tokens: 1000, offer_face_tokens: 5000, expires_at: T + 10 })
+    winds.ingest(q, T)
+    // A receipt with no acceptance is refused.
+    const early = await msg<Receipt>(keys.winds, { kind: 'receipt', quote: q.id, spent_tokens: 100, ts: T + 3 })
+    expect(() => winds.ingest(early, T + 3)).toThrow('must reference an accepted quote')
+    // An acceptance on time is recorded.
+    winds.ingest(await msg(keys.winds, { kind: 'accept', quote: q.id, reason: '', ts: T + 4 }), T + 4)
+    expect(winds.accept(q)?.ts).toBe(T + 4)
+    // Delivery and the receipt may follow expiry.
+    winds.ingest(await msg<Receipt>(keys.winds, { kind: 'receipt', quote: q.id, spent_tokens: 100, ts: T + 12 }), T + 12)
+    // Issuance after expiry is fine when the acceptance was on time.
+    const debt = await msg<Iou>(keys.sun, { kind: 'iou', holder: WINDS, face_tokens: 5000, quote: q.id, issued_at: T + 20, expires_at: 0 })
+    winds.ingest(debt, T + 20)
+    expect(winds.balance(debt, T + 20)).toBe(5000)
+    // One IOU per quote still holds after expiry.
+    const again = await msg<Iou>(keys.sun, { kind: 'iou', holder: WINDS, face_tokens: 1, quote: q.id, issued_at: T + 21, expires_at: 0 })
+    expect(() => winds.ingest(again, T + 21)).toThrow('quote already has an iou from this issuer')
+  })
+
+  test('a late or missing acceptance is void: no receipt, no settlement', async () => {
+    const winds = new Ledger(WINDS)
+    const q = await msg<Quote>(keys.sun, { kind: 'quote', to: WINDS, task: 'QA', est_tokens: 1000, offer_face_tokens: 5000, expires_at: T + 10 })
+    winds.ingest(q, T)
+    // An accept at the expiry instant is void.
+    const late = await msg(keys.winds, { kind: 'accept', quote: q.id, reason: '', ts: T + 10 })
+    expect(() => winds.ingest(late, T + 10)).toThrow('accept is void: at or after the quote expiry')
+    expect(winds.accept(q)).toBeUndefined()
+    // With no recorded acceptance, the receipt is refused.
+    const receipt = await msg<Receipt>(keys.winds, { kind: 'receipt', quote: q.id, spent_tokens: 1, ts: T + 11 })
+    expect(() => winds.ingest(receipt, T + 11)).toThrow('must reference an accepted quote')
   })
 })

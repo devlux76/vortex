@@ -4,7 +4,8 @@ import { generateKeyPair } from '@libp2p/crypto/keys'
 import { peerIdFromPrivateKey } from '@libp2p/peer-id'
 import type { PrivateKey } from '@libp2p/interface'
 import { sign, verify, type EconInput, type EconMessage, type Iou, type Quote, type Redeem } from './iou.ts'
-import { checkIssue, checkQuote, checkRedeem, Ledger, LedgerError, type EconPolicy } from './ledger.ts'
+import { Ledger, LedgerError } from './ledger.ts'
+import { checkIssue, checkQuote, checkRedeem, declineRedeem, type EconPolicy } from './policy.ts'
 
 const keys = { sun: await generateKeyPair('Ed25519'), winds: await generateKeyPair('Ed25519'), moon: await generateKeyPair('Ed25519') }
 const id = (k: PrivateKey): string => peerIdFromPrivateKey(k).toString()
@@ -44,18 +45,18 @@ describe('lifecycle', () => {
 
     const r1 = await redeem(keys.winds, debt.id, 20000)
     both(r1)
-    expect(sun.balance(debt.id, T)).toBe(50000) // a redeem alone credits nothing
+    expect(sun.balance(debt, T)).toBe(50000) // a redeem alone credits nothing
     both(await redeemed(keys.winds, debt.id, r1.id, 18000))
-    expect(sun.balance(debt.id, T)).toBe(32000)
-    expect(winds.balance(debt.id, T)).toBe(32000)
+    expect(sun.balance(debt, T)).toBe(32000)
+    expect(winds.balance(debt, T)).toBe(32000)
 
     const r2 = await redeem(keys.winds, debt.id, 32000)
     both(r2)
     both(await redeemed(keys.winds, debt.id, r2.id, 32000))
-    expect(sun.status(debt.id, T)).toBe('paid')
-    expect(sun.balance(debt.id, T)).toBe(0)
+    expect(sun.status(debt, T)).toBe('paid')
+    expect(sun.balance(debt, T)).toBe(0)
     expect(sun.liabilities(T)).toBe(0)
-    expect(sun.entry(debt.id)!.redeemed).toHaveLength(2) // the issuer keeps the holder's proofs
+    expect(sun.entry(debt)!.redeemed).toHaveLength(2) // the issuer keeps the holder's proofs
     await expect((async () => sun.ingest(await redeem(keys.winds, debt.id, 1), T))()).rejects.toThrow('retired (paid)')
   })
 
@@ -77,7 +78,7 @@ describe('lifecycle', () => {
     sun.ingest(r, T)
     sun.ingest(await redeemed(keys.winds, debt.id, r.id, 10000), T)
     const copy = Ledger.fromJSON(JSON.parse(JSON.stringify(sun)))
-    expect(copy.balance(debt.id, T)).toBe(40000)
+    expect(copy.balance(debt, T)).toBe(40000)
     expect(copy.toJSON()).toEqual(sun.toJSON())
     // dedupe and single crediting survive the round trip
     expect(copy.ingest(r, T).duplicate).toBe(true)
@@ -92,7 +93,14 @@ describe('over-redemption', () => {
     both(r1)
     both(await redeemed(keys.winds, debt.id, r1.id, 18000))
     const big = await redeem(keys.winds, debt.id, 32001)
-    expect(checkRedeem(sun, big, T)).toEqual({ ok: false, reason: 'redeem asks for 32001 tokens but only 32000 remain on this iou' })
+    const reason = 'redeem asks for 32001 tokens but only 32000 remain on this iou'
+    expect(checkRedeem(sun, big, T)).toEqual({ ok: false, reason, remaining: 32000 })
+    // the decline Sun signs: ref, reason, remaining (A8 §6.2)
+    const d = declineRedeem(sun, big, T)!
+    expect(d).toEqual({ kind: 'decline', from: SUN, ref: big.id, reason, remaining: 32000 })
+    const signed = await verify(JSON.stringify(await sign(keys.sun, { ...d, ts: T })))
+    expect(signed).toMatchObject({ kind: 'decline', ref: big.id, remaining: 32000 })
+    expect(declineRedeem(sun, await redeem(keys.winds, debt.id, 32000), T)).toBeUndefined()
     let err: unknown
     try { sun.ingest(big, T) } catch (e) { err = e }
     expect(err).toBeInstanceOf(LedgerError)
@@ -118,20 +126,41 @@ describe('dedupe on (from, id)', () => {
     expect(sun.ingest(paid, T)).toEqual({ applied: true, duplicate: false })
     expect(sun.ingest(paid, T)).toEqual({ applied: false, duplicate: true })
     expect(sun.ingest({ ...paid }, T).duplicate).toBe(true)
-    expect(sun.balance(debt.id, T)).toBe(32000)
+    expect(sun.balance(debt, T)).toBe(32000)
     // a fresh redeemed for the same redeem (new id) is still refused
     await expect((async () => sun.ingest(await redeemed(keys.winds, debt.id, r.id, 18000), T))()).rejects.toThrow('already credited')
-    expect(sun.balance(debt.id, T)).toBe(32000)
+    expect(sun.balance(debt, T)).toBe(32000)
   })
 
-  test('a replayed iou is ignored; a different iou reusing the id is refused', async () => {
+  test('a replayed iou is ignored; same issuer reusing the id never adds debt', async () => {
     const { sun, debt } = await setup()
     expect(sun.ingest(debt, T).duplicate).toBe(true)
     expect(sun.liabilities(T)).toBe(50000)
     const clash = await iou(keys.sun, WINDS, 1, { id: debt.id, ts: T + 1 })
     expect(sun.ingest(clash, T).duplicate).toBe(true) // same (from, id)
-    const other = await iou(keys.moon, SUN, 1, { id: debt.id })
-    await expect((async () => sun.ingest(other, T))()).rejects.toThrow('iou id already in use')
+    expect(sun.balance(debt, T)).toBe(50000)
+  })
+
+  test('IOUs are identified by (issuer, id): another issuer may use the same id', async () => {
+    // Winds holds two IOUs with one id, from Sun and from Moon.
+    const { winds, debt } = await setup(50000)
+    const moonDebt = await iou(keys.moon, WINDS, 700, { id: debt.id })
+    winds.ingest(moonDebt, T)
+    expect(winds.balance(debt, T)).toBe(50000)
+    expect(winds.balance(moonDebt, T)).toBe(700)
+    // On each issuer's side the reference resolves within the pair.
+    const moon = new Ledger(MOON)
+    moon.ingest(moonDebt, T)
+    const r = await redeem(keys.winds, debt.id, 700)
+    moon.ingest(r, T)
+    moon.ingest(await redeemed(keys.winds, debt.id, r.id, 700), T)
+    expect(moon.status(moonDebt, T)).toBe('paid')
+    // Winds' own copy of its redeem is ambiguous until it names the carrier peer.
+    await expect((async () => winds.ingest(r, T))()).rejects.toThrow('ambiguous')
+    winds.ingest(r, T, { peer: MOON })
+    winds.ingest(await redeemed(keys.winds, debt.id, r.id, 700), T, { peer: MOON })
+    expect(winds.status(moonDebt, T)).toBe('paid')
+    expect(winds.balance(debt, T)).toBe(50000)
   })
 
   test('the same id from a different sender is a different message', async () => {
@@ -147,7 +176,7 @@ describe('retirement', () => {
   test('release forgives the rest', async () => {
     const { sun, winds, debt, both } = await setup()
     both(await msg(keys.winds, { kind: 'release', iou: debt.id }))
-    expect(sun.status(debt.id, T)).toBe('released')
+    expect(sun.status(debt, T)).toBe('released')
     expect(sun.owedTo(WINDS, T)).toBe(0)
     expect(winds.owedBy(SUN, T)).toBe(0)
     await expect((async () => sun.ingest(await redeem(keys.winds, debt.id, 1), T))()).rejects.toThrow('retired (released)')
@@ -155,14 +184,14 @@ describe('retirement', () => {
 
   test('expiry retires at expires_at; 0 means never', async () => {
     const { sun, debt } = await setup(50000, { expires_at: T + 3600 })
-    expect(sun.status(debt.id, T + 3599)).toBe('live')
-    expect(sun.status(debt.id, T + 3600)).toBe('expired')
-    expect(sun.balance(debt.id, T + 3600)).toBe(0)
+    expect(sun.status(debt, T + 3599)).toBe('live')
+    expect(sun.status(debt, T + 3600)).toBe('expired')
+    expect(sun.balance(debt, T + 3600)).toBe(0)
     expect(sun.liabilities(T + 3600)).toBe(0)
     await expect((async () => sun.ingest(await redeem(keys.winds, debt.id, 1), T + 4000))()).rejects.toThrow('retired (expired)')
     const forever = await iou(keys.sun, WINDS, 5)
     sun.ingest(forever, T)
-    expect(sun.status(forever.id, T + 10 ** 9)).toBe('live')
+    expect(sun.status(forever, T + 10 ** 9)).toBe('live')
   })
 })
 
@@ -176,7 +205,7 @@ describe('signer roles', () => {
     await expect((async () => sun.ingest(await redeemed(keys.moon, debt.id, r.id, 100), T))()).rejects.toThrow('not signed by the iou holder')
     await expect((async () => sun.ingest(await redeem(keys.moon, debt.id, 100), T))()).rejects.toThrow('not signed by the iou holder')
     await expect((async () => sun.ingest(await msg(keys.sun, { kind: 'release', iou: debt.id }), T))()).rejects.toThrow('not signed by the iou holder')
-    expect(sun.balance(debt.id, T)).toBe(50000)
+    expect(sun.balance(debt, T)).toBe(50000)
   })
 
   test('an iou must be signed by its issuer', async () => {
@@ -190,11 +219,11 @@ describe('signer roles', () => {
 
   test('a receipt must come from the quoted worker', async () => {
     const l = new Ledger(WINDS)
-    const q = await msg<Quote>(keys.winds, { kind: 'quote', to: MOON, task: 'docs', est_tokens: 1000, offer_face_tokens: 1000, expires: T + 600 })
+    const q = await msg<Quote>(keys.winds, { kind: 'quote', to: MOON, task: 'docs', est_tokens: 1000, offer_face_tokens: 1000, expires_at: T + 600 })
     l.ingest(q, T)
     await expect((async () => l.ingest(await msg(keys.sun, { kind: 'receipt', quote: q.id, spent_tokens: 1 }), T))()).rejects.toThrow('quoted worker')
     l.ingest(await msg(keys.moon, { kind: 'receipt', quote: q.id, spent_tokens: 1 }), T)
-    expect(l.receipt(q.id)!.from).toBe(MOON)
+    expect(l.receipt(q)!.from).toBe(MOON)
   })
 })
 
@@ -224,7 +253,7 @@ describe('policy (A8 §8)', () => {
     const l = new Ledger(WINDS)
     expect(checkIssue(l, policy, { holder: SUN, face_tokens: 1000, quote: '' }, T).ok).toBe(true)
 
-    const q = await msg<Quote>(keys.winds, { kind: 'quote', to: MOON, task: 'docs', est_tokens: 1000, offer_face_tokens: 5000, expires: T + 600 })
+    const q = await msg<Quote>(keys.winds, { kind: 'quote', to: MOON, task: 'docs', est_tokens: 1000, offer_face_tokens: 5000, expires_at: T + 600 })
     l.ingest(q, T)
     expect(checkIssue(l, policy, { holder: MOON, face_tokens: 5000, quote: '' }, T).ok).toBe(false)
     const early = checkIssue(l, policy, { holder: MOON, face_tokens: 5000, quote: q.id }, T)

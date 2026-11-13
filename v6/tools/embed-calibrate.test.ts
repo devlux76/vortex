@@ -36,12 +36,16 @@ async function run (args: string[]): Promise<{ code: number; stdout: string; std
   return { code: await proc.exited, stdout, stderr }
 }
 
-function setup () {
+const MODEL = 'onnx-community/embeddinggemma-2-ONNX'
+const DEFAULT_PROMPT = 'task: clustering | query: '
+
+/** A cache written by a run with these settings (the full key, so it matches). */
+function setup (prompt = DEFAULT_PROMPT) {
   const root = mkdtempSync(join(tmpdir(), 'vx-calibrate-'))
   const statements = join(root, 'statements.json')
   writeFileSync(statements, JSON.stringify({ topics }))
   const vectors = join(root, 'vectors.json')
-  writeFileSync(vectors, JSON.stringify({ model: 'fixture', revision: REVISION, texts, vectors: fixtureVectors() }))
+  writeFileSync(vectors, JSON.stringify({ model: MODEL, revision: REVISION, dtype: 'q4', prompt, dims: 768, texts, vectors: fixtureVectors() }))
   return { root, statements, vectors, out: join(root, 'report.json'), cleanup: () => rmSync(root, { recursive: true, force: true }) }
 }
 
@@ -79,12 +83,49 @@ test('--center subtracts the corpus mean and changes the similarities', async ()
   } finally { f.cleanup() }
 })
 
-test('--prompt is recorded in the report', async () => {
-  const f = setup()
+test('--prompt is recorded in the report when the cache was made with that prompt', async () => {
+  const prompt = 'task: sentence similarity | query: '
+  const f = setup(prompt)
   try {
-    const prompt = 'task: sentence similarity | query: '
     const r = await run(['--statements', f.statements, '--vectors', f.vectors, '--prompt', prompt, '--out', f.out])
     assert.equal(r.code, 0, r.stderr)
     assert.equal(JSON.parse(readFileSync(f.out, 'utf8')).prompt, prompt)
+  } finally { f.cleanup() }
+})
+
+test('a cache made under another prompt is refused, never silently reused', async () => {
+  const f = setup(DEFAULT_PROMPT)
+  try {
+    const r = await run(['--statements', f.statements, '--vectors', f.vectors, '--prompt', 'task: sentence similarity | query: ', '--out', f.out])
+    assert.notEqual(r.code, 0)
+    assert.match(r.stderr, /does not match this run: prompt/)
+    assert.equal(readFileSync(f.vectors, 'utf8').includes('"prompt":"' + DEFAULT_PROMPT + '"'), true, 'the cache is left untouched')
+  } finally { f.cleanup() }
+})
+
+test('a cache with another model, dtype or dims is refused', async () => {
+  const f = setup()
+  try {
+    const cache = JSON.parse(readFileSync(f.vectors, 'utf8'))
+    for (const [key, value] of [['dtype', 'fp32'], ['dims', 512], ['model', 'other/model']] as const) {
+      writeFileSync(f.vectors, JSON.stringify({ ...cache, [key]: value }))
+      const r = await run(['--statements', f.statements, '--vectors', f.vectors, '--out', f.out])
+      assert.notEqual(r.code, 0, key)
+      assert.match(r.stderr, new RegExp(key))
+    }
+  } finally { f.cleanup() }
+})
+
+test('a cache without the key fields (written before this check) is refused', async () => {
+  const f = setup()
+  try {
+    const cache = JSON.parse(readFileSync(f.vectors, 'utf8'))
+    delete cache.prompt
+    delete cache.dtype
+    delete cache.dims
+    writeFileSync(f.vectors, JSON.stringify(cache))
+    const r = await run(['--statements', f.statements, '--vectors', f.vectors, '--out', f.out])
+    assert.notEqual(r.code, 0)
+    assert.match(r.stderr, /prompt/)
   } finally { f.cleanup() }
 })

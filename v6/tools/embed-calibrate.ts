@@ -20,6 +20,10 @@ const DTYPE = 'q4'
 const PROMPT = process.argv.includes('--prompt') ? process.argv[process.argv.indexOf('--prompt') + 1] : 'task: clustering | query: '
 const DIMS = [768, 512, 256, 128]
 const PROVISIONAL: Record<number, number> = { 768: 0.8, 512: 0.8, 256: 0.82, 128: 0.85 }
+/** Output size of the pinned embedder; a cache with any other size is refused. */
+const EMBED_DIMS = 768
+/** What a cached vector set was computed with (the `--vectors` file). */
+interface CacheKey { model: string; revision: string; dtype: string; prompt: string; dims: number }
 
 interface Item { family: string; topic: string; text: string }
 interface Pair { s: number; related: boolean; hard: boolean; famA: string; famB: string }
@@ -105,15 +109,28 @@ async function main (): Promise<void> {
   const items: Item[] = data.topics.flatMap(t => t.texts.map(text => ({ family: t.family, topic: t.topic, text })))
   const vecPath = arg('--vectors')
   let vectors: number[][] | undefined
+  // A cache is reused only when every key matches the current run: model,
+  // revision, dtype, prompt, dims and the statements. Any mismatch fails loudly
+  // (a stale cache must never be reported as a result, and never overwritten silently).
   if (vecPath !== undefined && await Bun.file(vecPath).exists()) {
-    const saved = await Bun.file(vecPath).json() as { model: string; revision: string; texts: string[]; vectors: number[][] }
-    if (saved.revision === REVISION && saved.texts.length === items.length && saved.texts.every((t, i) => t === items[i].text)) vectors = saved.vectors
+    const saved = await Bun.file(vecPath).json() as Partial<CacheKey> & { texts?: string[]; vectors?: number[][] }
+    const expected: CacheKey = { model: MODEL, revision: REVISION, dtype: DTYPE, prompt: PROMPT, dims: EMBED_DIMS }
+    const bad = (Object.keys(expected) as Array<keyof CacheKey>).filter(k => saved[k] !== expected[k]).map(k => `${k} ${JSON.stringify(saved[k])} != ${JSON.stringify(expected[k])}`)
+    const sameTexts = Array.isArray(saved.texts) && saved.texts.length === items.length && saved.texts.every((t, i) => t === items[i].text)
+    if (!sameTexts) bad.push('texts (the statements differ)')
+    if (bad.length > 0) {
+      throw new Error(`--vectors ${vecPath} does not match this run: ${bad.join('; ')}. Use another --vectors path or delete the file to re-embed.`)
+    }
+    vectors = saved.vectors
   }
   if (vectors === undefined) {
     const t0 = performance.now()
     vectors = await embedAll(items)
     console.log(`embedded ${items.length} statements in ${((performance.now() - t0) / 1000).toFixed(1)}s`)
-    if (vecPath !== undefined) await Bun.write(vecPath, JSON.stringify({ model: MODEL, revision: REVISION, texts: items.map(i => i.text), vectors }) + '\n')
+    if (vecPath !== undefined) {
+      const cache: CacheKey & { texts: string[]; vectors: number[][] } = { model: MODEL, revision: REVISION, dtype: DTYPE, prompt: PROMPT, dims: EMBED_DIMS, texts: items.map(i => i.text), vectors }
+      await Bun.write(vecPath, JSON.stringify(cache) + '\n')
+    }
   }
   const families = [...new Set(items.map(i => i.family))]
   // --center: subtract a mean vector. For the full-set numbers the mean is the

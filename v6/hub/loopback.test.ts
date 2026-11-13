@@ -13,7 +13,7 @@ test('A7 §1: listen must be a loopback address', () => {
   for (const ok of ['127.0.0.1:7900', '127.0.0.2:1', 'localhost:7900', '[::1]:7900', '7900']) {
     assert.doesNotThrow(() => parseHubConfig({ listen: ok }), ok)
   }
-  for (const bad of [':7900', '0.0.0.0:7900', '192.168.1.5:7900', '100.64.0.1:7900', '[::]:7900', 'example.com:7900', '127.0.0.1.evil:7900']) {
+  for (const bad of [':7900', '0.0.0.0:7900', '192.0.2.5:7900', '100.64.0.1:7900', '[::]:7900', 'example.com:7900', '127.0.0.1.evil:7900']) {
     assert.throws(() => parseHubConfig({ listen: bad }), /loopback/, bad)
   }
   assert.equal(isLoopbackHost('LOCALHOST'), true)

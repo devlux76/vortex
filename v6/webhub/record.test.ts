@@ -1,0 +1,120 @@
+// #66 (v7 1.01): record core. Acceptance: sign/verify round-trips for every
+// kind; tampering, reordering and a key that doesn't hash to `from` fail;
+// unknown v/kind refused; committed vectors fix signing bytes and ids.
+// Regenerate the vectors with WRITE_VECTORS=1 (only when the spec changes).
+import { test, expect } from 'bun:test'
+import { b64pad } from '../client/b64.ts'
+import {
+  DOMAIN, KINDS, type Kind, canonical, decode, encode, recordId, sign, signerFromSeed, signingBytes, verify,
+} from './record.ts'
+
+const SEED = Uint8Array.from({ length: 32 }, (_, i) => i + 1)
+const OTHER_SEED = Uint8Array.from({ length: 32 }, (_, i) => 255 - i)
+const TS = 1794537600
+const VECTORS = new URL('./vectors/records.json', import.meta.url)
+
+/** One fixed record body per kind (A9 §5.2), without from/key/sig. */
+const SAMPLES: Record<Kind, Record<string, unknown>> = {
+  members: { room: 'cm9vbS1pZA', nonce: 'bm9uY2U', epoch: 3, async: true, members: [{ wrap: 'd3JhcA', id: 'a'.repeat(64), enc: 'ZW5j' }], stamp: 'c3RhbXA' },
+  msg: { room: 'cm9vbS1pZA', epoch: 3, seq: 7, body: 'c2VhbGVk' },
+  head: { room: 'cm9vbS1pZA', epoch: 3, seq: 8, body: 'c2VhbGVk' },
+  topic: { room: 'cm9vbS1pZA', content_type: 'text/plain', text: 'Find the leak in a 512 KiB block reader — ünïcode included', stamp: 'c3RhbXA' },
+  redirect: { topic: 'dG9waWMtYQ', to: 'dG9waWMtYg' },
+  match: { topic: 'dG9waWMtYQ', embedder: 'embedder-v1', matches: [{ score: 0.875, id: 'dG9waWMtYg' }] },
+  hub: { url: 'https://hub.example/', embedder: null, limits: { room_bytes: 1048576, per_key_rps: 2 }, load_pct: 12, stamp: 'c3RhbXA' },
+  refuse: { room: 'cm9vbS1pZA' },
+  seed: { content_id: 'Y29udGVudA', size: 524289, sealed: false, servers: [{ url: 'https://seed.example/p' }], stamp: 'c3RhbXA' },
+}
+
+const kinds = Object.keys(KINDS) as Kind[]
+const fields = (kind: Kind) => ({ v: 1, kind, ts: TS, exp: TS + 3600, ...SAMPLES[kind] })
+
+test('sign then verify round-trips for every kind', async () => {
+  const signer = await signerFromSeed(SEED)
+  for (const kind of kinds) {
+    const rec = await sign(fields(kind), signer)
+    const verdict = await verify(rec)
+    expect(verdict).toEqual({ ok: true, id: await recordId(rec) })
+    expect(decode(encode(rec))).toEqual(rec)
+  }
+})
+
+test('the signing bytes are DOMAIN + canonical JSON in the fixed order, nested lists in their order', async () => {
+  const rec = await sign(fields('members'), await signerFromSeed(SEED))
+  const text = new TextDecoder().decode(signingBytes(rec))
+  expect(text.startsWith(DOMAIN)).toBe(true)
+  const keys = Object.keys(JSON.parse(text.slice(DOMAIN.length)))
+  expect(keys).toEqual(['v', 'kind', 'from', 'key', 'ts', 'exp', ...KINDS.members])
+  expect(text).toContain('"members":[{"id":')
+  const hub = new TextDecoder().decode(signingBytes(await sign(fields('hub'), await signerFromSeed(SEED))))
+  expect(hub).toContain('"limits":{"per_key_rps":2,"room_bytes":1048576}')
+})
+
+test('changing any signed field fails', async () => {
+  const signer = await signerFromSeed(SEED)
+  for (const kind of kinds) {
+    const rec = await sign(fields(kind), signer)
+    for (const k of ['ts', 'exp', ...KINDS[kind]]) {
+      const v = rec[k]
+      // Same shape, different bytes, so the failure is the signature, not the form.
+      const changed = typeof v === 'number' ? v + 1
+        : typeof v === 'string' ? v + 'x'
+          : typeof v === 'boolean' ? !v
+            : v === null ? 'x'
+              : Array.isArray(v) ? [...v, v[0]]
+                : { ...(v as object), zz: 1 }
+      expect(await verify({ ...rec, [k]: changed })).toEqual({ ok: false, reason: 'bad signature' })
+    }
+  }
+})
+
+test('a signature over reordered keys fails, and non-canonical wire text is refused', async () => {
+  const signer = await signerFromSeed(SEED)
+  const rec = await sign(fields('topic'), signer)
+  // Sign the same fields serialized in a different key order.
+  const { sig: _sig, ...body } = rec
+  const reordered = JSON.stringify(Object.fromEntries(Object.entries(body).reverse()))
+  const badSig = new Uint8Array(await crypto.subtle.sign({ name: 'Ed25519' }, signer.privateKey, new TextEncoder().encode(DOMAIN + reordered)))
+  expect((await verify({ ...rec, sig: b64pad.encode(badSig) })).ok).toBe(false)
+  const wire = encode(rec)
+  const spaced = wire.replace('","', '", "')
+  expect(() => decode(spaced)).toThrow(/canonical/)
+  const shuffled = JSON.stringify(Object.fromEntries(Object.entries(JSON.parse(wire)).reverse()))
+  expect(() => decode(shuffled)).toThrow(/canonical/)
+})
+
+test('a key that does not hash to from fails, and a foreign key fails', async () => {
+  const rec = await sign(fields('msg'), await signerFromSeed(SEED))
+  expect(await verify({ ...rec, from: 'f'.repeat(64) })).toEqual({ ok: false, reason: 'key does not hash to from' })
+  const other = await sign(fields('msg'), await signerFromSeed(OTHER_SEED))
+  expect((await verify({ ...rec, key: other.key })).ok).toBe(false)
+  expect((await verify({ ...rec, sig: other.sig })).ok).toBe(false)
+})
+
+test('unknown v, unknown kind, unknown or missing fields are refused', async () => {
+  const rec = await sign(fields('refuse'), await signerFromSeed(SEED))
+  expect(await verify({ ...rec, v: 2 })).toEqual({ ok: false, reason: 'unknown v: 2' })
+  expect(await verify({ ...rec, kind: 'chat' })).toEqual({ ok: false, reason: 'unknown kind: chat' })
+  expect((await verify({ ...rec, extra: 1 })).ok).toBe(false)
+  const { room: _room, ...missing } = rec
+  expect((await verify(missing)).ok).toBe(false)
+  expect((await verify({ ...rec, key: rec.key.replace(/=+$/, '') })).ok).toBe(false)
+  expect(() => canonical({ ...rec, ts: 1.5 })).toThrow(/integer/)
+})
+
+test('committed vectors fix the signing bytes, id and signature for one record of each kind', async () => {
+  const signer = await signerFromSeed(SEED)
+  const built = []
+  for (const kind of kinds) {
+    const rec = await sign(fields(kind), signer)
+    built.push({ kind, wire: encode(rec), signing_bytes_b64: b64pad.encode(signingBytes(rec)), id: await recordId(rec) })
+  }
+  const doc = { spec: 'A9 §5.1, §5.2 (#66)', domain: 'vortex-webhub-v1\\0', seed_hex: Buffer.from(SEED).toString('hex'), records: built }
+  if (process.env.WRITE_VECTORS === '1') await Bun.write(VECTORS, JSON.stringify(doc, null, 2) + '\n')
+  const committed = await Bun.file(VECTORS).json()
+  expect(committed).toEqual(doc)
+  for (const v of committed.records) {
+    const rec = decode(v.wire)
+    expect(await verify(rec)).toEqual({ ok: true, id: v.id })
+  }
+})

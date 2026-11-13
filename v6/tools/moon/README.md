@@ -14,6 +14,19 @@ VORTEX_MOON_MODELS=/tmp/vortex-moon-models bun v6/tools/moon/serve.ts
 
 Open the printed `MOON_URL` with Chrome DevTools MCP and click **Run smoke test**. Inspect `window.moon`, the Chrome network log, and `GET /sun-transcript` on that URL. A pass has both local ONNX models, 768 finite embedding values, a signed rendezvous announcement, three generated replies, four messages each way, and an exact comparison of Moon’s sent messages against the fixture’s received messages.
 
+## Physical WebGPU on Linux
+
+If the default DevTools browser reports no adapter or Moon selects WASM, start a separate Chrome test profile with Vulkan. This launch was verified on the AMD GCN 4 host with Chrome 157.
+
+```sh
+google-chrome --headless --no-sandbox --disable-dev-shm-usage \
+  --enable-unsafe-webgpu --ignore-gpu-blocklist --enable-features=Vulkan \
+  --use-angle=vulkan --use-vulkan=native --remote-debugging-port=9222 \
+  --user-data-dir="$(mktemp -d /tmp/vortex-moon-chrome.XXXXXX)" about:blank
+```
+
+Point a temporary Chrome DevTools MCP session at that browser with `--browser-url=http://127.0.0.1:9222`. Open `MOON_URL` and run the smoke test. Check that `window.moon.checks[0]` shows `embedDevice` and `genDevice` as `webgpu` and `fallbackAdapter` as `false`. Inspect `navigator.gpu.requestAdapter()` for the expected hardware vendor and architecture, then require the full conversation to pass. WebGL availability alone does not establish that either ONNX model ran on the GPU.
+
 ## Clouds acceptance run
 
 1. Use the public rendezvous and relay deployment once it has peer admission, per-peer quotas, and a verified CA-signed HTTPS endpoint Clouds can reach. Moon’s browser page and model files can stay local. The browser uses libp2p over secure WebSockets to the relay. Clouds uses the signed HTTPS edge in PR #7. The hub-to-mesh bridge must preserve the room, sender, stable message ID, and reply relation in both directions.

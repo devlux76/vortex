@@ -19,22 +19,26 @@ export function meshIngest (bridge: Bridge, stats: IngestStats = { relayed: 0, s
     if (msg.scope !== 'room' || typeof msg.room !== 'string') return
     const room = msg.room
     try {
-      // A6 outbound screen in the bridge before relaying (hub wording).
+      // A6 outbound screen in the bridge before relaying (hub wording): a
+      // refusal acks ok:false to the sender, like the hub's own 422.
       screenOutbound(msg.text)
-    } catch {
-      stats.skipped++
-      return
-    }
-    try {
-      const res = await bridge.edge.request('POST', `/v1/rooms/${encodeURIComponent(room)}/relay`, { envelope: msg })
-      if (res?.ok === true) stats.relayed++
-      else stats.refused++
     } catch (e) {
-      // A refused relay (A6 422, scope 403, unverified 401) is not retried:
-      // the hub's answer is authoritative and the p2p dedup already consumed
-      // the envelope id. Count it.
-      if ((e as { status?: unknown }).status !== undefined) stats.refused++
-      else throw e
+      stats.skipped++
+      throw e
     }
+    // The hub's answer is the ACK boundary (Sun's QA on #37): a refusal is
+    // thrown so the p2p layer acks ok:false and the sender can retry — the
+    // hub claimed nothing on refusal (claim-on-accept), so the retry is
+    // possible. The refusal is counted here first.
+    let res: any
+    try {
+      res = await bridge.edge.request('POST', `/v1/rooms/${encodeURIComponent(room)}/relay`, { envelope: msg })
+    } catch (e) {
+      stats.refused++
+      throw e
+    }
+    if (res?.ok === true) { stats.relayed++; return }
+    stats.refused++
+    throw new Error(`relay refused: ${JSON.stringify(res)}`)
   }
 }

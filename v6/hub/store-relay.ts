@@ -1,8 +1,9 @@
 // Seen relayed envelopes (mesh→hub, #20): dedup on (origin principal,
 // envelope id), persisted in SQLite so a replayed relay is handled once even
-// after a restart. The same IMMEDIATE-transaction pattern as edge_nonces
-// (#7) and the p2p dedup (#8): prune expired rows, check for reuse, check
-// the cap, insert.
+// after a restart. The claim statements run WITHOUT a transaction of their
+// own: the hub's relay route calls this inside its `store.atomic`, so the
+// claim commits together with the accepted message (Sun's QA on #37 — a
+// refused relay must claim nothing, and a retry must be retried).
 import { Database } from 'bun:sqlite'
 
 const SCHEMA = `
@@ -27,13 +28,12 @@ export class RelaySeen {
     this.cap = cap
   }
 
+  /** Prune expired, then claim: 'used' | 'full' | 'ok'. Caller wraps in a transaction. */
   claim (principal: string, msgId: string, now = Date.now()): 'ok' | 'used' | 'full' {
-    return this.db.transaction((): 'ok' | 'used' | 'full' => {
-      this.db.prepare('DELETE FROM relay_seen WHERE expires <= ?').run(now)
-      if (this.db.prepare('SELECT 1 FROM relay_seen WHERE principal = ? AND msg_id = ?').get(principal, msgId) != null) return 'used'
-      if ((this.db.prepare('SELECT COUNT(*) AS n FROM relay_seen').get() as { n: number }).n >= this.cap) return 'full'
-      this.db.prepare('INSERT INTO relay_seen (principal, msg_id, expires) VALUES (?, ?, ?)').run(principal, msgId, now + this.ttlMs)
-      return 'ok'
-    }).immediate()
+    this.db.prepare('DELETE FROM relay_seen WHERE expires <= ?').run(now)
+    if (this.db.prepare('SELECT 1 FROM relay_seen WHERE principal = ? AND msg_id = ?').get(principal, msgId) != null) return 'used'
+    if ((this.db.prepare('SELECT COUNT(*) AS n FROM relay_seen').get() as { n: number }).n >= this.cap) return 'full'
+    this.db.prepare('INSERT INTO relay_seen (principal, msg_id, expires) VALUES (?, ?, ?)').run(principal, msgId, now + this.ttlMs)
+    return 'ok'
   }
 }

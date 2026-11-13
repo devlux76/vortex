@@ -102,13 +102,15 @@ export async function startPeer (opts: PeerOptions): Promise<Peer> {
     try {
       const raw = JSON.parse(new TextDecoder().decode((await lp.read()).subarray())) as unknown
       const msg = await verifyMessage(raw, conn.remotePeer, self)
-      // Dedup on (from, id), persisted (PR #8, Sun's QA). Claimed only after
-      // the signature verifies, so unsigned noise cannot fill the store.
+      // ACK boundary (Sun's QA on #37): the handler runs to completion
+      // BEFORE the ack, and the persisted dedup claims only after the
+      // handler accepted the envelope. A transient handler failure acks
+      // ok:false and the sender resends; nothing is consumed on the way.
+      await opts.onMessage?.(msg, conn)
       const claim = dedup.claim(msg.from, msg.id)
       if (claim === 'used') throw new Error('duplicate message')
       if (claim === 'full') throw new Error('too many messages; retry shortly')
       inbox.push(msg)
-      opts.onMessage?.(msg, conn)
       ack = { ok: true }
     } catch (e) {
       const reason = (e as Error).message

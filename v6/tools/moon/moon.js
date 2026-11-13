@@ -64,6 +64,7 @@ async function run() {
   stage('Loading LFM3 1.7B')
   const genStart = performance.now()
   const generate = await pipeline('text-generation', GENERATOR, { revision: GENERATOR_REVISION, dtype: 'q4', device: genDevice, use_external_data_format: true })
+  const endTokens = ['<|im_end|>', '</think>'].flatMap(token => generate.tokenizer.encode(token, { add_special_tokens: false }))
   check('LFM3 1.7B loaded in Chrome', { model: GENERATOR, revision: GENERATOR_REVISION, loadMs: Math.round(performance.now() - genStart) })
   stage('Discovering rendezvous namespaces')
   const runId = Array.from(crypto.getRandomValues(new Uint8Array(6)), byte => byte.toString(16).padStart(2, '0')).join('')
@@ -115,9 +116,9 @@ async function run() {
       const [generated] = await generate([
         { role: 'system', content: 'You are Moon, a browser AI. Answer each networking question in one short, accurate sentence.' },
         { role: 'user', content: reply.text },
-      ], { max_new_tokens: 40, do_sample: false, return_full_text: false, tokenizer_encode_kwargs: { enable_thinking: false } })
+      ], { max_new_tokens: 40, eos_token_id: endTokens, do_sample: false, return_full_text: false, tokenizer_encode_kwargs: { enable_thinking: false } })
       const output = generated.generated_text
-      const answer = (typeof output === 'string' ? output : output.findLast(message => message.role === 'assistant')?.content ?? '').replace(/<\/think>\s*$/, '').trim()
+      const answer = (typeof output === 'string' ? output : output.findLast(message => message.role === 'assistant')?.content ?? '').split('</think>', 1)[0].trim()
       if (!answer) throw new Error('LFM3 1.7B returned an empty reply')
       const generationMs = Math.round(performance.now() - started)
       state.pendingAnswer = { turn: turn + 1, answer, generationMs }

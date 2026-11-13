@@ -3,7 +3,7 @@
   "fanout": 16384,
   "hash": "sha-256",
   "id_encoding": "base64url",
-  "note": "A9 s10a content-addressing vectors (#68). The content id freezes when this merges (A9 s15 item 8): a second implementation rebuilds each case from its input and must produce the committed depth and content id. Data cases: bytes of the named pattern; depth cases: the named count of data blocks, all with the same block hash H (the block id of the block-exact pattern), so no case needs its bytes materialized.",
+  "note": "A9 s10a content-addressing vectors (#68). The content id freezes when this merges (A9 s15 item 8): a second implementation rebuilds each case from its input and must produce the committed depth and content id. Data cases: bytes of the named pattern. Depth cases: the named count of data blocks, all with the same block hash H (the block id of the block-exact pattern), generated deterministically and STREAMED through split (N yields of one fixed block, blocks discarded) per the operator's streaming test plan; CI rebuilds them cheaply from the hash iterator, which hashes the same bytes.",
   "vectors": [
     {
       "name": "empty",

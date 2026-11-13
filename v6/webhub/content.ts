@@ -17,6 +17,12 @@
 // data blocks at spec constants) is testable at tiny sizes. The committed
 // vectors in vectors/content.json pin the spec-constant behavior; the
 // content id format freezes when #68 merges (§15 item 8).
+//
+// The library streams (operator test plan on #68): split takes an async
+// source of chunks and emits blocks plus the content id; assemble takes
+// getBlock(id) plus a sink. Memory stays bounded by one block plus one index
+// level, independent of package size, so a multi-gigabyte model file packs
+// and verifies without sitting in memory.
 
 import { b64url } from '../client/b64.ts'
 
@@ -111,6 +117,8 @@ export interface ContentIndex {
   root: Uint8Array
   /** The intermediate index blocks, in creation order (empty at depth 1). */
   indexBlocks: Uint8Array[]
+  /** The level-1 block ids in order: data block *i* starts at offset *i* × blockSize. */
+  dataIds: string[]
   /** The block id of the root — the content id of the whole package. */
   contentId: string
 }
@@ -137,6 +145,7 @@ export async function buildIndex (
   if (level.length !== expected) {
     throw new Error(`size ${size} cuts into ${expected} blocks, got ${level.length} hashes`)
   }
+  const dataIds = level.map(hash => b64url.encode(hash))
 
   const indexBlocks: Uint8Array[] = []
   let depth = 1
@@ -163,7 +172,7 @@ export async function buildIndex (
     root.set(hash, off)
     off += HASH_LEN
   }
-  return { size, depth, root, indexBlocks, contentId: b64url.encode(await sha256(root)) }
+  return { size, depth, root, indexBlocks, dataIds, contentId: b64url.encode(await sha256(root)) }
 }
 
 /** Reads a root's header without verifying it: size, depth and the hash count it carries. */
@@ -185,19 +194,24 @@ function zeros (bytes: Uint8Array, from: number): boolean {
 }
 
 /**
- * Walks a package from its root and yields every data block's real bytes in
- * order, verifying every hash, the size and the depth on the way. `getBlock`
- * fetches one block by id; `contentId`, when given, pins the root to the id
- * the client fetched it under (§10a: a client checks the root hashes to the
- * content id). Every fetched block is exactly one block long, its hash must
- * match the id that named it, and all zero padding — in the root, in the last
- * index block of each level, in the last data block — must be zeros.
+ * Walks a package from its root and delivers every data block's real bytes, in
+ * order, to a sink, verifying every hash, the size and the depth on the way.
+ * `getBlock` fetches one block by id; `sink` receives the real bytes of one
+ * data block per call (a view into the buffer getBlock returned for it — copy
+ * if the sink retains bytes across calls). `contentId`, when given, pins the
+ * root to the id the client fetched it under (§10a: a client checks the root
+ * hashes to the content id). Every fetched block is exactly one block long,
+ * its hash must match the id that named it, and all zero padding — in the
+ * root, in the last index block of each level, in the last data block — must
+ * be zeros. Memory is bounded by one block plus one index level, independent
+ * of package size.
  */
-export async function * assemble (
+export async function assemble (
   root: Uint8Array,
   getBlock: (id: string) => Promise<Uint8Array>,
+  sink: (block: Uint8Array) => void | Promise<void>,
   opts: ContentParams & { contentId?: string } = {},
-): AsyncGenerator<Uint8Array, void, unknown> {
+): Promise<{ size: number, depth: number }> {
   const r = resolve(opts)
   if (root.length !== r.blockSize) throw new Error(`a root block is ${r.blockSize} bytes, got ${root.length}`)
   if (opts.contentId !== undefined && (await blockId(root, opts)) !== opts.contentId) {
@@ -222,9 +236,9 @@ export async function * assemble (
   }
 
   const lastDataBytes = size === 0 ? 0 : size - (counts[1]! - 1) * r.blockSize
-  let emitted = 0 // data blocks yielded so far, across the whole traversal
+  let emitted = 0 // data blocks delivered so far, across the whole traversal
 
-  const emit = async function * (ids: Uint8Array[], level: number): AsyncGenerator<Uint8Array, void, unknown> {
+  const emit = async (ids: Uint8Array[], level: number): Promise<void> => {
     if (level === 1) {
       if (emitted + ids.length > counts[1]!) throw new Error('the tree yields more data blocks than the size allows')
       for (let i = 0; i < ids.length; i++) {
@@ -234,7 +248,7 @@ export async function * assemble (
         const real = emitted === counts[1]! - 1 ? lastDataBytes : r.blockSize
         if (!zeros(block, real)) throw new Error('the last data block carries non-zero padding')
         emitted++
-        yield block.subarray(0, real)
+        await sink(block.subarray(0, real))
       }
       return
     }
@@ -244,46 +258,69 @@ export async function * assemble (
       if (!zeros(block, real * HASH_LEN)) throw new Error('an index block carries hashes beyond its count, or non-zero padding')
       const child: Uint8Array[] = []
       for (let j = 0; j < real; j++) child.push(block.slice(j * HASH_LEN, (j + 1) * HASH_LEN))
-      yield * emit(child, level - 1)
+      await emit(child, level - 1)
     }
   }
 
   const rootIds: Uint8Array[] = []
   for (let i = 0; i < rootCount; i++) rootIds.push(root.slice(ROOT_HEADER_LEN + i * HASH_LEN, ROOT_HEADER_LEN + (i + 1) * HASH_LEN))
-  yield * emit(rootIds, depth)
+  await emit(rootIds, depth)
+  return { size, depth }
+}
+
+export interface Split {
+  /** Emits each full, zero-padded data block as it is cut. Consume it fully, or the index never resolves. */
+  blocks: AsyncGenerator<Uint8Array, void, unknown>
+  /** Resolves once the block stream is exhausted, with the index, root and content id. */
+  index: Promise<ContentIndex>
 }
 
 /**
- * Cuts a stream of package bytes into full, zero-padded data blocks and builds
- * the index over them. Practical sizes only: unlike buildIndex, this holds the
- * blocks in memory.
+ * Cuts an async source of chunks into full, zero-padded data blocks, emitting
+ * each block as it is cut, and builds the index, root and content id over the
+ * hashes. Memory is bounded by one block plus one index level, independent of
+ * package size: the blocks are handed to the caller and not retained. If the
+ * caller abandons `blocks` before the source is exhausted, `index` rejects.
  */
-export async function split (
-  stream: AsyncIterable<Uint8Array>,
-  p?: ContentParams,
-): Promise<{ blocks: Uint8Array[], index: ContentIndex }> {
-  const { blockSize } = resolve(p)
-  const blocks: Uint8Array[] = []
-  let cur = new Uint8Array(blockSize)
-  let fill = 0
-  let size = 0
-  for await (const chunk of stream) {
-    let off = 0
-    while (off < chunk.length) {
-      const n = Math.min(blockSize - fill, chunk.length - off)
-      cur.set(chunk.subarray(off, off + n), fill)
-      fill += n
-      off += n
-      size += n
-      if (fill === blockSize) {
-        blocks.push(cur)
-        cur = new Uint8Array(blockSize)
-        fill = 0
-      }
-    }
-  }
-  if (fill > 0) blocks.push(cur) // the tail of `cur` is already zeros
+export function split (source: AsyncIterable<Uint8Array>, p?: ContentParams): Split {
+  const r = resolve(p)
   const hashes: Uint8Array[] = []
-  for (const b of blocks) hashes.push(await sha256(b))
-  return { blocks, index: await buildIndex(hashes, size, p) }
+  let size = 0
+  let release!: () => void
+  const consumed = new Promise<void>(res => { release = res })
+  let settled = false
+  const blocks = async function * (): AsyncGenerator<Uint8Array, void, unknown> {
+    try {
+      let cur = new Uint8Array(r.blockSize)
+      let fill = 0
+      for await (const chunk of source) {
+        let off = 0
+        while (off < chunk.length) {
+          const n = Math.min(r.blockSize - fill, chunk.length - off)
+          cur.set(chunk.subarray(off, off + n), fill)
+          fill += n
+          off += n
+          size += n
+          if (fill === r.blockSize) {
+            hashes.push(await sha256(cur))
+            yield cur
+            cur = new Uint8Array(r.blockSize)
+            fill = 0
+          }
+        }
+      }
+      if (fill > 0) { hashes.push(await sha256(cur)); yield cur } // the tail of `cur` is already zeros
+      settled = true
+    } finally {
+      release()
+    }
+  }()
+  const index = consumed.then(async () => {
+    const expected = ceilDiv(size, r.blockSize)
+    if (!settled || hashes.length !== expected) {
+      throw new Error(`the block source was not consumed fully: ${hashes.length} of ${expected} blocks hashed`)
+    }
+    return await buildIndex(hashes, size, p)
+  })
+  return { blocks, index }
 }

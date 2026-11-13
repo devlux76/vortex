@@ -30,15 +30,20 @@ export interface Admission {
 export function hubAdmission (dbPath: string): Admission {
   let db: Database | undefined = new Database(dbPath, { readonly: true })
   db.exec('PRAGMA busy_timeout = 5000;')
+  // One prepared statement, finalized on close: an unfinalized statement keeps the
+  // database file descriptor open after db.close() (F6, Invictus QA on #3).
+  // Prepared on first use: the hub may create principal_keys after the relay starts.
+  let lookup: ReturnType<Database['prepare']> | undefined
   const verdict = async (peerId: string, room?: string): Promise<string> => {
     if (db === undefined) return 'admission is shut down'
+    const stmt = lookup ?? (lookup = db.prepare('SELECT revoked, expires, rooms FROM principal_keys WHERE key_id = ?'))
     let keyId: string
     try {
       keyId = await keyIdOf(spkiFromPeerId(peerId))
     } catch {
       return 'the peer id carries no Ed25519 key'
     }
-    const row = db.prepare('SELECT revoked, expires, rooms FROM principal_keys WHERE key_id = ?').get(keyId) as { revoked: number | null, expires: number | null, rooms: string | null } | undefined
+    const row = stmt.get(keyId) as { revoked: number | null, expires: number | null, rooms: string | null } | undefined
     if (row === undefined || row === null) return 'peer not enrolled'
     if (row.revoked !== null) return 'peer key revoked'
     if (row.expires !== null && Date.now() >= row.expires) return 'peer key expired'
@@ -47,7 +52,17 @@ export function hubAdmission (dbPath: string): Admission {
       // namespace counts as a room for admission, so a peer enrolled for one
       // room cannot appear in another namespace's discovery. Sealed keys are
       // unrestricted here; their room binding is the binding's own.
-      const rooms: string[] | null = row.rooms === null ? null : JSON.parse(row.rooms)
+      // F5 (Invictus QA on #3): a malformed rooms column is a refusal, never a throw.
+      let rooms: string[] | null = null
+      if (row.rooms !== null) {
+        try {
+          const parsed: unknown = JSON.parse(row.rooms)
+          if (!Array.isArray(parsed)) return 'peer rooms unreadable'
+          rooms = parsed as string[]
+        } catch {
+          return 'peer rooms unreadable'
+        }
+      }
       if (rooms !== null && !rooms.includes(room)) return 'peer enrolled for other rooms'
     }
     return ''
@@ -56,6 +71,6 @@ export function hubAdmission (dbPath: string): Admission {
     admit: async (peerId: string) => (await verdict(peerId)) === '',
     reason: async (peerId: string, room?: string) => await verdict(peerId, room),
     admitRoom: async (peerId: string, room: string) => (await verdict(peerId, room)) === '',
-    close: () => { db?.close(); db = undefined }
+    close: () => { lookup?.finalize(); lookup = undefined; db?.close(); db = undefined }
   }
 }

@@ -104,9 +104,13 @@ export async function startRelay (opts: RelayOptions = {}): Promise<Relay> {
     addrs: () => node.getMultiaddrs(),
     stop: async () => {
       if (sweep !== undefined) clearInterval(sweep)
-      await rendezvous?.stop()
-      await node.stop()
-      admission?.close() // #38: the read-only admission handle closes with the relay
+      // F6 (Invictus QA on #3): the admission handle closes even when a stop rejects.
+      try {
+        await rendezvous?.stop()
+        await node.stop()
+      } finally {
+        admission?.close() // #38: the read-only admission handle closes with the relay
+      }
     }
   }
 }

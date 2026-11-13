@@ -649,15 +649,13 @@ class RelaySeen {
     this.cap = cap;
   }
   claim(principal, msgId, now = Date.now()) {
-    return this.db.transaction(() => {
-      this.db.prepare("DELETE FROM relay_seen WHERE expires <= ?").run(now);
-      if (this.db.prepare("SELECT 1 FROM relay_seen WHERE principal = ? AND msg_id = ?").get(principal, msgId) != null)
-        return "used";
-      if (this.db.prepare("SELECT COUNT(*) AS n FROM relay_seen").get().n >= this.cap)
-        return "full";
-      this.db.prepare("INSERT INTO relay_seen (principal, msg_id, expires) VALUES (?, ?, ?)").run(principal, msgId, now + this.ttlMs);
-      return "ok";
-    }).immediate();
+    this.db.prepare("DELETE FROM relay_seen WHERE expires <= ?").run(now);
+    if (this.db.prepare("SELECT 1 FROM relay_seen WHERE principal = ? AND msg_id = ?").get(principal, msgId) != null)
+      return "used";
+    if (this.db.prepare("SELECT COUNT(*) AS n FROM relay_seen").get().n >= this.cap)
+      return "full";
+    this.db.prepare("INSERT INTO relay_seen (principal, msg_id, expires) VALUES (?, ?, ?)").run(principal, msgId, now + this.ttlMs);
+    return "ok";
   }
 }
 

@@ -8,7 +8,8 @@
 import { findSecret } from './secrets.ts'
 import { getKey } from './store-keys.ts'
 import { keyIdOf } from '../client/edge-sign.ts'
-import { verifyRelayEnvelope, spkiFromPeerId, MAX_TEXT_BYTES } from '../client/relay-envelope.ts'
+import { verifyRelayEnvelope, spkiFromPeerId, peerIdFromSpki, MAX_TEXT_BYTES } from '../client/relay-envelope.ts'
+import { b64pad } from '../client/b64.ts'
 import { fitSingle } from '../client/render.ts'
 import type { Api } from './api.ts'
 
@@ -55,13 +56,12 @@ export async function relayPost (api: Api, req: Request, room: string): Promise<
     return json({ error: `the sending peer may post only to: ${(keyRow.rooms ?? []).join(', ')}` }, 403)
   }
   if (origin.scope !== 'room' || origin.room !== room) return json({ error: 'the envelope must be a room message for this room' }, 400)
-
-  // Dedup on (origin principal, envelope id), persisted: a replayed relay is
-  // handled once, even after a restart. A duplicate is success without a
-  // second store (same shape as the p2p receiver's `duplicate message` ack).
-  const claim = api.deps.store.relaySeen.claim(principal, origin.id)
-  if (claim === 'used') return json({ ok: true, duplicate: true }, 200)
-  if (claim === 'full') return json({ error: 'relay table full; retry shortly' }, 429)
+  // The signed recipient is the bridge's own peer id (Sun's QA on #37): the
+  // bridge authenticates with its libp2p key (#11), so the hub derives the
+  // peer id from that key's SPKI and binds the envelope's signed `to` to it.
+  // A signed HTTPS key alone no longer relays for a third party.
+  const bridgePeerId = peerIdFromSpki(b64pad.decode(bridge.key.spki))
+  if (origin.to !== bridgePeerId) return json({ error: 'the envelope must be addressed to this bridge' }, 403)
 
   // A6 (both directions: the bridge screened this too, but the hub screens
   // everything it stores) and the hub's own body bound.
@@ -82,10 +82,26 @@ export async function relayPost (api: Api, req: Request, room: string): Promise<
   const fit = fitSingle({ id: 'x', seq: 0, ts: 0, from: principal, scope: 'room', room, to: [], text: origin.text, human: false }, api.bounds())
   if (!fit.fits) return json({ error: `rendered batch exceeds bounds (${fit.bytes} bytes / ${fit.codePoints} code points)` }, 413)
   if (api.deps.skipRateLimit !== true && !api.allowSend(principal)) return json({ error: 'send rate exceeded' }, 429)
-  const { stored } = api.deps.store.atomic(() => {
-    const stored = api.deps.store.insertMessage({ from: principal, scope: 'room', room, to: [], text: origin.text, human: false })
-    api.deps.delivery.routeStored(api.deps.store.getMessage(stored.id)!)
-    return { stored }
+  // Claim + insert + outbox commit together (Sun's QA on #37): a refused
+  // relay claims nothing, so its retry is retried, never falsely
+  // acknowledged as a duplicate.
+  let duplicate = false
+  let stored: { id: string, seq: number } | undefined
+  let wakes: Array<{ principal: string, name: string }> = []
+  const result = api.deps.store.atomic(() => {
+    const claim = api.deps.store.relaySeen.claim(principal, origin.id)
+    if (claim === 'used') { duplicate = true; return undefined }
+    if (claim === 'full') throw new Error('relay table full')
+    const inserted = api.deps.store.insertMessage({ from: principal, scope: 'room', room, to: [], text: origin.text, human: false })
+    const w = api.deps.delivery.routeStored(api.deps.store.getMessage(inserted.id)!)
+    return { inserted, w }
   })
+  if (duplicate) return json({ ok: true, duplicate: true }, 200)
+  if (result === undefined) return json({ error: 'relay failed' }, 500)
+  stored = result.inserted
+  wakes = result.w
+  // Post-commit wake scheduling, exactly like postMessages (§8.4).
+  api.deps.delivery.armWakes(wakes)
+  api.deps.delivery.afterCommit(stored as unknown as Parameters<typeof api.deps.delivery.afterCommit>[0])
   return json({ ok: true, id: stored.id, seq: stored.seq, from: principal }, 200)
 }

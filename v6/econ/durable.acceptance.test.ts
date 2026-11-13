@@ -176,3 +176,35 @@ test('a u32-maximum amount survives close and reopen unchanged, with its balance
   expect(reopened.ledger.owedTo(WINDS, T)).toBe(1)
   reopened.close()
 })
+
+test('a write the database refuses leaves every view unchanged; the retry applies and survives reopen', async () => {
+  // The ledger accepts the message, then the disk refuses the record: nothing may stay in memory.
+  const path = newPath()
+  const msgs = await lifecycleMessages()
+  const quote = msgs[0] as Quote
+  const accept = msgs[1]!
+  const winds = DurableLedger.open(path, WINDS)
+  winds.ingest(quote, T)
+  const beforeView = snapshotOf(winds.ledger, WINDS, quote)
+  const beforeCount = winds.count()
+
+  winds.db.run('CREATE TRIGGER fail BEFORE INSERT ON econ_instruments BEGIN SELECT RAISE(ABORT,\'disk full\'); END')
+  expect(() => winds.ingest(accept, T)).toThrow(/disk full/)
+  expect(snapshotOf(winds.ledger, WINDS, quote)).toEqual(beforeView)
+  expect(winds.count()).toBe(beforeCount)
+
+  // The disk recovers: the same message now applies, is stored, and survives a reopen.
+  winds.db.run('DROP TRIGGER fail')
+  expect(winds.ingest(accept, T).applied).toBe(true)
+  expect(winds.count()).toBe(beforeCount + 1)
+  winds.close()
+
+  const reopened = DurableLedger.open(path, WINDS)
+  expect(reopened.count()).toBe(beforeCount + 1)
+  expect(reopened.ledger.accept({ from: SUN, id: quote.id })).toBeDefined()
+  const twin = new Ledger(WINDS)
+  twin.ingest(quote, T)
+  twin.ingest(accept, T)
+  expect(snapshotOf(reopened.ledger, WINDS, quote)).toEqual(snapshotOf(twin, WINDS, quote))
+  reopened.close()
+})

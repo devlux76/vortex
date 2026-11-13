@@ -43,7 +43,8 @@ async function relayCmd (a: Args): Promise<void> {
   const relay = await startRelay({
     listen: a.flags.get('listen') ?? ['/ip4/127.0.0.1/tcp/4003/ws'],
     announce: a.flags.get('announce'),
-    keyFile: one(a, 'key')
+    keyFile: one(a, 'key'),
+    admitDb: one(a, 'admit-db')
   })
   out({ event: 'relay', id: relay.node.peerId.toString(), addrs: relay.addrs().map(String), rendezvous: relay.rendezvous != null })
   await waitForSignal()

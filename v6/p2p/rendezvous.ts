@@ -36,6 +36,8 @@ export interface RendezvousServerOptions {
   maxRegistrations?: number
   /** Max namespaces one peer may hold at once (Sun's QA on #8: capacity must not be hogged by one peer). */
   maxPerPeer?: number
+  /** Admission gate (#24): when set, only peers it accepts may REGISTER. Injected by the relay; the browser peer never imports the checker. */
+  admit?: (peer: PeerId | string) => boolean | Promise<boolean>
   now?: () => number
 }
 
@@ -43,6 +45,7 @@ export interface RendezvousServerOptions {
 export async function startRendezvousServer (node: Libp2p, opts: RendezvousServerOptions = {}): Promise<RendezvousServer> {
   const max = opts.maxRegistrations ?? 1000
   const maxPerPeer = opts.maxPerPeer ?? 32
+  const admit = opts.admit
   const now = opts.now ?? Date.now
   const byNs = new Map<string, Map<string, Entry>>()
   let seq = 0
@@ -60,6 +63,8 @@ export async function startRendezvousServer (node: Libp2p, opts: RendezvousServe
   async function onRegister (r: Register, remote: PeerId): Promise<Message> {
     const reply = (status: number, statusText?: string, ttl?: number): Message =>
       ({ type: MessageType.REGISTER_RESPONSE, registerResponse: { status, statusText, ttl } })
+    // Admission first (#24): an unenrolled or revoked peer gets nothing.
+    if (admit !== undefined && !(await admit(remote.toString()))) return reply(Status.E_UNAVAILABLE, 'peer not admitted')
     if (!validNs(r.ns)) return reply(Status.E_INVALID_NAMESPACE, 'invalid namespace')
     const ttl = r.ttl ?? DEFAULT_TTL
     if (ttl < MIN_TTL || ttl > MAX_TTL) return reply(Status.E_INVALID_TTL, 'invalid ttl')

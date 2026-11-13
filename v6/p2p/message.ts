@@ -17,9 +17,8 @@
 // Bounds match the hub (§8.2/§8.4): text is at most 4096 UTF-8 bytes, counted
 // with TextEncoder, not UTF-16 code units, so a message is valid everywhere
 // or nowhere (Clouds' point 2 on #8).
-import { fromString } from 'uint8arrays/from-string'
-import { toString } from 'uint8arrays/to-string'
 import { peerIdFromString } from '@libp2p/peer-id'
+import { b64pad, b64url } from '../client/b64.ts'
 import { verifyRelayEnvelope } from '../client/relay-envelope.ts'
 import type { PeerId, PrivateKey } from '@libp2p/interface'
 import { findSecret } from '../hub/secrets.ts'
@@ -68,7 +67,7 @@ function signingBytes (m: Omit<P2PMessage, 'sig'>): Uint8Array {
 
 /** A fresh random envelope id: 128 random bits, base64url. */
 export function makeId (): string {
-  return toString(crypto.getRandomValues(new Uint8Array(16)), 'base64url')
+  return b64url.encode(crypto.getRandomValues(new Uint8Array(16)))
 }
 
 /** Signs a fully formed unsigned envelope; the bridge uses this for room delivery. */
@@ -77,7 +76,7 @@ export async function signEnvelope (key: PrivateKey, unsigned: Omit<P2PMessage, 
   if (unsigned.scope === 'dm' && unsigned.room !== undefined) throw new Error('a dm carries no room')
   if (utf8Length(unsigned.text) > MAX_TEXT_BYTES) throw new Error(`text longer than ${MAX_TEXT_BYTES} bytes`)
   const sig = await key.sign(signingBytes(unsigned))
-  return { ...unsigned, sig: toString(sig, 'base64pad') }
+  return { ...unsigned, sig: b64pad.encode(sig) }
 }
 
 export async function signMessage (key: PrivateKey, from: PeerId, to: PeerId, text: string, ts = Date.now()): Promise<P2PMessage> {
@@ -92,7 +91,7 @@ export async function signMessage (key: PrivateKey, from: PeerId, to: PeerId, te
     ts
   }
   const sig = await key.sign(signingBytes(unsigned))
-  return { ...unsigned, sig: toString(sig, 'base64pad') }
+  return { ...unsigned, sig: b64pad.encode(sig) }
 }
 
 /**
@@ -118,7 +117,7 @@ export async function verifyMessage (raw: unknown, remote: PeerId, self: PeerId,
   if (Math.abs(now - msg.ts) > MAX_SKEW_MS) throw new Error('timestamp outside allowed skew')
   const pub = remote.publicKey
   if (pub == null) throw new Error('remote peer id carries no public key')
-  const ok = await pub.verify(signingBytes(msg), fromString(msg.sig, 'base64pad'))
+  const ok = await pub.verify(signingBytes(msg), b64pad.decode(msg.sig))
   if (!ok) throw new Error('bad signature')
   return msg
 }

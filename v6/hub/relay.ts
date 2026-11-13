@@ -1,6 +1,6 @@
 // Mesh→hub verified room delivery (#20). A bridge (authenticated, VX-Auth)
 // relays a mesh member's signed room envelope; the hub verifies the
-// envelope against the key embedded in `from` (verifyEnvelope, Clouds' #8
+// envelope against the key embedded in `from` (verifyRelayEnvelope, Clouds' #8
 // point 5), maps the peer id to a principal through principal_keys (Ed25519
 // SPKI prefix + key → sha256 → key_id), dedups on (origin principal,
 // envelope id), applies A6 and the room scopes of both keys, and stores the
@@ -8,7 +8,7 @@
 import { findSecret } from './secrets.ts'
 import { getKey } from './store-keys.ts'
 import { keyIdOf } from '../client/edge-sign.ts'
-import { verifyEnvelope, rawKeyOfPeerId, MAX_TEXT_BYTES } from '../p2p/message.ts'
+import { verifyRelayEnvelope, spkiFromPeerId, MAX_TEXT_BYTES } from '../client/relay-envelope.ts'
 import { fitSingle } from '../client/render.ts'
 import type { Api } from './api.ts'
 
@@ -33,14 +33,14 @@ export async function relayPost (api: Api, req: Request, room: string): Promise<
   // Origin verification against the key embedded in `from` — no transport
   // check: the mesh member is not the peer the hub is talking to.
   let origin
-  try { origin = await verifyEnvelope(body.envelope) } catch (e) {
+  try { origin = await verifyRelayEnvelope(body.envelope) } catch (e) {
     return json({ error: `unverified envelope: ${(e as Error).message}` }, 401)
   }
   // Peer id → principal: sha256(spki(peer id's key)) is the A7 key_id.
   const spki = new Uint8Array(44)
   const ED25519_SPKI = new Uint8Array([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00])
   let rawKey: Uint8Array
-  try { rawKey = rawKeyOfPeerId(origin.from) } catch { return json({ error: 'from is not a peer id with an embedded key' }, 401) }
+  try { rawKey = spkiFromPeerId(origin.from).subarray(12) } catch { return json({ error: 'from is not an Ed25519 identity peer id' }, 401) }
   if (rawKey.length !== 32) return json({ error: 'from does not embed an Ed25519 key' }, 401)
   spki.set(ED25519_SPKI)
   spki.set(rawKey, ED25519_SPKI.length)

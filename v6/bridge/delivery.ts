@@ -14,7 +14,7 @@
 //   from the beginning. A message still undelivered for some member is
 //   retried on later polls (bounded attempts, then dropped and counted).
 import { readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { toString } from 'uint8arrays'
+import { b64url } from '../client/b64.ts'
 import { screenOutbound, signEnvelope } from '../p2p/message.ts'
 import type { Bridge } from './process.ts'
 
@@ -35,7 +35,7 @@ export interface Delivery {
 /** Deterministic envelope id for a hub message (see module comment). */
 export async function forwardIdOf (hubMessageId: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('vortex-bridge-forward\0' + hubMessageId))
-  return toString(new Uint8Array(digest), 'base64url')
+  return b64url.encode(new Uint8Array(digest))
 }
 
 /**

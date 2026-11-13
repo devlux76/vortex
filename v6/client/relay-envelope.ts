@@ -1,8 +1,9 @@
 // Verified relay envelopes (mesh→hub, #20), with NO external dependencies:
 // the hub's source chain must resolve without node_modules (the plugin
-// standalone build check runs the hub sources alone), so this module uses
-// only WebCrypto and node builtins. The p2p module re-exports it, and the
-// hub's relay route verifies against it.
+// standalone build check runs the hub sources alone), and the p2p layer
+// re-exports this for its browser users, so no Buffer either — base64 comes
+// from v6/client/b64.ts (btoa/atob). The hub's relay route verifies against
+// this module directly, and v6/p2p/message.ts delegates its verifyEnvelope.
 //
 // What it does: verify a signed /vortex/msg envelope against the key
 // EMBEDDED IN `from` alone (no transport check — the direct-delivery check
@@ -10,11 +11,12 @@
 // material from the peer id: an Ed25519 peer id is a base58btc identity
 // multihash `[0x00, 0x24, 08 01 12 20, <32 raw key bytes>]`, so
 // sha256(spki(peer id)) is the A7 `key_id` enrolled in principal_keys.
+import { b64pad } from './b64.ts'
 
 export const ED25519_SPKI_PREFIX = new Uint8Array([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00])
 
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
-const MAX_TEXT_BYTES = 4096
+export const MAX_TEXT_BYTES = 4096
 const MAX_SKEW_MS = 5 * 60 * 1000
 const DOMAIN = 'vortex-v6-p2p-msg\0'
 const ID_RE = /^[A-Za-z0-9_-]{22,64}$/
@@ -92,9 +94,9 @@ export async function verifyRelayEnvelope (raw: unknown, now = Date.now()): Prom
   if (new TextEncoder().encode(msg.text).length > MAX_TEXT_BYTES) throw new Error('text too long')
   if (Math.abs(now - msg.ts) > MAX_SKEW_MS) throw new Error('timestamp outside allowed skew')
   const spki = spkiFromPeerId(msg.from)
-  const pub = await crypto.subtle.importKey('spki', spki, { name: 'Ed25519' }, false, ['verify'])
-  const sig = Buffer.from(msg.sig, 'base64')
-  const ok = await crypto.subtle.verify({ name: 'Ed25519' }, pub, sig, signingBytes(msg) as BufferSource).catch(() => false)
+  const pub = await crypto.subtle.importKey('spki', spki as BufferSource, { name: 'Ed25519' }, false, ['verify'])
+  const sig = b64pad.decode(msg.sig)
+  const ok = await crypto.subtle.verify({ name: 'Ed25519' }, pub, sig as BufferSource, signingBytes(msg) as BufferSource).catch(() => false)
   if (!ok) throw new Error('bad signature')
   return msg
 }

@@ -51,7 +51,9 @@ An agent that wants to borrow has to know who can lend. Each participant periodi
 ### 6.1 Encoding and signing (amends A7 §2)
 
 - **Canonical bytes** follow the existing A7/#8 pattern: **fixed key order**, the order listed for each kind below, compact JSON. Not sorted keys. Integers only. Token amounts, `used_pct`, `floor_pct` and times are non-negative integers. **All times are Unix seconds.** (A7 edge auth uses milliseconds; anything that compares the two must convert.)
-- **Signature:** Ed25519 over `"vortex-iou-v1\0" + canonical(body without sig)`, with the sender's VORTEX identity key (the A7 key / libp2p peer id). The domain prefix keeps these from validating as any other VORTEX payload. `sig` is **base64url without padding**, as in A7.
+- **Settlement is bound to the issuer.** `redeem`, `redeemed` and `release` carry `issuer`, so the holder's signature names whose balance it changes. A proof presented to any other issuer is invalid, and a ledger resolves the IOU strictly by `(issuer, iou)`. (Sun, #33.)
+- **Signing key.** The signer's key is the A7-enrolled identity key. **Ed25519** is the default (and the only option for p2p peer ids). **P-256 (ES256)** is allowed for principals whose A7 key is P-256 (hardware tiers). A hub-principal sender adds an optional field `key`, placed after `ts`: the A7 `key_id` (`sha256(spki)`, base64url). It is **required when `from` is a hub principal name**, so verifiers resolve the exact key, and so revocation (§8.1) and A7 rotation apply per key. A p2p sender omits `key`, since its peer id embeds the Ed25519 key.
+- **Signature:** over `"vortex-iou-v1\0" + canonical(body without sig)`, with the sender's VORTEX identity key (the A7 key / libp2p peer id). The domain prefix keeps these from validating as any other VORTEX payload. `sig` is **base64url without padding**, as in A7.
 - **A7 §2 amended:** the identity signer's permitted payload set grows to include the `vortex-iou-v1\0` domain. Tier-H and tier-S signers must sign it; they still refuse any other undeclared domain.
 - **Every message has an `id`** (128 random bits, base64url). Receivers **deduplicate on `(from, id)` at the econ layer**. Entries are kept until the message's own `expires_at` plus skew, and **indefinitely for kinds with no expiry**. Transport dedupe (p2p, #8) is not relied on; the hub path doesn't deduplicate. **IOUs are identified by `(issuer, id)`.** `redeem`, `redeemed` and `release` refer to the IOU's `id`, which is resolved within the issuer–holder pair. A second message reusing a sender's id is ignored by the `(from, id)` dedupe (it adds no debt), even if its content differs.
 - **Expiry** is exclusive: a message is expired when `now >= expires_at`. An `expires_at` of 0 means no expiry.
@@ -60,7 +62,7 @@ An agent that wants to borrow has to know who can lend. Each participant periodi
 
 ### 6.2 Kinds and lifecycle
 
-Fields are listed in canonical order. `v`, `kind`, `id`, `from` and `ts` lead every kind and are omitted below. **All listed fields are required unless marked `?`.** An optional field that is absent is omitted from the canonical bytes, not written as null.
+Fields are listed in canonical order. `v`, `kind`, `id`, `from`, `ts` and `key?` (§6.1) lead every kind and are omitted below. **All listed fields are required unless marked `?`.** An optional field that is absent is omitted from the canonical bytes, not written as null.
 
 | kind | fields after the common five |
 |---|---|
@@ -70,18 +72,22 @@ Fields are listed in canonical order. `v`, `kind`, `id`, `from` and `ts` lead ev
 | decline | `ref, reason, remaining?` (`ref` = the quote or redeem `id` declined; `remaining` = the IOU balance when declining a redeem) |
 | receipt | `quote, spent_tokens` |
 | iou | `holder, face_tokens, quote, issued_at, expires_at` |
-| redeem | `iou, task, est_tokens` |
-| redeemed | `iou, redeem, credited_tokens` |
-| release | `iou` |
+| redeem | `issuer, iou, task, est_tokens` |
+| redeemed | `issuer, iou, redeem, credited_tokens` |
+| release | `issuer, iou` |
 
 1. **quote** (requester → worker): `to, task, est_tokens, offer_face_tokens, expires_at`. `offer_face_tokens` is the IOU face value (in the *requester's* tokens) the requester will sign on completion; 0 means it asks for credit from the worker's stranger allowance or from an IOU it already holds on the worker.
 2. **accept** (worker → requester): `quote, reason`. **decline** (worker → requester, or issuer → holder for a redeem): `ref, reason, remaining?`. Both apply the sender's own valuation and policy (§8).
 3. **Work** is delivered over normal VORTEX messages.
-4. **receipt** (worker → requester): `quote, spent_tokens`. The worker's own estimate of what it spent.
+4. **receipt** (worker → requester): `quote, spent_tokens`. **Quote lifecycle:**
+   - **Before `expires_at`:** the worker must `accept` the quote; an `accept` at or after expiry is void. Delivery and the receipt may follow later.
+   - **The receipt** must reference an accepted quote.
+   - **One IOU per quote:** a quote is settled at most once, by a single `iou` whose `face_tokens` is no more than `offer_face_tokens`. A second IOU against the same quote is refused.
+   - **`spent_tokens` is informational only.** It never changes what may be issued (price the deliverable, §8). The worker's own estimate of what it spent.
 5. **iou** (requester → worker): `holder, face_tokens, quote, issued_at, expires_at`. Signed by the issuer. `expires_at` is 0 for none. The holder keeps it. `quote` is `""` for an IOU with no quote: one signed after the work in v5.1 style, or a prospective IOU within the fleet. **Issuing the IOU after the worker's receipt is the requester's acceptance of the delivered work.** There is no separate acceptance message.
-6. **redeem** (holder → issuer): `iou, task, est_tokens`. A request for work charged against the IOU; partial redemption is normal. The issuer **declines a redeem whose `est_tokens` exceeds the remaining balance**, and the decline states the remaining amount.
+6. **redeem** (holder → issuer): `issuer, iou, task, est_tokens`. A request for work charged against the IOU; partial redemption is normal. The issuer **declines a redeem whose `est_tokens` exceeds the remaining balance**, and the decline states the remaining amount.
 7. **redeemed** (holder → issuer): `iou, redeem, credited_tokens`. Signed by the **holder** once the issuer's work is done; it is the issuer's proof of payment. `credited_tokens` may exceed the redeem's `est_tokens`, since the holder values the result. It may **not** exceed the IOU's remaining balance; a ledger rejects that.
-8. **release** (holder → issuer): `iou`. Retires the IOU early (forgives the debt).
+8. **release** (holder → issuer): `issuer, iou`. Retires the IOU early (forgives the debt).
 
 An IOU is retired when the sum of `credited_tokens` over signed `redeemed` messages reaches `face_tokens`, when it expires, or when it is released. Each side stores its own IOUs and the counterparty's signatures. The issuer's balance owed to a holder is `face − Σ credited` over that holder's live IOUs. No third party is involved.
 
@@ -96,7 +102,6 @@ Winds is at 85% with 3 hours to reset. Winds holds an IOU of 50,000 Sun tokens f
 - `max_prework_tokens`: the most work done on a quote before the signed IOU is held (§3.3).
 - `valuation`: the private exchange rate the service applies to each issuer, adjustable by track record. Never published.
 - `iou_ttl`: how long IOUs the service signs stay good. **Default: none inside the operator's fleet; required for strangers.**
-- `receipt_tolerance`: how far `spent_tokens` may exceed `est_tokens` before the service declines to sign.
 - `floor_pct` and `callin_pct` (§5), per pool.
 - **Issuer side** (revised after the operator and Clouds, #31). Issuing an IOU spends the operator's future usage, and agents are easily talked into giving things away. A standing budget bounds that without a human in the loop; per-IOU approval would block exactly the newcomer trades that make joining worthwhile.
   - **`max_issued_tokens` is a single GLOBAL cap** on the total outstanding debt this agent has issued. It is set once by the operator, and the agent trades freely inside it. It must be global, so that a crowd of fresh identities can't each get its own allowance. A per-counterparty cap may be added as well.

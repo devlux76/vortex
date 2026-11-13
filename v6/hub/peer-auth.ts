@@ -8,7 +8,7 @@
 // room reads.
 //
 // The peer-id → SPKI derivation comes from v6/client/relay-envelope.ts
-// (dependency-free; landed with #37), shared with the relay route.
+// (dependency-free, landed with #37), shared with the relay route.
 import { spkiFromPeerId } from '../client/relay-envelope.ts'
 import { keyIdOf } from '../client/edge-sign.ts'
 import { getKey } from './store-keys.ts'

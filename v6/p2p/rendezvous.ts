@@ -36,6 +36,10 @@ export interface RendezvousServerOptions {
   maxRegistrations?: number
   /** Max namespaces one peer may hold at once (Sun's QA on #8: capacity must not be hogged by one peer). */
   maxPerPeer?: number
+  /** Admission gate (#24): when set, only peers it accepts may REGISTER. Injected by the relay; the browser peer never imports the checker. */
+  admit?: (peer: PeerId | string) => boolean | Promise<boolean>
+  /** Room-scoped admission (#38, Sun's QA): a REGISTER under a namespace needs the key to cover it, and DISCOVER drops signers that no longer admit. */
+  admitRoom?: (peer: PeerId | string, room: string) => boolean | Promise<boolean>
   now?: () => number
 }
 
@@ -43,6 +47,8 @@ export interface RendezvousServerOptions {
 export async function startRendezvousServer (node: Libp2p, opts: RendezvousServerOptions = {}): Promise<RendezvousServer> {
   const max = opts.maxRegistrations ?? 1000
   const maxPerPeer = opts.maxPerPeer ?? 32
+  const admit = opts.admit
+  const admitRoom = opts.admitRoom
   const now = opts.now ?? Date.now
   const byNs = new Map<string, Map<string, Entry>>()
   let seq = 0
@@ -60,7 +66,14 @@ export async function startRendezvousServer (node: Libp2p, opts: RendezvousServe
   async function onRegister (r: Register, remote: PeerId): Promise<Message> {
     const reply = (status: number, statusText?: string, ttl?: number): Message =>
       ({ type: MessageType.REGISTER_RESPONSE, registerResponse: { status, statusText, ttl } })
+    // Admission first (#24): an unenrolled or revoked peer gets nothing.
+    if (admit !== undefined && !(await admit(remote.toString()))) return reply(Status.E_UNAVAILABLE, 'peer not admitted')
     if (!validNs(r.ns)) return reply(Status.E_INVALID_NAMESPACE, 'invalid namespace')
+    // Room-scoped admission (#38, Sun's QA): the namespace counts as a room,
+    // so a key enrolled for other rooms cannot register here.
+    if (admitRoom !== undefined && !(await admitRoom(remote.toString(), r.ns))) {
+      return reply(Status.E_UNAVAILABLE, 'peer not admitted for this namespace')
+    }
     const ttl = r.ttl ?? DEFAULT_TTL
     if (ttl < MIN_TTL || ttl > MAX_TTL) return reply(Status.E_INVALID_TTL, 'invalid ttl')
     if (r.signedPeerRecord == null) return reply(Status.E_INVALID_SIGNED_PEER_RECORD, 'missing record')
@@ -83,7 +96,7 @@ export async function startRendezvousServer (node: Libp2p, opts: RendezvousServe
     return reply(Status.OK, undefined, ttl)
   }
 
-  function onDiscover (ns: string | undefined, limit: number | undefined, cookie: Uint8Array | undefined): Message {
+  async function onDiscover (ns: string | undefined, limit: number | undefined, cookie: Uint8Array | undefined): Promise<Message> {
     const reply = (status: number, statusText?: string): Message =>
       ({ type: MessageType.DISCOVER_RESPONSE, discoverResponse: { registrations: [], status, statusText } })
     if (ns !== undefined && ns !== '' && !validNs(ns)) return reply(Status.E_INVALID_NAMESPACE, 'invalid namespace')
@@ -100,8 +113,18 @@ export async function startRendezvousServer (node: Libp2p, opts: RendezvousServe
       if (ns !== undefined && ns !== '' && n !== ns) continue
       for (const e of m.values()) if (e.seq > after) hits.push({ ns: n, e })
     }
-    hits.sort((a, b) => a.e.seq - b.e.seq)
-    const page = hits.slice(0, cap)
+    // #38 (Sun's QA): revoked or otherwise non-admissible signers are
+    // filtered from discovery, so a stale registration is invisible.
+    const visible: Array<{ ns: string, e: Entry }> = []
+    for (const hit of hits) {
+      try {
+        const signer = (await openRecord(hit.e.record)).id.toString()
+        if (admit !== undefined && !(await admit(signer))) continue
+      } catch { continue } // a corrupt record is invisible
+      visible.push(hit)
+    }
+    visible.sort((a, b) => a.e.seq - b.e.seq)
+    const page = visible.slice(0, cap)
     const last = page.length > 0 ? page[page.length - 1]!.e.seq : after
     return {
       type: MessageType.DISCOVER_RESPONSE,
@@ -124,7 +147,7 @@ export async function startRendezvousServer (node: Libp2p, opts: RendezvousServe
         try { req = decodeMessage((await lp.read()).subarray()) } catch { break }
         let res: Message | undefined
         if (req.type === MessageType.REGISTER && req.register) res = await onRegister(req.register, remote)
-        else if (req.type === MessageType.DISCOVER) res = onDiscover(req.discover?.ns, req.discover?.limit, req.discover?.cookie)
+        else if (req.type === MessageType.DISCOVER) res = await onDiscover(req.discover?.ns, req.discover?.limit, req.discover?.cookie)
         else if (req.type === MessageType.UNREGISTER && req.unregister?.ns) {
           byNs.get(req.unregister.ns)?.delete(remote.toString()) // spec: no response
         } else break

@@ -5,7 +5,7 @@
 // hub principal that enrolled the same key (`principal_keys`). One key then
 // signs the p2p envelopes and the hub's signed HTTP edge requests.
 import type { PrivateKey } from '@libp2p/interface'
-import { toString } from 'uint8arrays'
+import { b64pad, b64url } from '../client/b64.ts'
 import { keyIdOf } from '../client/edge-sign.ts'
 
 // SubjectPublicKeyInfo for an Ed25519 public key (RFC 8410): the fixed
@@ -39,14 +39,14 @@ export interface EdgeKeyMaterial {
  */
 export async function edgeKeyFromLibp2p (key: PrivateKey): Promise<EdgeKeyMaterial> {
   const spki = ed25519Spki(key.publicKey.raw)
-  const b64url = (b: Uint8Array): string => toString(b, 'base64url')
+  
   // libp2p's `raw` is the 64-byte expanded private key (seed || public); the
   // JWK `d` member is the 32-byte seed.
   const seed = key.raw.length === 64 ? key.raw.subarray(0, 32) : key.raw
   return {
     alg: 'ed25519',
-    jwk: { kty: 'OKP', crv: 'Ed25519', x: b64url(key.publicKey.raw), d: b64url(seed) },
-    spkiB64: toString(spki, 'base64'),
+    jwk: { kty: 'OKP', crv: 'Ed25519', x: b64url.encode(key.publicKey.raw), d: b64url.encode(seed) },
+    spkiB64: b64pad.encode(spki),
     keyId: await keyIdOf(spki)
   }
 }

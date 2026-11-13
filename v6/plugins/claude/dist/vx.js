@@ -627,6 +627,37 @@ function seqHead(s) {
   const row = s.db.prepare("SELECT COALESCE(MAX(seq), 0) AS s FROM messages").get();
   return row.s;
 }
+// v6/hub/store-relay.ts
+var SCHEMA2 = `
+CREATE TABLE IF NOT EXISTS relay_seen (
+  principal TEXT NOT NULL,
+  msg_id TEXT NOT NULL,
+  expires INTEGER NOT NULL,
+  PRIMARY KEY (principal, msg_id)
+);
+CREATE INDEX IF NOT EXISTS relay_seen_expires ON relay_seen(expires);
+`;
+
+class RelaySeen {
+  db;
+  ttlMs;
+  cap;
+  constructor(db, ttlMs = 10 * 60000, cap = 1e5) {
+    this.db = db;
+    this.db.exec(SCHEMA2);
+    this.ttlMs = ttlMs;
+    this.cap = cap;
+  }
+  claim(principal, msgId, now = Date.now()) {
+    this.db.prepare("DELETE FROM relay_seen WHERE expires <= ?").run(now);
+    if (this.db.prepare("SELECT 1 FROM relay_seen WHERE principal = ? AND msg_id = ?").get(principal, msgId) != null)
+      return "used";
+    if (this.db.prepare("SELECT COUNT(*) AS n FROM relay_seen").get().n >= this.cap)
+      return "full";
+    this.db.prepare("INSERT INTO relay_seen (principal, msg_id, expires) VALUES (?, ?, ?)").run(principal, msgId, now + this.ttlMs);
+    return "ok";
+  }
+}
 
 // v6/hub/store.ts
 class HubStore {
@@ -640,7 +671,9 @@ class HubStore {
     this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec(SCHEMA);
     this.migrate();
+    this.relaySeen = new RelaySeen(this.db);
   }
+  relaySeen;
   migrate() {
     this.db.transaction(() => {
       const cols = (t) => new Set(this.db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name));

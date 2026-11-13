@@ -35,7 +35,7 @@ export interface Delivery {
 /** Deterministic envelope id for a hub message (see module comment). */
 export async function forwardIdOf (hubMessageId: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('vortex-bridge-forward\0' + hubMessageId))
-  return toString(new Uint8Array(digest), 'base64url')
+  return toString(new Uint8Array(digest), "base64url")
 }
 
 /**

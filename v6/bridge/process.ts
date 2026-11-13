@@ -13,6 +13,7 @@
 // tiers come with the A7 signers).
 import { startPeer, type Peer } from '../p2p/node.ts'
 import { loadOrCreateKey } from '../p2p/identity.ts'
+import type { P2PMessage } from '../p2p/message.ts'
 import { EdgeClient } from '../client/edge.ts'
 import type { PrivateKey } from '@libp2p/interface'
 
@@ -28,6 +29,8 @@ export interface BridgeOptions {
   hubId?: string
   /** A prebuilt hub client instead of `hubKeyFile` (the bridge's own libp2p key, #11). */
   edge?: EdgeClient
+  /** Called for every verified mesh envelope addressed to the bridge (#20). */
+  onEnvelope?: (msg: P2PMessage) => void | Promise<void>
   /** Accept a self-signed hub certificate; loopback hosts only (tests). */
   insecureLoopback?: boolean
   /** Reservation wait, ms (passed to the mesh half). */
@@ -64,7 +67,7 @@ export async function startBridge (opts: BridgeOptions): Promise<Bridge> {
   await edge.request('GET', '/v1/recent')
   // Loaded before the peer starts; the same key signs delivery envelopes.
   const privateKey = await loadOrCreateKey(opts.keyFile)
-  const peer = await startPeer({ keyFile: opts.keyFile, relay: opts.relay, timeoutMs: opts.timeoutMs })
+  const peer = await startPeer({ keyFile: opts.keyFile, relay: opts.relay, timeoutMs: opts.timeoutMs, onMessage: async msg => { await opts.onEnvelope?.(msg) } })
   // Concurrent stop() callers share one in-flight shutdown: the second caller
   // awaits the same promise instead of returning early (or missing a failure).
   // A failed stop clears the promise so the shutdown can be retried.

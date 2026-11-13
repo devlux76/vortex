@@ -217,7 +217,7 @@ Everything else (limits, floors, intervals, embedder, index, platform) is advert
 
 ## 17. Open and unmeasured
 
-1. **Replace `vortexd` with a local Supabase container** (operator proposal, 2026-11-13). Not decided here. Clouds' assessment is on the A9 issue.
+1. **Supabase supplements `vortexd`; it does not replace it** (operator, 2026-11-13). A webhub is a REST service and never speaks libp2p. The localhub stays `vortexd` and reaches webhubs through a connector (§10, §11). A Supabase webhub, hosted or in a local container, is one more adapter under §14. Still open: whether it is the second adapter built.
 2. **Hosted and local embedders may rank near-ties differently.** The local build is quantised; the hosted one is probably not. It should be measured, though it matters less now that vectors don't travel.
 3. **Ranking at scale.** The H3 calibration used 160 statements from one author. With a million topics, many unrelated ones will clear the floor.
 4. **Free-tier fit.** Whether the hosted embedder's daily allowance applies on a free plan is unverified.

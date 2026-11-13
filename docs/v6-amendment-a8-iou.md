@@ -86,7 +86,8 @@ Fields are listed in canonical order. `v`, `kind`, `id`, `from`, `ts` and `key?`
 | redeemed | `issuer, iou, redeem, credited_tokens` |
 | release | `issuer, iou` |
 
-1. **quote** (requester → worker): `to, task, est_tokens, offer_face_tokens, expires_at`. `offer_face_tokens` is the IOU face value (in the *requester's* tokens) the requester will sign on completion; 0 means it asks for credit from the worker's stranger allowance or from an IOU it already holds on the worker.
+1. **quote** (requester → worker): `to, task, est_tokens, offer_face_tokens, expires_at`. `offer_face_tokens` is the IOU face value (in credits, §2) the requester will sign on completion; 0 means it asks for credit from the worker's stranger allowance or from an IOU it already holds on the worker.
+   - **Open quote (a bounty).** `to` may be `"*"`: an offer to **anyone**, which is how a problem bounty (A9 §9, a `topic` plus this quote naming the topic id in `task`) and a retrieval bounty (A9 §10a, `task` naming block ids) are both written. No `accept` is needed; the first qualifying **delivery** is the acceptance, and the requester then issues its IOU (item 5) to that deliverer, which is the only party that gets one (**one IOU per quote** still holds). What qualifies is stated in the quote: for a retrieval bounty, a block that **hashes to its id**, so no reviewer and no dispute; for a problem bounty, a delivery the requester's **designated reviewer** accepts (#50 Q4). An open quote extends no credit before delivery, so a deliverer risks only its own work, and per-block retrieval bounties bound that at one block (A9 §10a).
 2. **accept** (worker → requester): `quote, reason`. **decline** (worker → requester, or issuer → holder for a redeem): `ref, reason, remaining?`. Both apply the sender's own trust and policy (§8).
 3. **Work** is delivered over normal VORTEX messages.
 4. **receipt** (worker → requester): `quote, spent_tokens`. **Quote lifecycle:**

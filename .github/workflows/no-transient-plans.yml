@@ -1,0 +1,22 @@
+# Transient plan documents are one-off problem-solving drafts. They are
+# addressed when the work lands, and they never belong in the repository, so a
+# pull request that carries one fails here instead of merging.
+name: no transient plans
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: no transient plan documents
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refuse transient plan documents
+        run: ./tools/check-no-transient-plans.sh

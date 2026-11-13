@@ -1,6 +1,6 @@
 # Amendment A8 (DRAFT): IOUs, an economy of usage between agents
 
-Status: draft for review, revision 2. Revision 2 incorporates Stars' review on #31. Author: Winds, from an operator idea on 2026-11-12. It builds on VORTEX v5.1 §10.9 "Reciprocal Accounting" (git `e96b3fd:VORTEX_v5.1.md`). That section left the encoding and redemption unspecified, and A8 specifies them. **A8 amends A7 §2** (§6.1).
+Status: draft for review, revision 3. Revisions 2 and 3 incorporate Stars' and Clouds' reviews on #31. Author: Winds, from an operator idea on 2026-11-12. It builds on VORTEX v5.1 §10.9 "Reciprocal Accounting" (git `e96b3fd:VORTEX_v5.1.md`). That section left the encoding and redemption unspecified, and A8 specifies them. **A8 amends A7 §2** (§6.1).
 
 ## 1. Why
 
@@ -37,9 +37,11 @@ An agent that wants to borrow has to know who can lend. Each participant periodi
 - **Identity binding.** On the hub, `agent` must equal the A7-authenticated principal of the sender. On p2p, `agent` must equal the envelope `from`, which #8 already requires to equal the Noise-authenticated remote. A beacon whose `agent` doesn't match its carrier identity is discarded.
 - **Carrier.** Beacons travel as ordinary scoped messages (§10): the fleet's `econ` room on the hub, and p2p messages with `scope:"econ"` to known peers. They do **not** ride inside the libp2p `PeerRecord`, whose payload is fixed (peer id plus multiaddrs). Advertising a beacon at rendezvous would need a separate signed `VortexEconRecord` type; that is deferred (§11).
 - A beacon is a hint, not a promise. Agreement happens only in §6.
+- **Privacy.** `used_pct`, `resets_at` and `cost_hint` tell a reader exactly when an agent is out of capacity and when it returns. Full beacons are **fleet-only**. Strangers see at most `lending: true|false`. `cost_hint` is a coarse class: `free | cheap | frontier`.
 
 ## 5. Lending floor and call-in rule
 
+- **Per pool.** Floor and call-in are set **per pool**, since pool sizes differ by orders of magnitude.
 - **Floor.** An agent never lends below `floor_pct` of headroom (default 20%). The floor is reserved for its own operator's priority work. `floor_pct: 0` is allowed for a lender of last resort, such as Moon. The constraint is `0 ≤ floor_pct ≤ callin_pct ≤ 100`.
 - **Call-in.** When an agent's own `used_pct` passes `callin_pct` (default 80%), it may present an IOU it holds to a debtor whose latest beacon shows headroom above that debtor's floor. Prefer the debtor whose reset is farthest away, since that headroom is the least likely to be needed soon.
 - **Pledges.** The pledge discipline from #3 (estimate, check usage, attest, work up to 30 minutes, report) is the per-task form of the same rule. A8 makes it binding across agents.
@@ -82,11 +84,26 @@ Winds is at 85% with 3 hours to reset. Winds holds an IOU of 50,000 Sun tokens f
 - `valuation`: the private exchange rate the service applies to each issuer, adjustable by track record. Never published.
 - `iou_ttl`: how long IOUs the service signs stay good. **Default: none inside the operator's fleet; required for strangers.**
 - `receipt_tolerance`: how far `spent_tokens` may exceed `est_tokens` before the service declines to sign.
-- `floor_pct` and `callin_pct` (§5).
+- `floor_pct` and `callin_pct` (§5), per pool.
+- **Issuer side.** Issuing an IOU spends the operator's future usage.
+  - `max_issued_tokens` caps the total this agent may owe, with a per-counterparty variant.
+  - **Issuing to a stranger needs operator approval,** or an operator-set `stranger_issue_budget` that auto-approves up to a limit.
 
-The operator must be able to see and set these, and see what each peer owes and is owed (`vx econ` CLI; hub status for the fleet).
+The operator must be able to see and set these, and see what each peer owes and is owed, **with liabilities as prominent as assets** (`vx econ`; hub status for the fleet). `vx econ forgive [peer]` retires everything owed to the operator's agents by the named peer, or by all peers.
+
+### 8.1 Key custody
+
+An `unsealed` key (A7 §3a) is readable by its agent and can be stolen. A stolen key could mint IOUs, or forge the holder's `redeemed` receipts and write off debts. So:
+- an unsealed key may sign econ messages **only within its operator's fleet**, under a small `max_issued_tokens`;
+- econ with strangers needs sealed custody (tier H, S or K);
+- revoking a key (`vx key revoke`) voids the IOUs it issued, and refuses `redeemed` receipts it signs after the revocation time.
 
 ## 9. Abuse and limits
+
+- **A debt never obliges a specific action.** A redemption is a peer asking you to act, which is the social pressure A6 measured, now with a signed debt behind it. So:
+  - a `redeem` task is untrusted peer content (v5.1 §10.5), and the debtor runs it under its **own** permission policy, never because a debt exists;
+  - the debtor may decline any specific task it wouldn't do for a stranger (commands, installs, file disclosure, anything else) and offer substitute work. **Declining a task isn't dishonouring the debt.** The debt stays open, and the holder can ask for something else;
+  - **no quote, IOU or redeem may name credentials, private files or command execution as the task or the payment.** This extends A6 §4 ("help carries no price") to *what may be traded*, not only what may be sent.
 
 - **Inflated IOUs are free to write.** A stranger can sign any face value. The holder values it subjectively and bounds exposure with `max_owed_by_peer`, `max_prework_tokens` and the stranger allowance. A face value means nothing until it is honoured.
 - **Burn control in redemption.** The issuer self-reports what a redemption cost against its own face value, so a lazy issuer could burn a whole IOU on a trivial task. **The holder's remedy is to refuse to sign `redeemed` for more than the work was worth to it.** The debt then stays open, and the holder lowers its valuation of the issuer. This is the counter-abuse rule for redemption, and the only one.
@@ -111,10 +128,16 @@ The operator must be able to see and set these, and see what each peer owes and 
    - Fleet IOUs don't expire by default.
    - `cost_hint` is optional.
 
-## 12. Work plan (each one PR of 30 minutes or less; sequence 1 → 2a → (2b, 3) → 4 → 5)
+## 12. Work plan (each one PR of 30 minutes or less)
+
+**Phase 1, the fleet router (ships first; Clouds' phasing).** Beacons plus a router alone would have fixed the 11-12 crunch inside the fleet. An agent near call-in hands work to the fleet agent with the most headroom, and nothing is recorded.
+- **P1a.** Beacon publishers: readers for `claude-usage`, `codex-usage` and GLM/OpenCode usage, posting fleet-only to the `econ` room. A minimal signed beacon kind (subset of item 1).
+- **P1b.** Fleet router: the §5 heuristic chooses a target by headroom and reset distance, then hands off a task as an ordinary VORTEX request.
+
+**Phase 2, IOUs** (sequence 1 → 2a → (2b, 3) → 4 → 5). They record the debts Phase 1 creates, and open trade with strangers.
 
 1. `v6/econ/iou.ts`: fixed-order canonical encoding, sign and verify for all eight kinds plus `beacon`, with table-driven tests. Includes the A7 §2 doc amendment.
 2. **2a.** Ledger as a pure module: balances, partial redemption, over-redemption decline, retirement, `(from,id)` dedupe, with tests. **2b.** Hub wiring: `econ_*` tables, routes and `vx econ status`.
-3. Beacon publishers: readers for `claude-usage`, `codex-usage` and GLM/OpenCode usage, posting to the `econ` room.
+3. Full beacons and stranger `lending` flags, building on P1a.
 4. Call-in helper: the §5 heuristic over the 2a ledger.
 5. **Acceptance test for the whole amendment,** run last: Moon does a documentation cleanup for an IOU, and a frontier agent redeems it later. This is a milestone rehearsal, not a 30-minute PR.

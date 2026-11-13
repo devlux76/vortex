@@ -32,7 +32,7 @@ Supersedes, once adopted: the "per-agent bearer token" bullet of §3 Hub and the
 
 ### 2. Key custody: the model never holds key material
 
-Every private key is generated and used inside a **signer**. The signer never returns key bytes, has no export command, and signs only VORTEX authentication payloads (§3), which carry a fixed domain-separation prefix so it is not a general signing service. The plugin and `vx` talk to the signer; model-facing tools (§8.9) cannot reach it, and no tool result contains a key, a signature or a session secret.
+Every private key is generated and used inside a **signer**. The signer never returns key bytes, has no export command, and signs only VORTEX authentication payloads (§3), which carry a fixed domain-separation prefix so it is not a general signing service. **Amended by A8 §6.1:** the permitted payload set also includes econ messages under the `vortex-iou-v1\0` domain (`v6/econ/iou.ts`); tier-H and tier-S signers must sign it and still refuse any other undeclared domain. The plugin and `vx` talk to the signer; model-facing tools (§8.9) cannot reach it, and no tool result contains a key, a signature or a session secret.
 
 Custody tiers, best first. A deployment states its tier in `vx status`.
 

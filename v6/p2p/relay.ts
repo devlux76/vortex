@@ -31,6 +31,8 @@ export interface RelayOptions {
   rendezvous?: boolean | RendezvousServerOptions
   /** Admission through the hub's principal_keys (#24): read-only path to the hub database. Without it the relay stays open. */
   admitDb?: string
+  /** Revocation sweep interval, ms (#38): connected peers are re-checked and dropped when they no longer admit. Default 30_000; 0 disables. */
+  revocationSweepMs?: number
 }
 
 export interface Relay {
@@ -66,19 +68,45 @@ export async function startRelay (opts: RelayOptions = {}): Promise<Relay> {
     }
   })
   const rvOpts = opts.rendezvous === false ? null : opts.rendezvous === true || opts.rendezvous === undefined ? {} : opts.rendezvous
-  const rendezvous = rvOpts === null
-    ? null
-    : await startRendezvousServer(node, {
-      ...rvOpts,
-      admit: admission === undefined ? undefined : (peer: PeerId | string) => admission.admit(peer.toString())
-    })
+  let rendezvous: RendezvousServer | null = null
+  try {
+    rendezvous = rvOpts === null
+      ? null
+      : await startRendezvousServer(node, {
+        ...rvOpts,
+        admit: admission === undefined ? undefined : (peer: PeerId | string) => admission.admit(peer.toString()),
+        admitRoom: admission === undefined ? undefined : (peer: PeerId | string, room: string) => admission.admitRoom(peer.toString(), room)
+      })
+  } catch (e) {
+    // Startup failure closes what startup opened (Sun's QA on #38).
+    admission?.close()
+    await Promise.resolve(node.stop()).catch(() => {})
+    throw e
+  }
+  // Revocation boundary (#38, Sun's QA): the connection gater only sees NEW
+  // inbound connections, so an already connected revoked peer could keep its
+  // reservation and open circuits. The sweep re-checks every open connection
+  // and hangs up the ones that no longer admit; its interval bounds how long
+  // a revocation takes to bite.
+  let sweep: ReturnType<typeof setInterval> | undefined
+  if (admission !== undefined && (opts.revocationSweepMs ?? 30_000) > 0) {
+    sweep = setInterval(() => {
+      for (const conn of node.getConnections()) {
+        void admission.admit(conn.remotePeer.toString()).then(async ok => {
+          if (!ok) await node.hangUp(conn.remotePeer).catch(() => {})
+        }).catch(() => {})
+      }
+    }, opts.revocationSweepMs ?? 30_000)
+  }
   return {
     node,
     rendezvous,
     addrs: () => node.getMultiaddrs(),
     stop: async () => {
+      if (sweep !== undefined) clearInterval(sweep)
       await rendezvous?.stop()
       await node.stop()
+      admission?.close() // #38: the read-only admission handle closes with the relay
     }
   }
 }

@@ -12,6 +12,7 @@ import { EdgeClient } from '../client/edge.ts'
 import { loadOrCreateKey } from '../p2p/identity.ts'
 import { startRelay } from '../p2p/relay.ts'
 import { startBridge, type Bridge, type BridgeOptions } from './process.ts'
+import { startPeer } from '../p2p/node.ts'
 import { edgeKeyFromLibp2p, libp2pKeyId } from './identity.ts'
 import { startRoomDelivery, forwardMessages, forwardIdOf, type DeliveryStats, type HubLogEntry } from './delivery.ts'
 
@@ -37,7 +38,14 @@ async function world () {
     insecureLoopback: true
   })
   const opts: BridgeOptions = { keyFile, relay: relayAddr, hubKeyFile: '', edge, insecureLoopback: true }
-  return { dir, hub, relay, relayAddr, keyFile, privateKey, edge, opts, cleanup: async () => { await relay.stop(); await hub.stop(); rmSync(dir, { recursive: true, force: true }) } }
+  // The mesh member identity is enrolled with the room: delivery now requires
+  // every member to be enrolled, unrevoked and unexpired (Sun's QA on #36).
+  const memberKeyFile = join(dir, 'member.key')
+  const memberPriv = await loadOrCreateKey(memberKeyFile)
+  const memberMaterial = await edgeKeyFromLibp2p(memberPriv)
+  const memberRow = await enrollKey(hub.store, { principal: 'mesh-member', spkiB64: memberMaterial.spkiB64, alg: 'ed25519', custody: 'unsealed', rooms: ['mesh'] })
+  const cleanup = async () => { await relay.stop(); await hub.stop(); rmSync(dir, { recursive: true, force: true }) }
+  return { dir, hub, relay, relayAddr, keyFile, privateKey, edge, opts, memberKeyFile, memberPrincipal: memberRow.principal, cleanup }
 }
 
 const opPost = async (w: Awaited<ReturnType<typeof world>>, room: string, text: string): Promise<any> => {
@@ -109,6 +117,42 @@ test('#11: A6 in the bridge — a credential-shaped entry is not forwarded', asy
   }
 })
 
+test('#11: room authorization — discovery alone does not grant room reads', { timeout: 120_000 }, async () => {
+  const w = await world()
+  let bridge: Bridge | undefined
+  try {
+    bridge = await startBridge({ ...w.opts, relay: w.relayAddr })
+    // A peer enrolled only for another room: it CAN register under `mesh` on
+    // an open relay (the registration-side gate is #24/#38), so the delivery
+    // check is what keeps it out here.
+    const otherKeyFile = join(w.dir, 'other.key')
+    const otherPriv = await loadOrCreateKey(otherKeyFile)
+    const otherMaterial = await edgeKeyFromLibp2p(otherPriv)
+    await enrollKey(w.hub.store, { principal: 'other-guy', spkiB64: otherMaterial.spkiB64, alg: 'ed25519', custody: 'unsealed', rooms: ['other-room'] })
+    const other = await startPeer({ keyFile: otherKeyFile, relay: w.relayAddr })
+    // An unenrolled peer self-registers too (Sun's original reproduction).
+    const stranger = await startPeer({ keyFile: join(w.dir, 'stranger.key'), relay: w.relayAddr })
+    const member = await startPeer({ keyFile: join(w.dir, 'member.key'), relay: w.relayAddr })
+    try {
+      await Promise.all([other.register('mesh'), stranger.register('mesh'), member.register('mesh')])
+      await opPost(w, 'mesh', 'authorized only')
+      const delivery = await startRoomDelivery(bridge, 'mesh', { intervalMs: 300, stateFile: join(w.dir, 'state.json') })
+      for (let i = 0; i < 40 && member.inbox.length === 0; i++) await Bun.sleep(250)
+      assert.equal(member.inbox.filter(m => m.text === 'authorized only').length, 1)
+      assert.equal(other.inbox.length, 0, 'a peer enrolled for another room received mesh traffic')
+      assert.equal(stranger.inbox.length, 0, 'an unenrolled peer received mesh traffic')
+      // The bridge's own presence line is skipped, not delivered.
+      assert.equal(member.inbox.filter(m => m.text.includes('[vortex bridge]')).length, 0)
+      await delivery.stop()
+    } finally {
+      await Promise.allSettled([other.stop(), stranger.stop(), member.stop()])
+    }
+  } finally {
+    await bridge?.stop()
+    await w.cleanup()
+  }
+})
+
 test('#11: dedup on (from,id) — a replayed batch after a restart is refused, not re-delivered', async () => {
   const w = await world()
   let bridge: Bridge | undefined
@@ -162,3 +206,41 @@ test('#11: room scope — the unsealed bridge key cannot read or forward another
     await w.cleanup()
   }
 })
+
+for (const revoke of [false, true]) {
+  test(revoke ? 'queued delivery rechecks authorization after revocation' : 'an unreachable recipient has one bounded retry sequence', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vx-delivery-retry-'))
+    const key = await loadOrCreateKey(join(dir, 'key'))
+    let allowed = true
+    let sends = 0
+    let polls = 0
+    const bridge = {
+      keyFile: join(dir, 'key'), privateKey: key,
+      peer: {
+        id: 'bridge', register: async () => 120, discover: async () => [{ id: 'member' }],
+        sendRaw: async () => {
+          sends++
+          if (revoke) allowed = false
+          return { ack: { ok: false, error: 'offline' } }
+        }
+      },
+      edge: {
+        opts: { principal: 'bridge' }, request: async () => ({ authorized: allowed }),
+        roomLog: async (_room: string, after: number) => {
+          polls++
+          return after === 0 ? [{ id: 'fixture', seq: 1, from: 'clouds', text: 'room marker' }] : []
+        }
+      }
+    } as unknown as Bridge
+    const delivery = await startRoomDelivery(bridge, 'mesh', { intervalMs: 10 })
+    try {
+      for (let i = 0; i < 100 && polls < 12; i++) await Bun.sleep(10)
+      assert.ok(polls >= 12)
+      assert.equal(sends, revoke ? 1 : 5)
+    } finally {
+      delivery.stop()
+      await Bun.sleep(20)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+}

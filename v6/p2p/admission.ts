@@ -19,28 +19,43 @@ import { keyIdOf } from '../client/edge-sign.ts'
 
 export interface Admission {
   admit: (peerId: string) => Promise<boolean>
-  /** Why a peer would be refused ('' when it would not). */
-  reason: (peerId: string) => Promise<string>
+  /** Why a peer would be refused ('' when it would not). With a room, the room-scoped verdict. */
+  reason: (peerId: string, room?: string) => Promise<string>
+  /** Room-scoped admission (#38, Sun's QA): the key must cover the room. A rendezvous namespace is treated as a room; sealed keys are unrestricted. */
+  admitRoom: (peerId: string, room: string) => Promise<boolean>
+  /** Closes the read-only database handle (relay shutdown, startup failure). */
+  close: () => void
 }
 
 export function hubAdmission (dbPath: string): Admission {
-  const db = new Database(dbPath, { readonly: true })
+  let db: Database | undefined = new Database(dbPath, { readonly: true })
   db.exec('PRAGMA busy_timeout = 5000;')
-  const verdict = async (peerId: string): Promise<string> => {
+  const verdict = async (peerId: string, room?: string): Promise<string> => {
+    if (db === undefined) return 'admission is shut down'
     let keyId: string
     try {
       keyId = await keyIdOf(spkiFromPeerId(peerId))
     } catch {
       return 'the peer id carries no Ed25519 key'
     }
-    const row = db.prepare('SELECT revoked, expires FROM principal_keys WHERE key_id = ?').get(keyId) as { revoked: number | null, expires: number | null } | undefined
+    const row = db.prepare('SELECT revoked, expires, rooms FROM principal_keys WHERE key_id = ?').get(keyId) as { revoked: number | null, expires: number | null, rooms: string | null } | undefined
     if (row === undefined || row === null) return 'peer not enrolled'
     if (row.revoked !== null) return 'peer key revoked'
     if (row.expires !== null && Date.now() >= row.expires) return 'peer key expired'
+    if (room !== undefined) {
+      // An unsealed key is capped to its named rooms (A7 §3a); a rendezvous
+      // namespace counts as a room for admission, so a peer enrolled for one
+      // room cannot appear in another namespace's discovery. Sealed keys are
+      // unrestricted here; their room binding is the binding's own.
+      const rooms: string[] | null = row.rooms === null ? null : JSON.parse(row.rooms)
+      if (rooms !== null && !rooms.includes(room)) return 'peer enrolled for other rooms'
+    }
     return ''
   }
   return {
     admit: async (peerId: string) => (await verdict(peerId)) === '',
-    reason: verdict
+    reason: async (peerId: string, room?: string) => await verdict(peerId, room),
+    admitRoom: async (peerId: string, room: string) => (await verdict(peerId, room)) === '',
+    close: () => { db?.close(); db = undefined }
   }
 }

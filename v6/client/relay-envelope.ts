@@ -51,6 +51,32 @@ export function spkiFromPeerId (peerId: string): Uint8Array {
   return spki
 }
 
+/** The peer id of an Ed25519 SPKI (the inverse of spkiFromPeerId). */
+export function peerIdFromSpki (spki: Uint8Array): string {
+  if (spki.length !== ED25519_SPKI_PREFIX.length + 32) throw new Error('expected a 44-byte Ed25519 SPKI')
+  const raw = spki.subarray(ED25519_SPKI_PREFIX.length)
+  const mh = new Uint8Array(38)
+  mh[0] = 0x00
+  mh[1] = 0x24
+  mh.set([0x08, 0x01, 0x12, 0x20], 2)
+  mh.set(raw, 6)
+  const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+  const digits: number[] = []
+  for (const byte of mh) {
+    let carry = byte
+    for (let i = 0; i < digits.length; i++) {
+      carry += digits[i]! * 256
+      digits[i] = carry % 58
+      carry = Math.floor(carry / 58)
+    }
+    while (carry > 0) { digits.push(carry % 58); carry = Math.floor(carry / 58) }
+  }
+  let out = ''
+  for (let i = digits.length - 1; i >= 0; i--) out += B58[digits[i]!]
+  for (const byte of mh) { if (byte !== 0) break; out = B58[0] + out }
+  return out
+}
+
 export interface RelayEnvelope {
   v: number
   id: string

@@ -143,6 +143,20 @@ describe('durable ledger', () => {
     reopened.close()
   })
 
+  test('the storage layer constrains no amount domain: a u32-maximum amount round-trips unchanged (#100)', async () => {
+    const l = DurableLedger.open(dbPath(), SUN)
+    // 2^32 - 1 is legal under every MAXINT proposed on #100, so this test
+    // stays valid whichever width the operator rules; the storage layer just
+    // carries the canonical text.
+    const iou = await msg<Iou>(keys.sun, { kind: 'iou', holder: WINDS, face_tokens: 4294967295, quote: '', issued_at: T, expires_at: 0 })
+    l.ingest(iou, T)
+    l.close()
+    const reopened = DurableLedger.open(l.db.filename, SUN)
+    expect(reopened.ledger.entry({ from: SUN, id: iou.id })?.iou.face_tokens).toBe(4294967295)
+    expect(reopened.ledger.liabilities(T)).toBe(4294967295)
+    reopened.close()
+  })
+
   test('a durable ledger belongs to one self', async () => {
     const l = DurableLedger.open(dbPath(), SUN)
     l.close()

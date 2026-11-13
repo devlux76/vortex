@@ -17,6 +17,15 @@
 // The wrap is deliberately thin: `Ledger` keeps its whole API (views,
 // balances, peers) and this class owns only durability — the atomic
 // record-plus-state write and the replay.
+//
+// **Amounts are not frozen here.** They exist only inside the canonical
+// instrument text A8's encoder produces; this layer parses no amount field
+// and stores no amount column, so the unit, width and field names (#100:
+// whole kilotokens, 1..MAXINT, unsigned, zero banned) are expected to land in
+// `v6/econ/iou.ts` with no edit — or at most a one-line edit — here, plus a
+// migration note for ledgers written before the change. The acceptance tests
+// carry an amount at the u32 boundary to prove this layer constrains no
+// amount domain of its own.
 
 import { Database } from 'bun:sqlite'
 import { encode, type EconMessage } from './iou.ts'

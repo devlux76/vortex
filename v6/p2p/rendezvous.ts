@@ -119,7 +119,11 @@ export async function startRendezvousServer (node: Libp2p, opts: RendezvousServe
     for (const hit of hits) {
       try {
         const signer = (await openRecord(hit.e.record)).id.toString()
-        if (admit !== undefined && !(await admit(signer))) continue
+        // F4 (Invictus QA on #3): the room-aware check, as REGISTER uses, so a key
+        // narrowed away from this namespace disappears from its discovery.
+        if (admitRoom !== undefined) {
+          if (!(await admitRoom(signer, hit.ns))) continue
+        } else if (admit !== undefined && !(await admit(signer))) continue
       } catch { continue } // a corrupt record is invisible
       visible.push(hit)
     }

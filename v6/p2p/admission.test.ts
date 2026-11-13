@@ -16,6 +16,9 @@ import { signEnvelope } from './message.ts'
 import { edgeKeyFromLibp2p } from '../bridge/identity.ts'
 import { startPeer, type Peer } from './node.ts'
 import { startRelay, type Relay } from './relay.ts'
+import { hubAdmission } from './admission.ts'
+import { Database } from 'bun:sqlite'
+import { peerIdFromPrivateKey } from '@libp2p/peer-id'
 
 test('#24: admission gates the relay and rendezvous through principal_keys, and revocation lands on the next request', { timeout: 120_000 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'vx-admission-'))
@@ -170,4 +173,67 @@ test('the admission handle closes with the relay (no descriptor leak)', { timeou
     try { return readlinkSync(join('/proc/self/fd', f)) } catch { return '' }
   }).filter(t => t.includes('hub.db')).length
   assert.ok(after <= before, `the admission database descriptor leaked (${before} -> ${after})`)
+})
+
+// Invictus QA on #3 (F4, F5, F6).
+test('F4: discovery is room-aware: a key narrowed away from a namespace disappears from its discovery', { timeout: 120_000 }, async () => {
+  const w = await setupRelay38()
+  const dbPath = join(w.stateDir, 'vortex', 'hub.db')
+  const relay = await startRelay({ listen: ['/ip4/127.0.0.1/tcp/0/ws'], admitDb: dbPath, revocationSweepMs: 0 })
+  const relayAddr = relay.addrs()[0]!.toString()
+  let narrow: Peer | undefined
+  let watcher: Peer | undefined
+  try {
+    const n = await w.mkEnrolled('narrow', ['mesh'])
+    const v = await w.mkEnrolled('watcher', ['mesh'])
+    const narrowId = peerIdFromPrivateKey(await loadOrCreateKey(n.keyFile)).toString()
+    narrow = await startPeer({ keyFile: n.keyFile, relay: relayAddr })
+    watcher = await startPeer({ keyFile: v.keyFile, relay: relayAddr })
+    await narrow.register('mesh')
+    assert.ok((await watcher.discover('mesh')).some(p => p.id.toString() === narrowId), 'enrolled for mesh: visible')
+    // Narrow the key to another room only; the mesh namespace must stop showing it.
+    const db = new Database(dbPath)
+    db.run('UPDATE principal_keys SET rooms = ? WHERE key_id = ?', [JSON.stringify(['other-room']), n.keyId])
+    db.close()
+    assert.ok(!(await watcher.discover('mesh')).some(p => p.id.toString() === narrowId), 'narrowed away from mesh: invisible')
+  } finally {
+    await narrow?.stop()
+    await watcher?.stop()
+    await relay.stop()
+    await w.cleanup()
+  }
+})
+
+test('F5: a malformed rooms column is refused with a reason, never thrown', { timeout: 60_000 }, async () => {
+  const w = await setupRelay38()
+  const dbPath = join(w.stateDir, 'vortex', 'hub.db')
+  const enrolled = await w.mkEnrolled('garbled', ['mesh'])
+  const peer = peerIdFromPrivateKey(await loadOrCreateKey(enrolled.keyFile)).toString()
+  const db = new Database(dbPath)
+  db.run('UPDATE principal_keys SET rooms = ? WHERE key_id = ?', ['not json', enrolled.keyId])
+  db.close()
+  const adm = hubAdmission(dbPath)
+  try {
+    assert.equal(await adm.reason(peer, 'mesh'), 'peer rooms unreadable')
+    assert.equal(await adm.admitRoom(peer, 'mesh'), false)
+  } finally {
+    adm.close()
+    await w.cleanup()
+  }
+})
+
+test('F6 (admission side): a closed handle refuses every verdict, and the statement is finalized on close', async () => {
+  const w = await setupRelay38()
+  const dbPath = join(w.stateDir, 'vortex', 'hub.db')
+  const enrolled = await w.mkEnrolled('closing', ['mesh'])
+  const peer = peerIdFromPrivateKey(await loadOrCreateKey(enrolled.keyFile)).toString()
+  const adm = hubAdmission(dbPath)
+  try {
+    assert.equal(await adm.admitRoom(peer, 'mesh'), true)
+    adm.close()
+    assert.equal(await adm.reason(peer, 'mesh'), 'admission is shut down')
+    adm.close() // a second close is harmless
+  } finally {
+    await w.cleanup()
+  }
 })

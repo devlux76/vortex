@@ -238,7 +238,11 @@ export async function assemble (
   const lastDataBytes = size === 0 ? 0 : size - (counts[1]! - 1) * r.blockSize
   let emitted = 0 // data blocks delivered so far, across the whole traversal
 
-  const emit = async (ids: Uint8Array[], level: number): Promise<void> => {
+  // `base` is the global index of ids[0] within its level: a block's real hash
+  // count depends on its position in the WHOLE level, not in one parent's
+  // child list — blocks past the first parent would otherwise read zero
+  // padding as hashes (caught by Ronin's depth-4 acceptance case, #68).
+  const emit = async (ids: Uint8Array[], level: number, base: number): Promise<void> => {
     if (level === 1) {
       if (emitted + ids.length > counts[1]!) throw new Error('the tree yields more data blocks than the size allows')
       for (let i = 0; i < ids.length; i++) {
@@ -254,17 +258,18 @@ export async function assemble (
     }
     for (let i = 0; i < ids.length; i++) {
       const block = await fetchBlock(ids[i]!, 'index block')
-      const real = Math.min(r.fanout, counts[level - 1]! - i * r.fanout)
+      const g = base + i // this block's global index within its level
+      const real = Math.min(r.fanout, counts[level - 1]! - g * r.fanout)
       if (!zeros(block, real * HASH_LEN)) throw new Error('an index block carries hashes beyond its count, or non-zero padding')
       const child: Uint8Array[] = []
       for (let j = 0; j < real; j++) child.push(block.slice(j * HASH_LEN, (j + 1) * HASH_LEN))
-      await emit(child, level - 1)
+      await emit(child, level - 1, g * r.fanout)
     }
   }
 
   const rootIds: Uint8Array[] = []
   for (let i = 0; i < rootCount; i++) rootIds.push(root.slice(ROOT_HEADER_LEN + i * HASH_LEN, ROOT_HEADER_LEN + (i + 1) * HASH_LEN))
-  await emit(rootIds, depth)
+  await emit(rootIds, depth, 0)
   return { size, depth }
 }
 

@@ -13,8 +13,8 @@
 // - The cursor is persisted, so a bridge restart does not re-read the room
 //   from the beginning. A message still undelivered for some member is
 //   retried on later polls (bounded attempts, then dropped and counted).
-import { readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { b64url } from '../client/b64.ts'
+import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { toString } from 'uint8arrays'
 import { screenOutbound, signEnvelope } from '../p2p/message.ts'
 import type { Bridge } from './process.ts'
 
@@ -35,7 +35,7 @@ export interface Delivery {
 /** Deterministic envelope id for a hub message (see module comment). */
 export async function forwardIdOf (hubMessageId: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('vortex-bridge-forward\0' + hubMessageId))
-  return b64url.encode(new Uint8Array(digest))
+  return toString(new Uint8Array(digest), "base64url")
 }
 
 /**
@@ -91,8 +91,8 @@ export async function forwardMessages (bridge: Bridge, room: string, messages: H
       }
       throw e
     }
-    if (failed.length === 0) result.through = m.seq
-    else result.pending.push({ msg: m, targets: failed })
+    if (failed.length > 0) result.pending.push({ msg: m, targets: failed })
+    result.through = m.seq
   }
   return result
 }
@@ -116,9 +116,23 @@ function readPending (stateFile: string, room: string): Pending[] {
   try { return JSON.parse(readFileSync(pendingFile(stateFile, room), 'utf8')) as Pending[] } catch { return [] }
 }
 
-function writePending (stateFile: string, room: string, list: Pending[]): void {
-  if (list.length === 0) rmSync(pendingFile(stateFile, room), { force: true })
-  else writeFileSync(pendingFile(stateFile, room), JSON.stringify(list), { mode: 0o600 })
+interface DeliveryState { after: number, pending: Pending[] }
+
+function loadState (stateFile: string, room: string, file: string): DeliveryState {
+  try { return JSON.parse(readFileSync(file, 'utf8')) as DeliveryState } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    return { after: loadCursor(stateFile, room), pending: readPending(stateFile, room) }
+  }
+}
+
+function writeState (file: string, state: DeliveryState): void {
+  const temp = `${file}.${process.pid}.tmp`
+  try {
+    writeFileSync(temp, JSON.stringify(state), { mode: 0o600 })
+    renameSync(temp, file)
+  } finally {
+    rmSync(temp, { force: true })
+  }
 }
 
 /** Publish the bridge under the room namespace and start the poll loop. */
@@ -127,47 +141,69 @@ export async function startRoomDelivery (bridge: Bridge, room: string, opts: { i
   const intervalMs = opts.intervalMs ?? 2000
   await bridge.peer.register(room)
   const stats: DeliveryStats = { forwarded: 0, duplicates: 0, skipped: 0, dropped: 0 }
-  let pending = readPending(stateFile, room)
-  let after = loadCursor(stateFile, room)
-  const saveCursor = (n: number): void => {
-    if (n > after) { after = n; writeFileSync(stateFile, JSON.stringify({ room, after }) + '\n', { mode: 0o600 }) }
+  const file = `${stateFile}.${room}.state.json`
+  let state = loadState(stateFile, room, file)
+  const save = (next: DeliveryState): void => {
+    writeState(file, next)
+    state = next
+  }
+  const isAuthorized = async (id: string): Promise<boolean> => {
+    const path = `/v1/rooms/${encodeURIComponent(room)}/peer-authorized?peer=${encodeURIComponent(id)}`
+    const verdict = await bridge.edge.request('GET', path)
+    return verdict?.authorized === true
   }
   let running = true
   let presencePosted = false
   const loop = (async () => {
     while (running) {
       try {
-        const members = (await bridge.peer.discover(room)).map(p => p.id.toString())
-        // Retries first: messages still undelivered for some member.
-        const keep: Pending[] = []
-        for (const p of pending) {
-          p.attempts++
-          let failed: string[]
-          try { failed = await deliver(bridge, room, p.msg, p.targets, stats) } catch { failed = p.targets }
-          if (failed.length === 0) saveCursor(p.msg.seq)
-          else if (p.attempts < MAX_ATTEMPTS) keep.push({ ...p, targets: failed })
-          else stats.dropped++
+        // Room-scoped targets (#36, Sun's QA): discovery alone must never
+        // grant room reads, so every candidate is checked with the hub
+        // (peer id → principal_keys → the key's room scope) before it
+        // receives anything.
+        const discovered = (await bridge.peer.discover(room)).map(p => p.id.toString())
+        const members: string[] = []
+        for (const id of discovered) {
+          if (id !== bridge.peer.id.toString() && await isAuthorized(id)) members.push(id)
         }
-        pending = keep
-        writePending(stateFile, room, pending)
+        if (state.pending.length > 0) {
+          const keep: Pending[] = []
+          for (const p of state.pending) {
+            const targets: string[] = []
+            for (const id of p.targets) {
+              if (await isAuthorized(id)) targets.push(id)
+            }
+            if (targets.length === 0) continue
+            const failed = await deliver(bridge, room, p.msg, targets, stats)
+            const attempts = p.attempts + 1
+            if (failed.length === 0) continue
+            if (attempts < MAX_ATTEMPTS) keep.push({ ...p, attempts, targets: failed })
+            else stats.dropped++
+          }
+          save({ after: state.after, pending: keep })
+        }
         // Room log reads need membership (§8.2), which enrollment does not
         // grant; posting does. The bridge announces itself once.
         let entries: HubLogEntry[]
         try {
-          entries = (await bridge.edge.roomLog(room, after, MAX_POLL_BATCH)) as HubLogEntry[]
+          entries = (await bridge.edge.roomLog(room, state.after, MAX_POLL_BATCH)) as HubLogEntry[]
         } catch (e) {
           if (!presencePosted && /404/.test((e as Error).message)) {
+            await bridge.edge.send({ room, text: '[vortex bridge] present' })
             presencePosted = true
-            await bridge.edge.send({ room, text: '[vortex bridge] present' }).catch(() => {})
             continue
           }
           throw e
         }
-        if (entries.length > 0) {
+        // Subscription boundary (#36): with no authorized members, nothing is
+        // forwarded and the cursor does not advance, so peers that join or
+        // reconnect do not silently miss history while they were away.
+        if (entries.length > 0 && members.length > 0) {
           const r = await forwardMessages(bridge, room, entries, members, stats)
-          saveCursor(r.through)
-          pending = [...pending, ...r.pending.map(p => ({ ...p, attempts: 1 }))]
-          writePending(stateFile, room, pending)
+          save({
+            after: r.through,
+            pending: [...state.pending, ...r.pending.map(p => ({ ...p, attempts: 1 }))]
+          })
         }
       } catch { /* hub or relay hiccup: keep polling */ }
       await Bun.sleep(intervalMs)

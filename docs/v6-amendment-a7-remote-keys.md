@@ -51,6 +51,33 @@ Not sufficient by itself:
 
 **What remains, stated honestly.** Under tier H or S, an agent that can reach its own signer socket can still authenticate as itself from that machine. It cannot take the key elsewhere, and cannot sign as anyone else. That is the property the A6 study needs: no peer can obtain a credential that works off the device.
 
+### 2a. Domain keys (added for A8 revision 4, custody domains)
+
+A **domain key** signs what leaves a custody domain (A8 §2, §3.2): the domain's cross-boundary instruments and its `hub` record (A9 §10). It binds a whole domain's worth of debt, so its custody rules are stricter than an agent key's in two ways.
+
+**1. Where the key lives.** A domain key that signs instruments (a domain that issues IOUs to other domains, or a collector in credit mode, A8 §7.2) must be tier H or S. Tier K is allowed only with the domain's `max_issued_tokens` set no higher than the operator would accept losing outright. Two more placements are named so a deployment can state them honestly:
+
+| Tier | Where the domain key lives | Allowed for |
+| --- | --- | --- |
+| H, S | as for agent keys (§2) | any domain, any mode |
+| K | as for agent keys (§2) | any domain, with a cap the operator would accept losing |
+| P: platform | a hosted platform's secret store, which the platform can read | a hosted domain or collector; its cap is set lower to match (A8 §8.1), and its `hub` record says `custody: "platform"` |
+| unsealed | a file the agent's own user can read (§3a) | **never** a domain key |
+
+A broker-mode collector holds no debt and needs no domain key (A8 §7.2). An HTTP edge peer (§3a), such as a cloud session, cannot hold a domain key. It is a client of some domain, or it runs as a tier-P domain on a platform that offers a secret store.
+
+**2. The allowance check lives with the key, not in front of it.** A8 §8 requires the hub to check an agent's `max_agent_issued_tokens` before the domain key signs. A check in the hub process alone does not hold. On one machine the hub runs as the same OS user as the agents (§2, tier S's premise), so an agent with a shell can bypass the hub and ask the domain signer directly. So:
+- The **domain signer** keeps the per-agent tally and the domain cap itself, durably, beside the settlement ledger (A8 §10). It refuses any request that would exceed either.
+- Every request to the domain signer carries the requesting agent's own signed inner instrument (A8 §6, signed by that agent's key under §2). The signer charges the tally of the agent that signed it. An agent cannot spend another agent's allowance, because it cannot sign as that agent.
+- The domain signer's payload set is exactly two domains: `vortex-iou-v1\0` (A8 §6.1) for cross-boundary instruments and `vortex-webhub-v1\0` (A9 §5.1) for the `hub` record. It never signs authentication payloads (§3). A domain key is not an identity a peer logs in with.
+
+**3. Rotation and revocation are domain-wide.** IOUs name the issuing domain, and a debt must outlive any one key. So:
+- A domain has a stable **domain id**: the `key_id` (sha256 of SPKI, §3) of its first domain key. Instruments and the `hub` record carry the domain id, and the current signing key's `key_id` in `key` (A8 §6.2).
+- **Rotation:** the outgoing key signs a handover naming the incoming key's SPKI. Verifiers accept the chain from the domain id, and outstanding instruments stay valid under the domain id.
+- **Recovery:** a compromised key cannot be trusted to sign its own revocation. A domain that issues instruments therefore enrolls an offline **recovery key** (tier H; for example a hardware token kept unplugged), used only to revoke the current key and sign a new one in. A domain without a recovery key that loses its domain key loses the domain: its counterparties keep their claims, unpaid, and decide for themselves what that domain's next identity is worth (A8 §9, disputes).
+
+**What remains, stated honestly.** Under tier H or S, an agent can still cause the domain key to sign up to its own allowance, which is exactly the limit A8 §8 intends. The protection is the allowance arithmetic in the signer, not the key's secrecy. Set allowances as amounts the operator would accept being spent by any one agent that has been talked into it.
+
 ### 3. Signed authentication on the remote listener
 
 - **Payload.** Every signature covers the UTF-8 string `vortex-v6-auth\0`, followed by a canonical JSON object with fixed key order: `{v:1, kind, principal, key_id, hub, nonce, ts, ...}`. `hub` is the hub id: the SHA-256 fingerprint of the hub's TLS certificate, printed by `vx enroll --key`. It identifies the hub even when a CA-certified front end terminates TLS, so a signature made for one hub is refused by every other. The shared implementation is `v6/client/edge-sign.ts`.

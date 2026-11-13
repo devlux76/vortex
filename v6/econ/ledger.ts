@@ -127,6 +127,8 @@ export class Ledger {
   private onQuote (m: Quote): void {
     if (m.from !== this.self && m.to !== this.self) throw new LedgerError('quote does not involve this agent')
     if (m.from === m.to) throw new LedgerError('quote addressed to its sender')
+    // Quote ids are per sender; a collision is refused, never replaced.
+    if (this.quotes.has(m.from, m.id)) throw new LedgerError('quote id already in use by this sender')
     this.quotes.set(m)
   }
 
@@ -243,7 +245,7 @@ export class Ledger {
   }
 
   private sum (now: number, issuer?: string, holder?: string): number {
-    return this.liveIous(now, issuer, holder).reduce((t, e) => t + e.iou.face_tokens - e.credited, 0)
+    return this.liveIous(now, issuer, holder).reduce((t, e) => t + (e.iou.face_tokens - e.credited), 0)
   }
 
   /** What `peer` owes this agent (assets on that peer). */

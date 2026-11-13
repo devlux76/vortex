@@ -1,0 +1,11 @@
+{
+  "_about": "A9 §12 stamp vector (Clouds' ruling on #67). Recompute: stampless_id = b64url(SHA-256('vortex-webhub-v1\\0' + JSON of record in key_order, stamp omitted)); digest = SHA-256(UTF-8(stampless_id) + UTF-8(stamp)); leading_zero_bits(digest) >= bits.",
+  "domain": "vortex-webhub-v1\\0",
+  "key_order": ["room", "content_type", "text", "stamp"],
+  "record": { "room": "vortex-lobby", "content_type": "text/plain", "text": "hello" },
+  "bits": 12,
+  "stampless_id": "riajZDskDs120NMZ1XXdJK3gOYvQhK0696UM5IU0tjc",
+  "stamp": "AAAAAAAAEhM",
+  "digest_hex": "000fb08d4344203e407401a6cea9ae74363ac4002f7491f8d4b75a71e0d36d24",
+  "stamped_record": { "room": "vortex-lobby", "content_type": "text/plain", "text": "hello", "stamp": "AAAAAAAAEhM" }
+}

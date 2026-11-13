@@ -106,8 +106,13 @@ async function run() {
     const peers = await peer.peers(channel)
     if (!peers.includes(config.peerId)) throw new Error(`The signed rendezvous record for ${config.speaker} was missing`)
     check(`Discovered ${channel} and verified ${config.speaker}’s peer record`, { discovered, floor: MATCH_FLOOR, ranked, confirmedPick, peers, relay: config.addr })
+    // Winds' #44 review: picking the hard same-domain decoy is a failure of
+    // the matching stage, not a WARNING row — the run must stop here.
+    if (config.hardDecoy !== undefined && channel === config.hardDecoy) {
+      throw new Error(`The same-domain decoy ${config.hardDecoy} was selected over the target`)
+    }
     if (config.hardDecoy !== undefined && ranked.some(candidate => candidate.name === config.hardDecoy)) {
-      check(config.hardDecoy === channel ? 'WARNING: the same-domain decoy was selected' : `Same-domain decoy ${config.hardDecoy} scored ${scores.find(score => score.name === config.hardDecoy).score.toFixed(3)} and was not selected`, { channel, hardDecoy: config.hardDecoy })
+      check(`Same-domain decoy ${config.hardDecoy} scored ${scores.find(score => score.name === config.hardDecoy).score.toFixed(3)} and was rejected by the 0.82-floor + confirmation rule`, { channel, hardDecoy: config.hardDecoy })
     }
     const ttl = await peer.register(channel)
     check('Moon announced its signed peer record', { channel, ttl, peerId: peer.id, addresses: peer.addr })

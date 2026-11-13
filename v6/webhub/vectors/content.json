@@ -1,0 +1,85 @@
+{
+  "block_size": 524288,
+  "fanout": 16384,
+  "hash": "sha-256",
+  "id_encoding": "base64url",
+  "note": "A9 s10a content-addressing vectors (#68). The content id freezes when this merges (A9 s15 item 8): a second implementation rebuilds each case from its input and must produce the committed depth and content id. Data cases: bytes of the named pattern; depth cases: the named count of data blocks, all with the same block hash H (the block id of the block-exact pattern), so no case needs its bytes materialized.",
+  "vectors": [
+    {
+      "name": "empty",
+      "size": 0,
+      "input": {
+        "kind": "data",
+        "bytes": ""
+      },
+      "depth": 1,
+      "content_id": "bFsvsR0rHkJ0SOzt48gidsJNusFnrDGPcpSSRPPDrXU",
+      "block_ids": []
+    },
+    {
+      "name": "one-byte",
+      "size": 1,
+      "input": {
+        "kind": "data",
+        "bytes": "QQ"
+      },
+      "depth": 1,
+      "content_id": "pL8l6xftcgYzRmAmG_w8k6SmUT0mtDBSZaXkM32Sr7w",
+      "block_ids": [
+        "E5YXz4hC4x08-YMsarwQX_Mv_UXwzskSJe_ppvumg7c"
+      ]
+    },
+    {
+      "name": "block-exact",
+      "size": 524288,
+      "input": {
+        "kind": "pattern",
+        "pattern": "byte[i] = i & 0xff"
+      },
+      "depth": 1,
+      "content_id": "Mjb4XCO6HRc26ymYVHqT8qpIc3qtzKc4DJM0OkBoxpY",
+      "block_ids": [
+        "M7yKq0BwNnjD6-lNLdjyr_8oXdkB-SNOhB5GefggT9U"
+      ]
+    },
+    {
+      "name": "block-plus-one",
+      "size": 524289,
+      "input": {
+        "kind": "pattern",
+        "pattern": "byte[i] = i & 0xff",
+        "tail": "one extra byte 0x41"
+      },
+      "depth": 1,
+      "content_id": "tTKhTMA9tUpbxoHVwZiMoTWyJpUpfHdYHYsWZpM_AVs",
+      "block_ids": [
+        "M7yKq0BwNnjD6-lNLdjyr_8oXdkB-SNOhB5GefggT9U",
+        "E5YXz4hC4x08-YMsarwQX_Mv_UXwzskSJe_ppvumg7c"
+      ]
+    },
+    {
+      "name": "depth1-16383",
+      "size": 8589410304,
+      "input": {
+        "kind": "repeated-block",
+        "hash": "M7yKq0BwNnjD6-lNLdjyr_8oXdkB-SNOhB5GefggT9U",
+        "count": 16383
+      },
+      "depth": 1,
+      "content_id": "3029RWT-dL8NxpM72t374dSOnNSX90AoGaInlSTrmrw",
+      "block_ids": null
+    },
+    {
+      "name": "depth2-16384",
+      "size": 8589934592,
+      "input": {
+        "kind": "repeated-block",
+        "hash": "M7yKq0BwNnjD6-lNLdjyr_8oXdkB-SNOhB5GefggT9U",
+        "count": 16384
+      },
+      "depth": 2,
+      "content_id": "YHkn3bnp1l8dRQmiJaq07B--mCGmSDGDLw9inBmvtjY",
+      "block_ids": null
+    }
+  ]
+}

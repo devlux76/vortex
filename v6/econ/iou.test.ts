@@ -4,7 +4,7 @@ import { generateKeyPair } from '@libp2p/crypto/keys'
 import { peerIdFromPrivateKey } from '@libp2p/peer-id'
 import { toString } from 'uint8arrays/to-string'
 import {
-  canonical, COST_HINTS, DOMAIN, ECON_KINDS, EconError, encode, KIND_FIELDS, newId, sign, signingBytes, verify,
+  canonical, COST_HINTS, DOMAIN, ECON_KINDS, EconError, encode, KIND_FIELDS, newId, sign, signingBytes, validateBody, verify,
   type EconInput, type EconKind, type EconMessage, type Unsigned
 } from './iou.ts'
 
@@ -154,7 +154,7 @@ describe('common fields', () => {
   test('from that is not a peer id needs an explicit key', async () => {
     const m = await sign(alice, input('release', { from: 'winds' }))
     await expect(verify(m)).rejects.toThrow('not a peer id')
-    expect((await verify(m, alice.publicKey.raw)).from).toBe('winds')
+    expect((await verify(m, alice.publicKey.raw, 'winds')).from).toBe('winds')
     await expect(verify(m, new Uint8Array(31))).rejects.toThrow('32 bytes')
   })
 
@@ -196,5 +196,29 @@ describe('decline', () => {
     expect(Object.keys(m)).not.toContain('remaining')
     expect(encode(m)).not.toContain('remaining')
     await verify(encode(m))
+  })
+})
+
+describe('verify: size bound and authenticated sender (Sun QA on #34)', () => {
+  test('object input is bounded like text input (5000-byte task, validly signed)', async () => {
+    const body = validateBody({ v: 1, kind: 'redeem', from: A, id: newId(), ts: TS, iou: REF, task: 'x'.repeat(5000), est_tokens: 20000 })
+    const sig = toString(await alice.sign(signingBytes(body)), 'base64url')
+    const obj = { ...body, sig }
+    await expect(verify(obj, alice.publicKey)).rejects.toThrow(/longer than/)
+    await expect(verify(JSON.stringify(obj), alice.publicKey)).rejects.toThrow(/longer than/)
+  })
+
+  test('key A signing as peer B is refused (explicit peer ids and derived keys)', async () => {
+    const m = await sign(alice, input('redeem', { from: B }))
+    await expect(verify(m, alice.publicKey)).rejects.toThrow(/does not match the key/)
+    await expect(verify(m, peerIdFromPrivateKey(alice))).rejects.toThrow(/does not match the key/)
+    await expect(verify(m, alice.publicKey, A)).rejects.toThrow(/does not match the expected sender/)
+  })
+
+  test('a hub-name sender needs the expected name; a key alone cannot authenticate it', async () => {
+    const m = await sign(alice, input('redeem', { from: 'winds' }))
+    await expect(verify(m, alice.publicKey)).rejects.toThrow(/pass the expected sender/)
+    await expect(verify(m, alice.publicKey, 'clouds')).rejects.toThrow(/does not match the expected sender/)
+    expect((await verify(m, alice.publicKey, 'winds')).from).toBe('winds')
   })
 })

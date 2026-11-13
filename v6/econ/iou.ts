@@ -17,7 +17,7 @@
 // balances (v6/econ/ledger.ts), binding beacon `agent` to the carrier principal
 // (the carrier knows it; here `agent` must equal the signed `from`).
 import { publicKeyFromRaw } from '@libp2p/crypto/keys'
-import { peerIdFromString } from '@libp2p/peer-id'
+import { peerIdFromPublicKey, peerIdFromString } from '@libp2p/peer-id'
 import type { PeerId, PublicKey } from '@libp2p/interface'
 import { fromString } from 'uint8arrays/from-string'
 import { toString } from 'uint8arrays/to-string'
@@ -207,11 +207,31 @@ function toPublicKey (key: VerifyKey | undefined, from: string): PublicKey {
 }
 
 /**
- * Parse (JSON text or object), validate and verify a message. With no `key`,
- * `from` must be a libp2p peer id that embeds its Ed25519 key. Returns the
- * message in canonical key order, or throws EconError with the reason.
+ * With an explicit key, `from` must be the authenticated sender. A trusted
+ * `sender` (a peer id or hub principal the caller resolved from that key) must
+ * equal `from`. Without one, a peer-id `from` must be the id derived from the
+ * key. Anything else is refused.
  */
-export async function verify (raw: unknown, key?: VerifyKey): Promise<EconMessage> {
+function checkSender (from: string, key: VerifyKey | undefined, pub: PublicKey, sender: string | undefined): void {
+  if (key === undefined) return // from is a peer id; its embedded key verified the signature
+  if (sender !== undefined) {
+    if (sender !== from) throw new EconError('from does not match the expected sender')
+    return
+  }
+  const derived = key instanceof Uint8Array || 'verify' in key
+    ? peerIdFromPublicKey(pub).toString()
+    : key.toString()
+  if (derived !== from) throw new EconError('from does not match the key; pass the expected sender')
+}
+
+/**
+ * Parse (JSON text or object), validate and verify a message. With no `key`,
+ * `from` must be a libp2p peer id that embeds its Ed25519 key. With a `key`,
+ * `from` must match `sender` (when given) or the peer id derived from the key.
+ * The canonical signed bytes are bounded for both text and object input.
+ * Returns the message in canonical key order, or throws EconError with the reason.
+ */
+export async function verify (raw: unknown, key?: VerifyKey, sender?: string): Promise<EconMessage> {
   let obj = raw
   if (typeof raw === 'string') {
     if (enc.encode(raw).length > MAX_MESSAGE_BYTES) throw new EconError(`message longer than ${MAX_MESSAGE_BYTES} bytes`)
@@ -220,8 +240,10 @@ export async function verify (raw: unknown, key?: VerifyKey): Promise<EconMessag
   const body = validateBody(obj)
   const sig = (obj as Record<string, unknown>).sig
   if (typeof sig !== 'string' || !SIG_RE.test(sig)) throw new EconError('malformed signature')
+  encode({ ...body, sig } as EconMessage) // size bound on the canonical bytes, for object input too
   const pub = toPublicKey(key, body.from)
   if (pub.type !== 'Ed25519') throw new EconError('econ messages are signed with Ed25519')
+  checkSender(body.from, key, pub, sender)
   const ok = await pub.verify(signingBytes(body), fromString(sig, 'base64url'))
   if (!ok) throw new EconError('bad signature')
   return { ...body, sig } as EconMessage

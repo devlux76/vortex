@@ -34,13 +34,15 @@ import { Ledger, type IngestResult } from './ledger.ts'
 export class DurableLedgerError extends Error {}
 
 export class DurableLedger {
-  readonly ledger: Ledger
+  /** The live, committed state. Private: it changes only after a successful commit. */
+  private _ledger: Ledger
+  get ledger (): Ledger { return this._ledger }
   /** Exposed for tooling and tests; writes outside ingest() are recovered from on the next open. */
   readonly db: Database
 
   private constructor (db: Database, ledger: Ledger) {
     this.db = db
-    this.ledger = ledger
+    this._ledger = ledger
   }
 
   /**
@@ -93,6 +95,14 @@ export class DurableLedger {
    * and the snapshot are written in one transaction, so a crash leaves either
    * neither or a stale snapshot — and a stale snapshot is replayed forward on
    * the next open. A message the ledger refuses is written nowhere.
+   *
+   * Memory follows disk, never leads it: the message is applied to a CLONE of
+   * the ledger and the live state adopts the clone only after the commit. A
+   * failed write (a full disk) leaves the in-memory ledger untouched, so a
+   * retry re-attempts the write instead of being deduplicated in memory, and
+   * nothing is lost to a restart. The clone costs one deep state copy per
+   * ingest — the price of "a settlement that is lost is a payment that is
+   * lost" (A8 §10).
    */
   ingest (m: EconMessage, now: number): IngestResult {
     if (typeof m.id !== 'string' || typeof m.from !== 'string' || m.id === '' || m.from === '') {
@@ -106,11 +116,13 @@ export class DurableLedger {
         this.db.run('COMMIT')
         return { applied: false, duplicate: true }
       }
-      const result = this.ledger.ingest(m, now)
+      const next = Ledger.fromJSON(this.ledger.toJSON())
+      const result = next.ingest(m, now)
       this.db.run('INSERT INTO econ_instruments (from_key, id, kind, body, now) VALUES (?, ?, ?, ?, ?)', [m.from, m.id, m.kind, body, now])
       const seq = (this.db.query('SELECT MAX(seq) AS s FROM econ_instruments').get() as { s: number | null }).s ?? 0
-      this.db.run('INSERT INTO econ_state (id, watermark, state) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET watermark = excluded.watermark, state = excluded.state', [seq, JSON.stringify(this.ledger.toJSON())])
+      this.db.run('INSERT INTO econ_state (id, watermark, state) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET watermark = excluded.watermark, state = excluded.state', [seq, JSON.stringify(next.toJSON())])
       this.db.run('COMMIT')
+      this._ledger = next
       return result
     } catch (e) {
       try { this.db.run('ROLLBACK') } catch { /* no transaction open */ }

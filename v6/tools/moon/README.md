@@ -4,7 +4,7 @@ Moon runs in Chrome. The local Bun process serves the page and pinned model file
 
 ## Local run
 
-Use Bun 1.4.4 or later and Chrome 157 or later. The one-time fetch stores pinned q4 model files in a directory outside the repo. The browser serves both models from loopback and disables remote downloads. The models and runtime require about 1.6 GB of disk space. The generator uses the q4 ONNX build through the browser’s WASM backend.
+Use Bun 1.4.4 or later and Chrome 157 or later. The one-time fetch stores pinned q4 model files in a directory outside the repo. The browser serves both models from loopback and disables remote downloads. The models and runtime require about 1.6 GB of disk space. The generator uses the q4 ONNX build and prefers WebGPU. Chrome can load it via WASM, but CPU generation can take several minutes per reply. Use `?gen=wasm` to select the CPU backend explicitly.
 
 ```sh
 bun install --frozen-lockfile

@@ -35,8 +35,8 @@ async function run() {
   env.backends.onnx.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency)
   const adapter = await navigator.gpu?.requestAdapter().catch(() => null)
   const embedDevice = new URLSearchParams(location.search).get('embed') ?? (adapter ? 'webgpu' : 'wasm')
-  const genDevice = 'wasm'
-  const ortVariant = embedDevice === 'webgpu' ? 'ort-wasm-simd-threaded.jsep' : 'ort-wasm-simd-threaded'
+  const genDevice = new URLSearchParams(location.search).get('gen') ?? (adapter ? 'webgpu' : 'wasm')
+  const ortVariant = embedDevice === 'webgpu' || genDevice === 'webgpu' ? 'ort-wasm-simd-threaded.asyncify' : 'ort-wasm-simd-threaded'
   env.backends.onnx.wasm.wasmPaths = { mjs: `/ort/${ortVariant}.mjs`, wasm: `/ort/${ortVariant}.wasm` }
   check('Model files served from this machine', { chrome: navigator.userAgent, embedDevice, genDevice, fallbackAdapter: adapter?.info.isFallbackAdapter ?? null })
   stage('Loading EmbeddingGemma')
@@ -115,9 +115,9 @@ async function run() {
       const [generated] = await generate([
         { role: 'system', content: 'You are Moon, a browser AI. Answer each networking question in one short, accurate sentence.' },
         { role: 'user', content: reply.text },
-      ], { max_new_tokens: 24, do_sample: false, return_full_text: false, tokenizer_encode_kwargs: { enable_thinking: false } })
+      ], { max_new_tokens: 40, do_sample: false, return_full_text: false, tokenizer_encode_kwargs: { enable_thinking: false } })
       const output = generated.generated_text
-      const answer = (typeof output === 'string' ? output : output.findLast(message => message.role === 'assistant')?.content ?? '').trim()
+      const answer = (typeof output === 'string' ? output : output.findLast(message => message.role === 'assistant')?.content ?? '').replace(/<\/think>\s*$/, '').trim()
       if (!answer) throw new Error('LFM3 1.7B returned an empty reply')
       const generationMs = Math.round(performance.now() - started)
       state.pendingAnswer = { turn: turn + 1, answer, generationMs }

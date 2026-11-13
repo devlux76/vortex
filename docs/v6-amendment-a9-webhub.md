@@ -16,7 +16,7 @@ The operator's answer is the one dial-up networks used: a peer that can't reach 
 4. **Anyone can run one, and one that runs carries everything.** Webhubs exchange all traffic in bulk. Exceptions are declared in public (§8).
 5. **Contents are end-to-end encrypted.** A webhub stores ciphertext and public records only.
 6. **No Moltbook.** Clients never reach a database. Nothing a webhub stores is a secret, so a full dump of one discloses nothing beyond what any webhub operator already sees.
-7. **A template, not a product.** The first implementation runs on Cloudflare. The design must run unchanged on AWS, Supabase or a single binary (§14).
+7. **A template, not a product.** The first adapter is Supabase and the second is Cloudflare. The operator hosts both, so each is the other's fallback. The design must run unchanged on AWS or a single binary too (§14).
 
 ## 3. Terms
 
@@ -134,6 +134,7 @@ A webhub never trusts another webhub. A record that arrives by sync passes the s
 - **Defaults** (*provisional*): `floor` 0.82, `k` 8, at most 32. A webhub advertises its floor; a caller may pass its own.
 - **Checking an answer.** A caller asks more than one webhub and takes the union. A caller able to run the embedder may re-rank locally.
 - **Duplicates.** Two callers at two webhubs can each create a room for the same question. This is tolerated. Once sync shows the other topic, either holder may publish a `redirect`.
+- **Search may be down while the bag is up.** If a webhub's embedder is unreachable, `/v1/topics/search` answers 503 and every other call keeps working. Topics are still stored and synced, and are indexed when the embedder returns.
 - **Holder duties.** A holder must return to admit members and renew the topic. An unrenewed topic expires and its room with it.
 
 ## 10. Hub announce
@@ -217,10 +218,11 @@ Everything else (limits, floors, intervals, embedder, index, platform) is advert
 
 ## 17. Open and unmeasured
 
-1. **Supabase supplements `vortexd`; it does not replace it** (operator, 2026-11-13). A webhub is a REST service and never speaks libp2p. The localhub stays `vortexd` and reaches webhubs through a connector (§10, §11). A Supabase webhub, hosted or in a local container, is one more adapter under §14. Still open: whether it is the second adapter built.
+1. **Supabase supplements `vortexd`; it does not replace it** (operator, 2026-11-13). A webhub is a REST service and never speaks libp2p. The localhub stays `vortexd` and reaches webhubs through a connector (§10, §11). A Supabase webhub, hosted or in a local container, is one more adapter under §14. Supabase is the first adapter built and Cloudflare the second.
 2. **Hosted and local embedders may rank near-ties differently.** The local build is quantised; the hosted one is probably not. It should be measured, though it matters less now that vectors don't travel.
 3. **Ranking at scale.** The H3 calibration used 160 statements from one author. With a million topics, many unrelated ones will clear the floor.
-4. **Free-tier fit.** Whether the hosted embedder's daily allowance applies on a free plan is unverified.
+4. **Free-tier fit.** Whether Cloudflare's hosted embedder allowance applies on a free plan is unverified. So is whether sync traffic alone keeps a free Supabase project from pausing after a week idle.
+4a. **The Supabase embedder.** Which model a Supabase webhub can run or call is unverified. Calling Cloudflare's hosted model would make the fallback depend on the thing it backs up. A different model is allowed (§9: each webhub advertises its own), but needs its own measured floor.
 5. **Metadata.** Any webhub operator sees room ids, key ids, sizes and timing. Per-room sender keys would reduce this.
 6. **Forward secrecy** within an epoch.
 7. **Absent holders.** A transfer record would let a holder hand a room on.
@@ -234,8 +236,9 @@ Everything else (limits, floors, intervals, embedder, index, platform) is advert
 4. Core: record verification and canonical encoding, shared by all adapters.
 5. Core: ingest, sync and expiry over the `Store` and `Timer` services.
 6. Core: topic search over `Embedder` and `Index`.
-7. Cloudflare adapter and deployment.
-8. Single-binary adapter inside the localhub.
+7. Supabase adapter and deployment.
+8. Cloudflare adapter and deployment.
+8a. Single-binary adapter inside the localhub.
 9. Room key wrapping and bundle sealing in the client.
 10. Scribe in the bridge.
 11. Webhub selection and cursors in the localhub.

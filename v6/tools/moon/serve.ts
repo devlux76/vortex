@@ -25,7 +25,7 @@ if (target) {
   webSocketOrigin = new URL(`wss://${host.value}:${port.value}`).origin
 }
 const runtime = mkdtempSync(join(tmpdir(), 'vortex-moon-run-'))
-const bundle = await Bun.build({ entrypoints: [resolve(import.meta.dir, 'browser-peer.ts')], target: 'browser' })
+const bundle = await Bun.build({ entrypoints: [resolve(import.meta.dir, 'browser-peer.ts'), resolve(import.meta.dir, 'match-rule.ts')], target: 'browser' })
 if (!bundle.success) throw new Error(bundle.logs.join('\n'))
 const root = import.meta.dir
 const relay = target ? undefined : await startRelay()
@@ -40,7 +40,11 @@ const challenges = [
 ]
 const room = 'moon-webrtc'
 const decoyRoom = 'moon-gardening'
-const refresh = (peer: Peer) => Promise.all([peer.register(room, 120), peer.register(decoyRoom, 120)])
+// #16: a HARD same-domain decoy, from the calibration's webrtc family
+// (statements.json, webrtc-audio-echo): close to the target in cosine, so the
+// plain-text confirmation, not the margin, is what separates them.
+const hardDecoyRoom = 'moon-rtc-echo'
+const refresh = (peer: Peer) => Promise.all([peer.register(room, 120), peer.register(decoyRoom, 120), peer.register(hardDecoyRoom, 120)])
 if (relay) sun = await startPeer({ keyFile: resolve(runtime, 'sun.key'), relay: addr, onReject: (reason, conn) => console.error('Sun rejected Moon', reason, conn.id), onMessage: message => {
   pending = pending.then(async () => {
     const { from, text } = message
@@ -75,11 +79,13 @@ const headers = {
 const server = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
   const path = new URL(request.url).pathname
   if (path === '/browser-peer.js') return new Response(bundle.outputs[0], { headers: { ...headers, 'Content-Type': 'text/javascript' } })
+  if (path === '/match-rule.js') return new Response(bundle.outputs[1], { headers: { ...headers, 'Content-Type': 'text/javascript' } })
   if (path === '/favicon.ico') return new Response(null, { status: 204, headers })
   if (path === '/run-config') return Response.json(target ? { ...target, speaker: 'Clouds' } : { addr, speaker: 'Sun', peerId: String(sun!.id), namespaces: [
     { name: decoyRoom, topic: 'Growing garden vegetables in soil, watering seedlings, and composting' },
+    { name: hardDecoyRoom, topic: 'Users hear their own voice echoed back a second later during WebRTC calls on laptops without headphones' },
     { name: room, topic: 'A browser peer uses WebRTC or a libp2p relay to discover peers and exchange signed messages' },
-  ] }, { headers })
+  ], hardDecoy: hardDecoyRoom }, { headers })
   if (path === '/sun-transcript' && fixture) return Response.json(sunTranscript, { headers })
   let file = routes.get(path)
   if (!file) {

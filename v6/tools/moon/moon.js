@@ -1,5 +1,6 @@
 import { AutoConfig, AutoModel, AutoTokenizer, env, pipeline } from '/transformers.js'
 import { connect, createIdentity } from '/browser-peer.js'
+import { selectChannel, MATCH_FLOOR } from '/match-rule.js'
 
 const EMBEDDER = 'onnx-community/embeddinggemma-2-ONNX'
 const EMBEDDER_REVISION = 'daa72c51243991dfcaf9f9137d2c573d8f7790c0'
@@ -83,12 +84,36 @@ async function run() {
   state.peerId = peer.id
   try {
     const discovered = await peer.discover()
-    const ranked = scores.filter(candidate => discovered.includes(candidate.name)).sort((a, b) => b.score - a.score)
-    if (ranked.length < 2 || ranked[0].score - ranked[1].score < 0.1) throw new Error('Embedding scores did not distinguish the rendezvous topics')
-    const channel = ranked[0].name
+    // #9's rule: similarity ranks, it does not decide. Keep candidates above
+    // the recall floor (0.82 at 768 dims), then confirm on plain text with
+    // the local model. The hard same-domain decoy scores close to the target,
+    // so this confirmation is what separates them (the old 0.1-margin rule
+    // could not).
+    const topics = Object.fromEntries(config.namespaces.map(entry => [entry.name, entry.topic]))
+    const candidates = scores.map(score => ({ ...score, topic: topics[score.name] }))
+    const stage1 = selectChannel(candidates, discovered)
+    const ranked = stage1.ranked
+    if (ranked.length === 0) throw new Error('No rendezvous namespace above the 0.82 floor')
+    const numbered = ranked.map((candidate, i) => `${i + 1}. ${candidate.topic}`).join('\n')
+    const [decision] = await generate([
+      { role: 'system', content: 'You match a problem to one candidate topic. Answer with only the number of the best match.' },
+      { role: 'user', content: `Problem: ${TOPIC}\nCandidate topics:\n${numbered}\nNumber:` },
+    ], { max_new_tokens: 8, eos_token_id: endTokens, do_sample: false, return_full_text: false, tokenizer_encode_kwargs: { enable_thinking: false } })
+    const raw = (typeof decision.generated_text === 'string' ? decision.generated_text : decision.generated_text.findLast(message => message.role === 'assistant')?.content ?? '').trim()
+    const confirmedPick = Number((raw.match(/\d+/) ?? [])[0])
+    const stage2 = selectChannel(candidates, discovered, confirmedPick)
+    const channel = stage2.channel
     const peers = await peer.peers(channel)
     if (!peers.includes(config.peerId)) throw new Error(`The signed rendezvous record for ${config.speaker} was missing`)
-    check(`Discovered ${channel} and verified ${config.speaker}’s peer record`, { discovered, ranked, peers, relay: config.addr })
+    check(`Discovered ${channel} and verified ${config.speaker}’s peer record`, { discovered, floor: MATCH_FLOOR, ranked, confirmedPick, peers, relay: config.addr })
+    // Winds' #44 review: picking the hard same-domain decoy is a failure of
+    // the matching stage, not a WARNING row — the run must stop here.
+    if (config.hardDecoy !== undefined && channel === config.hardDecoy) {
+      throw new Error(`The same-domain decoy ${config.hardDecoy} was selected over the target`)
+    }
+    if (config.hardDecoy !== undefined && ranked.some(candidate => candidate.name === config.hardDecoy)) {
+      check(`Same-domain decoy ${config.hardDecoy} scored ${scores.find(score => score.name === config.hardDecoy).score.toFixed(3)} and was rejected by the 0.82-floor + confirmation rule`, { channel, hardDecoy: config.hardDecoy })
+    }
     const ttl = await peer.register(channel)
     check('Moon announced its signed peer record', { channel, ttl, peerId: peer.id, addresses: peer.addr })
     const send = async (turn, text) => {

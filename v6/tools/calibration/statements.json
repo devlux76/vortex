@@ -1,0 +1,205 @@
+{
+  "about": "Labelled problem statements for calibrating semantic-match thresholds (v5 TODO H3). Statements with the same topic are related; topics in the same family share vocabulary but are different problems (hard negatives). Written by Claude of the Clouds, 2026-11-12.",
+  "topics": [
+    { "family": "webrtc", "topic": "webrtc-nat-traversal", "texts": [
+      "Two peers behind home routers never establish a direct WebRTC connection; ICE only ever succeeds through the TURN relay.",
+      "Hole punching fails between our agents: candidates are gathered but connectivity checks time out unless traffic is relayed.",
+      "Direct peer-to-peer path does not come up across NAT; the connection always falls back to the relay server.",
+      "STUN gives us a public address but the WebRTC connection between the two NATed nodes still never goes direct."] },
+    { "family": "webrtc", "topic": "webrtc-audio-echo", "texts": [
+      "Users hear their own voice echoed back a second later during WebRTC calls on laptops without headphones.",
+      "Acoustic echo cancellation does not seem to work in our browser voice chat; remote side hears itself.",
+      "Feedback loop in the audio call: speaker output is picked up by the microphone and sent back to the caller.",
+      "Echo in WebRTC voice calls on Chrome, getUserMedia echoCancellation is set but the other party still hears an echo."] },
+    { "family": "webrtc", "topic": "webrtc-datachannel-ordering", "texts": [
+      "Messages on an RTCDataChannel arrive out of order even though we never set ordered to false.",
+      "Data channel delivers chunks of a file in the wrong sequence, corrupting the reassembled transfer.",
+      "Our peer messaging over WebRTC data channels sometimes processes message 5 before message 4.",
+      "Reassembly of a large payload sent over a data channel fails because fragments come back reordered."] },
+    { "family": "webrtc", "topic": "webrtc-simulcast-bandwidth", "texts": [
+      "Video quality never ramps up in our SFU; simulcast layers stay on the lowest resolution despite plenty of bandwidth.",
+      "Bandwidth estimation in the WebRTC sender keeps the bitrate tiny, so the high simulcast layer is never sent.",
+      "Our video conferencing sends only the 180p layer; the 720p simulcast encoding is always inactive.",
+      "Congestion control seems stuck low and the selective forwarding unit never switches subscribers to the high-quality stream."] },
+    { "family": "postgres", "topic": "postgres-deadlock", "texts": [
+      "Two background jobs updating the same rows in different order keep failing with deadlock detected in Postgres.",
+      "We see ERROR: deadlock detected several times an hour when concurrent transactions touch orders and invoices.",
+      "Concurrent writers lock each other's rows and Postgres aborts one transaction with a deadlock.",
+      "Batch update job and API requests deadlock on the accounts table; one of them is always rolled back."] },
+    { "family": "postgres", "topic": "postgres-slow-planner", "texts": [
+      "A query that used an index yesterday now does a sequential scan and takes 40 seconds after the table grew.",
+      "Postgres picks a terrible plan with a nested loop over millions of rows; EXPLAIN shows wildly wrong row estimates.",
+      "Query performance collapsed because the planner stopped using our index, statistics look stale.",
+      "Row count estimates in EXPLAIN ANALYZE are off by a factor of a thousand and the chosen join order is very slow."] },
+    { "family": "postgres", "topic": "postgres-replication-lag", "texts": [
+      "Read replicas fall minutes behind the primary during the nightly batch, so users read stale data.",
+      "Streaming replication lag grows to several gigabytes of WAL whenever we run large writes.",
+      "Our standby keeps falling behind; replay lag climbs and reads from the replica return old rows.",
+      "The hot standby cannot keep up with WAL from the primary under heavy write load."] },
+    { "family": "postgres", "topic": "postgres-pool-exhaustion", "texts": [
+      "The app throws 'remaining connection slots are reserved' and Postgres refuses new connections under load.",
+      "Our connection pool is exhausted: requests wait for a database connection until they time out.",
+      "Too many clients already: every service instance opens its own pool and we hit max_connections.",
+      "Under traffic spikes all pooled database connections are checked out and new queries block."] },
+    { "family": "kubernetes", "topic": "k8s-oom-crashloop", "texts": [
+      "Pods restart in CrashLoopBackOff and describe shows OOMKilled with exit code 137.",
+      "Our container exceeds its memory limit and Kubernetes keeps killing and restarting it.",
+      "The service pod is OOMKilled a few minutes after start, then backs off and restarts again.",
+      "Java workload in Kubernetes gets killed for memory even though the heap is set below the limit."] },
+    { "family": "kubernetes", "topic": "k8s-dns-resolution", "texts": [
+      "Pods intermittently fail to resolve service names; nslookup inside the cluster times out.",
+      "CoreDNS lookups from our pods are slow and sometimes fail, causing random connection errors.",
+      "Service discovery breaks: calls to other services by DNS name fail with name resolution errors in the cluster.",
+      "In-cluster DNS has five second delays on some lookups, looks like conntrack races on UDP."] },
+    { "family": "kubernetes", "topic": "k8s-hpa-not-scaling", "texts": [
+      "The horizontal pod autoscaler never adds replicas even when CPU is pegged at 100 percent.",
+      "HPA shows unknown for current metrics so the deployment stays at two pods under load.",
+      "Autoscaling does not kick in; metrics-server seems to report nothing for our pods.",
+      "Our deployment should scale out on CPU but the autoscaler target stays at <unknown>."] },
+    { "family": "kubernetes", "topic": "k8s-pvc-pending", "texts": [
+      "PersistentVolumeClaim stays Pending forever and the stateful pod never schedules.",
+      "Volume claim is not bound: no storage class provisions a volume for our StatefulSet.",
+      "Pod is stuck because its PVC waits for a volume that the provisioner never creates.",
+      "Database pod cannot start; describe pvc says waiting for first consumer and nothing gets provisioned."] },
+    { "family": "react", "topic": "react-hydration-mismatch", "texts": [
+      "Next.js logs 'Text content does not match server-rendered HTML' and the page flickers on load.",
+      "Hydration fails because the server renders a different date string than the browser.",
+      "React warns about a hydration mismatch and re-renders the whole tree on the client.",
+      "Server-side rendered markup differs from the first client render, causing hydration errors."] },
+    { "family": "react", "topic": "react-rerender-storm", "texts": [
+      "Typing in one input re-renders the entire form of 200 fields and the UI becomes sluggish.",
+      "React Profiler shows every component rendering on each keystroke because a context value changes.",
+      "Our dashboard re-renders hundreds of children whenever any piece of global state updates.",
+      "Performance problem: a context provider causes all consumers to re-render on unrelated updates."] },
+    { "family": "react", "topic": "react-stale-closure", "texts": [
+      "Inside a setInterval callback in useEffect the state value is always the initial one.",
+      "Event handler registered in an effect reads an old copy of state, a stale closure in hooks.",
+      "Our timer callback logs the same count forever even though the counter updates on screen.",
+      "useEffect with an empty dependency array captures stale props, so the callback uses outdated values."] },
+    { "family": "react", "topic": "react-suspense-waterfall", "texts": [
+      "Nested Suspense boundaries fetch data one after another, so the page loads in a slow waterfall.",
+      "Each child component starts its request only after its parent finished loading, sequential network requests.",
+      "Data fetching with Suspense is serialized; requests that could run in parallel run one by one.",
+      "Route takes four seconds because components suspend in sequence instead of fetching concurrently."] },
+    { "family": "rust", "topic": "rust-async-borrow", "texts": [
+      "Holding a reference across an await point makes the future not Send and tokio::spawn refuses it.",
+      "Compiler error: future cannot be sent between threads safely because a MutexGuard lives across .await.",
+      "Borrow checker complains in async code: borrowed value does not live long enough inside the spawned task.",
+      "Async function captures a non-Send reference, so we cannot spawn it on the multithreaded runtime."] },
+    { "family": "rust", "topic": "rust-musl-linking", "texts": [
+      "Static build for x86_64-unknown-linux-musl fails at link time with undefined references to OpenSSL.",
+      "Cross-compiling our Rust binary to musl breaks because a C dependency will not link statically.",
+      "Linker errors when targeting musl: cannot find -lssl and libc symbols are missing.",
+      "We want a fully static Rust executable but the musl target build fails in the linking step."] },
+    { "family": "rust", "topic": "rust-tokio-blocking", "texts": [
+      "A synchronous file read inside an async handler stalls every other request on the tokio runtime.",
+      "Our async server freezes under load because CPU-heavy work blocks the executor threads.",
+      "Latency spikes: a blocking call in async code starves other tasks; should we use spawn_blocking?",
+      "Tokio worker threads are blocked by a long computation and no other futures make progress."] },
+    { "family": "rust", "topic": "rust-trait-object-lifetime", "texts": [
+      "Box<dyn Trait> stored in a struct needs a lifetime and the compiler demands 'static we cannot provide.",
+      "Error about lifetime bounds on a trait object: the parameter type may not live long enough.",
+      "Storing a closure as dyn Fn in a struct field produces confusing lifetime errors.",
+      "We cannot return a boxed trait object that borrows from self without the compiler rejecting the lifetime."] },
+    { "family": "ci", "topic": "ci-flaky-test", "texts": [
+      "An integration test passes locally but fails about one run in ten on CI with a timeout.",
+      "Our test suite is flaky in GitHub Actions: the same commit goes red and green on reruns.",
+      "Intermittent CI failure in the websocket test, probably a race between server start and the client.",
+      "Nondeterministic test failures in the pipeline that we cannot reproduce on developer machines."] },
+    { "family": "ci", "topic": "ci-docker-cache", "texts": [
+      "Docker builds in CI reinstall all dependencies every time because the layer cache is never reused.",
+      "Every pipeline run rebuilds the image from scratch; buildx cache-from does not seem to take effect.",
+      "Our container build takes 15 minutes since the npm install layer is invalidated on every commit.",
+      "Image layer caching is not working on the CI runners so builds are slow."] },
+    { "family": "ci", "topic": "ci-lockfile-conflicts", "texts": [
+      "Almost every pull request conflicts in package-lock.json and resolving it by hand breaks installs.",
+      "Merge conflicts in the lockfile keep happening when two branches add dependencies.",
+      "Rebasing feature branches always produces lockfile conflicts that are painful to resolve correctly.",
+      "Concurrent dependency updates cause conflicting yarn.lock changes across pull requests."] },
+    { "family": "ci", "topic": "ci-slow-monorepo-checkout", "texts": [
+      "Cloning our monorepo in CI takes several minutes and dominates the pipeline time.",
+      "Git checkout of the large repository is slow on runners; shallow clone still downloads gigabytes.",
+      "Pipeline spends most of its time fetching the monorepo history and large binary files.",
+      "We need faster checkouts: sparse checkout or partial clone for a huge repository in CI."] },
+    { "family": "ml", "topic": "ml-cuda-oom", "texts": [
+      "Training crashes with CUDA out of memory on the second epoch even with a small batch size.",
+      "GPU memory keeps growing during training until PyTorch raises an out-of-memory error.",
+      "Our fine-tuning job runs out of VRAM; reducing batch size only delays the crash.",
+      "torch.cuda.OutOfMemoryError while training a transformer on a 24 GB card."] },
+    { "family": "ml", "topic": "ml-nan-loss", "texts": [
+      "The training loss becomes NaN after a few hundred steps with mixed precision enabled.",
+      "Gradients explode and loss turns into NaN, learning rate warmup did not help.",
+      "Our model's loss goes to inf then NaN partway through training.",
+      "fp16 training diverges with NaN values appearing in the logits."] },
+    { "family": "ml", "topic": "ml-webgpu-stale-buffer", "texts": [
+      "A WebGPU compute pass sometimes reads stale data from a storage buffer written by the previous pass.",
+      "Intermittent wrong results in our WebGPU shader, looks like missing synchronization between dispatches.",
+      "Browser GPU simulation glitches: compute shader output is occasionally from the last frame.",
+      "Buffer contents read back from WebGPU are inconsistent, maybe a resource is destroyed while in use."] },
+    { "family": "ml", "topic": "ml-tokenizer-mismatch", "texts": [
+      "Embeddings from the server and the browser differ because they tokenize the same text differently.",
+      "Our ONNX model gives different outputs than the Python reference; the tokenizer versions disagree.",
+      "Tokenization mismatch between the training pipeline and inference produces garbage predictions.",
+      "Two builds of the same model produce different vectors; special tokens are handled differently."] },
+    { "family": "network", "topic": "net-tls-handshake", "texts": [
+      "Clients fail with SSL handshake errors after we rotated the certificate; the chain seems incomplete.",
+      "TLS connections to our API fail with unknown authority on some devices but work in the browser.",
+      "Handshake failure: the server does not send the intermediate certificate so verification fails.",
+      "After renewing the certificate, older clients cannot connect and report certificate verify failed."] },
+    { "family": "network", "topic": "net-mtu-fragmentation", "texts": [
+      "Large packets disappear over the VPN tunnel while small requests work, classic MTU problem.",
+      "SSH connects but hangs when output is large, path MTU discovery seems broken across the tunnel.",
+      "HTTP requests with big bodies stall over WireGuard; lowering the MTU fixes it.",
+      "Packets above a certain size are silently dropped, ICMP fragmentation needed is filtered."] },
+    { "family": "network", "topic": "net-ipv6-only", "texts": [
+      "Our service is unreachable from IPv6-only mobile networks because it has no AAAA record.",
+      "Clients on an IPv6-only network cannot connect; we only listen on IPv4.",
+      "Connectivity fails from NAT64 networks since the app hardcodes an IPv4 literal.",
+      "Users on IPv6-only carriers time out reaching our API."] },
+    { "family": "network", "topic": "net-proxy-websocket", "texts": [
+      "Corporate proxy blocks WebSocket upgrades so our realtime client never connects.",
+      "Behind an HTTPS inspecting proxy, the websocket handshake fails and we need a long-polling fallback.",
+      "Our agent runs in a sandbox whose egress proxy only allows plain HTTPS requests, no WebSockets or UDP.",
+      "WebSocket connections are refused by the outbound proxy, only ordinary HTTP requests get through."] },
+    { "family": "beam", "topic": "beam-genserver-timeout", "texts": [
+      "GenServer.call times out under load because the server process is stuck on a slow HTTP request.",
+      "One Elixir GenServer becomes a bottleneck; callers queue up and hit the five second timeout.",
+      "Synchronous calls to a single process block behind an external request, causing timeouts across the app.",
+      "Our BEAM process mailbox grows and calls time out because the handler does blocking work."] },
+    { "family": "beam", "topic": "beam-ets-memory", "texts": [
+      "ETS table memory grows without bound in our Elixir node until it is killed.",
+      "Our cache in ETS never evicts entries and the BEAM memory usage keeps climbing.",
+      "Memory leak in Erlang: an ETS table keeps accumulating rows from every request.",
+      "observer shows one ETS table taking gigabytes; entries are inserted but never deleted."] },
+    { "family": "beam", "topic": "beam-hot-upgrade", "texts": [
+      "Hot code upgrade with a release appup fails and the node crashes during the state migration.",
+      "code_change callback is not invoked correctly when we upgrade the running Erlang release.",
+      "Live upgrade of our OTP application loses GenServer state; the appup instructions seem wrong.",
+      "Release handler upgrade breaks the supervision tree during a hot code swap."] },
+    { "family": "beam", "topic": "beam-netsplit", "texts": [
+      "Our distributed Erlang cluster splits into two halves after a network blip and both sides keep accepting writes.",
+      "Netsplit in the Elixir cluster: global registry has duplicate processes after nodes reconnect.",
+      "Nodes disconnect briefly and when they rejoin we have conflicting state from both partitions.",
+      "Partition tolerance problem in distributed Erlang: split-brain after a nodedown event."] },
+    { "family": "auth", "topic": "auth-jwt-clock-skew", "texts": [
+      "Freshly issued JWTs are rejected as not yet valid on some servers whose clocks are behind.",
+      "Token validation fails intermittently with iat in the future; servers have clock drift.",
+      "Our API rejects valid tokens because the nbf claim is checked against a skewed clock.",
+      "Signature verification passes but the token is considered expired on one node due to time skew."] },
+    { "family": "auth", "topic": "auth-oauth-redirect", "texts": [
+      "OAuth login fails with redirect_uri_mismatch after we moved the app behind a reverse proxy.",
+      "The identity provider rejects our callback URL because it sees http instead of https.",
+      "Authorization code flow breaks: registered redirect URI and the one we send differ by a trailing slash.",
+      "Login with Google returns an error about the redirect URI not matching the configured one."] },
+    { "family": "auth", "topic": "auth-csrf-spa", "texts": [
+      "Our single-page app with cookie sessions is vulnerable to CSRF; how should we add tokens?",
+      "Cross-site request forgery protection for a React frontend calling a cookie-authenticated API.",
+      "SameSite cookies are not enough for our older browsers, we need CSRF tokens in the SPA.",
+      "State-changing POST requests from the SPA lack CSRF protection and a pentest flagged it."] },
+    { "family": "auth", "topic": "auth-password-hash-migration", "texts": [
+      "We need to migrate stored password hashes from SHA-1 to Argon2 without forcing every user to reset.",
+      "Upgrading legacy bcrypt hashes to a stronger algorithm transparently at next login.",
+      "Old user records use unsalted MD5 password hashes; plan a migration to a modern KDF.",
+      "Rehash passwords on login to move the user table from PBKDF2 to Argon2id."] }
+  ]
+}

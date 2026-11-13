@@ -1,0 +1,241 @@
+{
+  "model": "onnx-community/embeddinggemma-2-ONNX",
+  "revision": "daa72c51243991dfcaf9f9137d2c573d8f7790c0",
+  "statements": 160,
+  "topics": 40,
+  "families": 10,
+  "dims": {
+    "128": {
+      "related": {
+        "n": 240,
+        "min": 0.8467742940185617,
+        "p05": 0.8845647380669329,
+        "median": 0.9228480882823756
+      },
+      "hardNegative": {
+        "n": 960,
+        "median": 0.8787558394481301,
+        "p95": 0.9176689053027374,
+        "p99": 0.9311757737576303,
+        "max": 0.9429546841866486
+      },
+      "easyNegative": {
+        "n": 11520,
+        "median": 0.853983031577686,
+        "p99": 0.9085038020329668,
+        "max": 0.9439069358438382
+      },
+      "provisional": {
+        "threshold": 0.85,
+        "precision": 0.031373063796271985,
+        "recall": 0.9958333333333333,
+        "f1": 0.060829727666072794,
+        "hardFalsePositives": 829
+      },
+      "bestF1": {
+        "threshold": 0.921,
+        "precision": 0.7142857142857143,
+        "recall": 0.5416666666666666,
+        "f1": 0.6161137440758293,
+        "hardFalsePositives": 28
+      },
+      "precision99": {
+        "threshold": 0.944,
+        "precision": 1,
+        "recall": 0.14583333333333334,
+        "f1": 0.2545454545454546,
+        "hardFalsePositives": 0
+      },
+      "heldOut": [
+        {
+          "threshold": 0.914,
+          "precision": 0.6532258064516129,
+          "recall": 0.675,
+          "f1": 0.6639344262295083,
+          "hardFalsePositives": 26
+        },
+        {
+          "threshold": 0.915,
+          "precision": 0.6576576576576577,
+          "recall": 0.6083333333333333,
+          "f1": 0.6320346320346321,
+          "hardFalsePositives": 31
+        }
+      ]
+    },
+    "256": {
+      "related": {
+        "n": 240,
+        "min": 0.7930168276096199,
+        "p05": 0.8281692491378669,
+        "median": 0.884279761382189
+      },
+      "hardNegative": {
+        "n": 960,
+        "median": 0.8185093505759332,
+        "p95": 0.8701772416655282,
+        "p99": 0.888151786509183,
+        "max": 0.9059342930780706
+      },
+      "easyNegative": {
+        "n": 11520,
+        "median": 0.7794148580003452,
+        "p99": 0.8524375997262532,
+        "max": 0.9021941453778466
+      },
+      "provisional": {
+        "threshold": 0.82,
+        "precision": 0.1283598464070214,
+        "recall": 0.975,
+        "f1": 0.22685409597673292,
+        "hardFalsePositives": 463
+      },
+      "bestF1": {
+        "threshold": 0.872,
+        "precision": 0.7169811320754716,
+        "recall": 0.6333333333333333,
+        "f1": 0.672566371681416,
+        "hardFalsePositives": 41
+      },
+      "precision99": {
+        "threshold": 0.906,
+        "precision": 1,
+        "recall": 0.24583333333333332,
+        "f1": 0.3946488294314381,
+        "hardFalsePositives": 0
+      },
+      "heldOut": [
+        {
+          "threshold": 0.859,
+          "precision": 0.6216216216216216,
+          "recall": 0.7666666666666667,
+          "f1": 0.6865671641791045,
+          "hardFalsePositives": 37
+        },
+        {
+          "threshold": 0.871,
+          "precision": 0.6788990825688074,
+          "recall": 0.6166666666666667,
+          "f1": 0.6462882096069871,
+          "hardFalsePositives": 29
+        }
+      ]
+    },
+    "512": {
+      "related": {
+        "n": 240,
+        "min": 0.791035080330121,
+        "p05": 0.821847819463144,
+        "median": 0.8748113245178591
+      },
+      "hardNegative": {
+        "n": 960,
+        "median": 0.8085313404188357,
+        "p95": 0.860845834849389,
+        "p99": 0.8786630599769867,
+        "max": 0.9008680967966494
+      },
+      "easyNegative": {
+        "n": 11520,
+        "median": 0.7659882163619773,
+        "p99": 0.8397871835350955,
+        "max": 0.897035584161476
+      },
+      "provisional": {
+        "threshold": 0.8,
+        "precision": 0.09818481848184818,
+        "recall": 0.9916666666666667,
+        "f1": 0.17867867867867868,
+        "hardFalsePositives": 576
+      },
+      "bestF1": {
+        "threshold": 0.86,
+        "precision": 0.694560669456067,
+        "recall": 0.6916666666666667,
+        "f1": 0.6931106471816284,
+        "hardFalsePositives": 50
+      },
+      "precision99": {
+        "threshold": 0.901,
+        "precision": 1,
+        "recall": 0.2,
+        "f1": 0.33333333333333337,
+        "hardFalsePositives": 0
+      },
+      "heldOut": [
+        {
+          "threshold": 0.858,
+          "precision": 0.7543859649122807,
+          "recall": 0.7166666666666667,
+          "f1": 0.735042735042735,
+          "hardFalsePositives": 19
+        },
+        {
+          "threshold": 0.86,
+          "precision": 0.6776859504132231,
+          "recall": 0.6833333333333333,
+          "f1": 0.6804979253112033,
+          "hardFalsePositives": 37
+        }
+      ]
+    },
+    "768": {
+      "related": {
+        "n": 240,
+        "min": 0.7854865069412968,
+        "p05": 0.8193112824295693,
+        "median": 0.8723304974863444
+      },
+      "hardNegative": {
+        "n": 960,
+        "median": 0.8050430465705274,
+        "p95": 0.8588785894227016,
+        "p99": 0.8773434052027989,
+        "max": 0.8992578269246054
+      },
+      "easyNegative": {
+        "n": 11520,
+        "median": 0.7636465626254602,
+        "p99": 0.8375650112392232,
+        "max": 0.8930863892218475
+      },
+      "provisional": {
+        "threshold": 0.8,
+        "precision": 0.1069494584837545,
+        "recall": 0.9875,
+        "f1": 0.19299674267100977,
+        "hardFalsePositives": 550
+      },
+      "bestF1": {
+        "threshold": 0.863,
+        "precision": 0.7549019607843137,
+        "recall": 0.6416666666666667,
+        "f1": 0.6936936936936938,
+        "hardFalsePositives": 34
+      },
+      "precision99": {
+        "threshold": 0.9,
+        "precision": 1,
+        "recall": 0.1875,
+        "f1": 0.3157894736842105,
+        "hardFalsePositives": 0
+      },
+      "heldOut": [
+        {
+          "threshold": 0.851,
+          "precision": 0.6929133858267716,
+          "recall": 0.7333333333333333,
+          "f1": 0.7125506072874495,
+          "hardFalsePositives": 26
+        },
+        {
+          "threshold": 0.864,
+          "precision": 0.7448979591836735,
+          "recall": 0.6083333333333333,
+          "f1": 0.6697247706422018,
+          "hardFalsePositives": 23
+        }
+      ]
+    }
+  }
+}

@@ -10,7 +10,8 @@ import { lpStream } from '@libp2p/utils'
 import { multiaddr, type Multiaddr } from '@multiformats/multiaddr'
 import type { Connection, Libp2p, PeerId, PrivateKey, Stream } from '@libp2p/interface'
 import { loadOrCreateKey } from './identity.ts'
-import { MSG_PROTOCOL, signMessage, verifyMessage, type P2PMessage } from './message.ts'
+import { MSG_PROTOCOL, screenOutbound, signMessage, verifyMessage, type P2PMessage } from './message.ts'
+import { DedupStore } from './dedup.ts'
 import { rendezvousDiscover, rendezvousRegister, type Discovered } from './rendezvous.ts'
 import { buildTransports, type IceConfig } from './transports.ts'
 
@@ -30,6 +31,8 @@ export interface PeerOptions {
   onReject?: (reason: string, conn: Connection) => void
   /** Reservation wait, ms. */
   timeoutMs?: number
+  /** Dedup database path. Default: `<keyFile>.dedup.sqlite` (persisted, so a restart does not reopen replay). */
+  dedupFile?: string
 }
 
 export interface Ack { ok: boolean, error?: string }
@@ -91,6 +94,7 @@ export async function startPeer (opts: PeerOptions): Promise<Peer> {
   })
   const self = node.peerId
   const inbox: P2PMessage[] = []
+  const dedup = new DedupStore(opts.dedupFile ?? `${opts.keyFile}.dedup.sqlite`)
 
   async function onStream (stream: Stream, conn: Connection): Promise<void> {
     const lp = lpStream(stream, { maxDataLength: MAX_FRAME })
@@ -98,6 +102,11 @@ export async function startPeer (opts: PeerOptions): Promise<Peer> {
     try {
       const raw = JSON.parse(new TextDecoder().decode((await lp.read()).subarray())) as unknown
       const msg = await verifyMessage(raw, conn.remotePeer, self)
+      // Dedup on (from, id), persisted (PR #8, Sun's QA). Claimed only after
+      // the signature verifies, so unsigned noise cannot fill the store.
+      const claim = dedup.claim(msg.from, msg.id)
+      if (claim === 'used') throw new Error('duplicate message')
+      if (claim === 'full') throw new Error('too many messages; retry shortly')
       inbox.push(msg)
       opts.onMessage?.(msg, conn)
       ack = { ok: true }
@@ -147,13 +156,19 @@ export async function startPeer (opts: PeerOptions): Promise<Peer> {
     inbox,
     circuitAddr,
     send: async (to, text, via = 'relay') => {
+      // A6 outbound screen before signing: p2p text never passes the hub, so
+      // the credential screen must run here too (Clouds' point 3 on #8).
+      screenOutbound(text)
       const dest = typeof to === 'string' ? peerIdFromString(to) : to
       return await sendFrame(dest, await signMessage(privateKey, self, dest, text), via)
     },
     sendRaw: async (to, frame, via = 'relay') => await sendFrame(to, frame, via),
     register: async (ns, ttl) => await rendezvousRegister(node, privateKey, relayId, ns, ttl),
     discover: async (ns) => (await rendezvousDiscover(node, relayId, ns)).peers.filter(p => !p.id.equals(self)),
-    stop: async () => { await node.stop() }
+    stop: async () => {
+      await node.stop()
+      dedup.close()
+    }
   }
 }
 

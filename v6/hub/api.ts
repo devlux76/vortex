@@ -9,6 +9,10 @@ import type { HubConfig } from './config.ts'
 import { PRINCIPAL_RE, ROOM_RE, BINDING_RE } from './config.ts'
 import { fitSingle, type Bounds } from '../client/render.ts'
 import { findSecret, SecretRefusals } from './secrets.ts'
+import { EdgeAuth, EdgeAuthError, type EdgeIdentity } from './edge-auth.ts'
+import { AUTH_HEADER, STREAM_AUTH_HEADER } from '../client/edge-sign.ts'
+import { recentInRooms } from './store-log.ts'
+import { signedUpgrade, openPendingStream, answerPendingStream, closePendingStream } from './api-stream.ts'
 
 const EVIDENCE_KINDS: Evidence[] = ['host-accepted', 'transport-written', 'hook-returned']
 
@@ -42,9 +46,17 @@ export class Api {
   /** Refused credential-shaped sends per principal since start (A6 §2). */
   readonly refusals = new SecretRefusals()
   readonly deps: HubServerDeps
+  /** Hub id bound into signed requests: the TLS certificate fingerprint (A7 §3). */
+  hubId: string | undefined
+  readonly edgeAuth: EdgeAuth
+  /** Time a signed stream has to answer its challenge (A7 §3); a test seam. */
+  streamAuthTimeoutMs = 10_000
+  /** Requests authenticated by signature, keyed by the rebuilt Request object. */
+  private signed = new WeakMap<Request, EdgeIdentity>()
 
   constructor (deps: HubServerDeps) {
     this.deps = deps
+    this.edgeAuth = new EdgeAuth(deps.store, () => this.hubId)
   }
 
   /** Test seam: clear the sliding send-rate windows. */
@@ -72,6 +84,8 @@ export class Api {
   }
 
   private authorized (req: Request): string | undefined {
+    const edge = this.signed.get(req)
+    if (edge !== undefined) return edge.principal
     const auth = req.headers.get('authorization') ?? ''
     if (!auth.startsWith('Bearer ')) return undefined
     return this.deps.store.verifyToken(auth.slice(7))
@@ -81,6 +95,22 @@ export class Api {
     const url = new URL(req.url)
     const path = url.pathname
     const isUpgrade = path.startsWith('/v1/bindings/') && path.endsWith('/stream') && req.method === 'GET'
+    if (isUpgrade && req.headers.has(STREAM_AUTH_HEADER)) return signedUpgrade(this, req, server, path)
+    if (req.headers.has(AUTH_HEADER)) {
+      // Signed edge request (A7 §3). Streams authenticate with VX-Stream-Auth
+      // and a challenge (api-stream.ts), never with a per-request VX-Auth.
+      if (isUpgrade) return new Response('streams authenticate with VX-Stream-Auth (challenge-response), not VX-Auth', { status: 401 })
+      if (req.headers.has('authorization')) return json({ error: 'send VX-Auth or Authorization, not both' }, 400)
+      try {
+        const body = new Uint8Array(await req.arrayBuffer())
+        const identity = await this.edgeAuth.verify(req, body)
+        req = new Request(req.url, { method: req.method, headers: req.headers, body: body.length > 0 ? body : undefined })
+        this.signed.set(req, identity)
+      } catch (e) {
+        if (e instanceof EdgeAuthError) return json({ error: e.message }, e.status)
+        throw e
+      }
+    }
     if (isUpgrade) {
       const name = path.slice('/v1/bindings/'.length, -'/stream'.length)
       if (!BINDING_RE.test(name)) return new Response('bad binding name', { status: 400 })
@@ -101,6 +131,14 @@ export class Api {
 
   private async apiFetch (req: Request, url: URL, path: string): Promise<Response> {
     const method = req.method
+    // An unsealed key reaches only what its named rooms need (A7 §3a): post,
+    // read its rooms, and recent (filtered). Not DMs, status or bindings,
+    // whatever the principal itself may do with another key (Sun, #7 finding 2).
+    if (this.signed.get(req)?.key.custody === 'unsealed' &&
+      !((method === 'POST' && path === '/v1/messages') ||
+        (method === 'GET' && (/^\/v1\/rooms\/[^/]+\/log$/.test(path) || path === '/v1/recent')))) {
+      return json({ error: 'an unsealed key may only post to and read its named rooms' }, 403)
+    }
     if (method === 'POST' && path === '/v1/messages') return this.postMessages(req)
     if (method === 'PUT' && /^\/v1\/bindings\/[^/]+$/.test(path)) return this.putBinding(req, url, path.slice('/v1/bindings/'.length))
     if (method === 'DELETE' && /^\/v1\/bindings\/[^/]+\/[^/]+$/.test(path)) return this.deleteBinding(req, path)
@@ -161,8 +199,15 @@ export class Api {
         room = body.room
       } else room = 'all'
     }
+    // An unsealed edge key (A7 §2, cloud peers) posts only to its named rooms.
+    const edge = this.signed.get(req)
+    if (edge?.key.custody === 'unsealed') {
+      if (scope === 'dm') return json({ error: 'an unsealed key may not send DMs' }, 403)
+      if (!(edge.key.rooms ?? []).includes(room!)) return json({ error: `this key may post only to: ${(edge.key.rooms ?? []).join(', ')}` }, 403)
+    }
     let reply_to: string | undefined
-    let human_turn = body.human_turn === true
+    // An edge client is driven by a model, so it never reports a human turn (§8.5).
+    let human_turn = body.human_turn === true && edge === undefined
     let reply_author: string | undefined
     let reply_ts: number | undefined
     if (body.reply_to !== undefined) {
@@ -206,6 +251,12 @@ export class Api {
     return json({ id: stored.id, seq: stored.seq }, 200)
   }
 
+  /** The room list of an unsealed signing key, or undefined when the request is not one. */
+  private unsealedRooms (req: Request): string[] | undefined {
+    const key = this.signed.get(req)?.key
+    return key?.custody === 'unsealed' ? (key.rooms ?? []) : undefined
+  }
+
   canRead (principal: string, m: StoredMessage): boolean {
     if (principal === 'operator') return true // explicit privileged access (§8.2)
     if (m.scope === 'dm') return m.from === principal || (m.to.length === 1 && m.to[0] === principal)
@@ -231,6 +282,7 @@ export class Api {
   private async putBinding (req: Request, _url: URL, name: string): Promise<Response> {
     const principal = this.authorized(req)
     if (principal === undefined) return json({ error: 'unauthorized' }, 401)
+    if (this.signed.get(req)?.key.custody === 'unsealed') return json({ error: 'an unsealed key may not create delivery bindings' }, 403)
     let body: { rooms?: unknown }
     try { body = await req.json() as { rooms?: unknown } } catch { return json({ error: 'invalid JSON body' }, 400) }
     if (body === null || typeof body !== 'object' || Array.isArray(body)) return json({ error: 'invalid body' }, 400)
@@ -263,7 +315,8 @@ export class Api {
     if (principal === undefined) return json({ error: 'unauthorized' }, 401)
     const room = path.slice('/v1/rooms/'.length, -'/log'.length)
     if (!ROOM_RE.test(room)) return json({ error: 'invalid room' }, 400)
-    if (principal !== 'operator' && !this.deps.store.isMember(room, principal)) {
+    const keyRooms = this.unsealedRooms(req)
+    if (principal !== 'operator' && (!this.deps.store.isMember(room, principal) || (keyRooms !== undefined && !keyRooms.includes(room)))) {
       // Membership exists; never confirm room contents to non-members.
       return json({ error: 'not a member of this room' }, 404)
     }
@@ -297,9 +350,13 @@ export class Api {
     const limit = clampInt(url.searchParams.get('limit'), 1, this.deps.cfg.logLimitMax, 200)
     // Visible to the caller: member rooms + own DMs (A1 /vx-recent source);
     // the operator reads everything (§8.2 operator sovereignty).
-    const messages = principal === 'operator'
-      ? this.deps.store.recentGlobal(limit)
-      : this.deps.store.recentFor(principal, limit)
+    // An unsealed key's rooms scope the query itself, before the limit (Sun, #7 re-QA).
+    const keyRooms = this.unsealedRooms(req)
+    const messages = keyRooms !== undefined
+      ? recentInRooms(this.deps.store, principal, keyRooms, limit)
+      : principal === 'operator'
+        ? this.deps.store.recentGlobal(limit)
+        : this.deps.store.recentFor(principal, limit)
     return json({ messages }, 200)
   }
 
@@ -342,6 +399,7 @@ export class Api {
   // ------------------------------------------------------------------
 
   private onOpen (ws: ServerWebSocket): void {
+    if (openPendingStream(this, ws)) return
     const data = ws.data as unknown as { principal: string; name: string }
     const socket = socketOf(ws)
     if (this.deps.delivery.attach(socket, data.principal, data.name)) return
@@ -349,6 +407,7 @@ export class Api {
   }
 
   private async onMessage (ws: ServerWebSocket, raw: string | Buffer): Promise<void> {
+    if (await answerPendingStream(this, ws, raw)) return
     const data = ws.data as unknown as { principal: string; name: string }
     let frame: any
     try { frame = JSON.parse(typeof raw === 'string' ? raw : raw.toString('utf8')) } catch {
@@ -392,6 +451,7 @@ export class Api {
   }
 
   private onClose (ws: ServerWebSocket): void {
+    if (closePendingStream(ws)) return // never attached
     const data = ws.data as unknown as { principal: string; name: string }
     this.deps.delivery.detach(socketOf(ws), data.principal, data.name)
   }
@@ -414,7 +474,7 @@ function clampInt (raw: string | null, min: number, max: number, fallback: numbe
  * identity to decide ownership, so a fresh wrapper per frame would make every
  * acknowledgment look stale and every close look foreign (§8.3 takeover).
  */
-function socketOf (ws: ServerWebSocket): SocketLike {
+export function socketOf (ws: ServerWebSocket): SocketLike {
   const data = ws.data as unknown as { sock?: SocketLike }
   return (data.sock ??= bunSocket(ws))
 }

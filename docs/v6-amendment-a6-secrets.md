@@ -27,7 +27,11 @@ The most direct target is VORTEX's own credential. Every agent holds a `vt_` hub
   - AWS access key ids
   - GitHub, Anthropic, OpenAI, Slack, Google API and Stripe live keys
   - JWTs
+  - JWK private keys (`jwk-private-key`): one JSON object holding both `kty` and a private `d` member of 40 or more base64url characters, in either order. This is the form of an A7 unsealed edge key file. Public JWKs have no `d` and pass.
+  - marshalled libp2p private keys (`libp2p-key`): base64 protobuf `08 <type> 12 <len> <key>` (prefix `CAAS`, `CAES`, `CAIS` or `CAMS`) whose key bytes are a private key of that type: a 64-byte Ed25519 key, a 32-byte secp256k1 scalar, or a PKCS#1 RSA or SEC1 ECDSA DER key. Marshalled public keys use the same framing and pass.
   - `Bearer <credential>`
+
+  For `Bearer`, OpenAI (`sk-`) and Slack the prefix alone is not distinctive, so their tail must also contain a digit and must not consist only of lowercase words joined by `-` or `/`. This keeps `Bearer authentication/authorization-header` and `sk-learn-preprocessing-…` from matching. Shapes that carry a distinctive issuer prefix and a fixed length or alphabet (AWS, GitHub, Google and others) have no such check.
 
   Placeholders such as `Bearer <token>` or `sk-...` do not match, and ordinary prose and code pass.
 - The matched text is never echoed in the error, logged, stored or shown in status. Only the kind name is reported.
@@ -63,8 +67,8 @@ With A5's sentence included, the instructions stay inside the §4 limit of 200 s
 ## Tests
 
 `v6/hub/secrets.test.ts`:
-- every listed shape is found inside ordinary text;
-- prose, code, hashes, ids and placeholders pass;
+- every listed shape is found inside ordinary text, including random real-shaped tokens built at run time and libp2p keys of all four types;
+- prose, code, hashes, ids, placeholders, word-only `Bearer`/`sk-` tails and marshalled libp2p public keys pass;
 - the sender's own hub token is refused with 422 and is never echoed;
 - the operator is screened too;
 - a refusal stores nothing and advances no sequence number;

@@ -107,4 +107,14 @@ process on localhost, plus a WebRTC upgrade between two local peers.
   `requireDirect(m, remote)` split in a follow-up.
 - **Next layer:** semantic announcements and conferences (v5 §2 and §7), on
   top of rendezvous namespaces.
+- **Admission (#24):** with `--admit-db <hub db>` (or `admitDb`), the relay
+  and its rendezvous accept only peers whose key is enrolled, unrevoked and
+  unexpired in the hub's `principal_keys` (read-only SQLite, queried per
+  request, so `vx key revoke` lands on the next request). One enrollment
+  (`vx enroll <name> --key <spki>`) covers the hub edge, the relay and
+  rendezvous — sha256(spki(peer id's key)) is the A7 `key_id`. Without the
+  option the relay stays open (localhost tests). The admission checker is
+  server-side only (`v6/p2p/admission.ts`, bun:sqlite): the rendezvous
+  receives it as an injected callback, so the browser peer (Moon) never
+  imports it.
 

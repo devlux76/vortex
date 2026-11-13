@@ -19,6 +19,8 @@ export * from './store-schema.ts'
 /* Rendered-bounds checking lives in client/render.ts (fitSingle); the hub's
  * api.ts and delivery.ts import it from there, not from the store. */
 
+import { RelaySeen } from './store-relay.ts'
+
 export class HubStore {
   readonly db: Database
   readonly cfg: HubConfig
@@ -31,7 +33,11 @@ export class HubStore {
     this.db.exec('PRAGMA busy_timeout = 5000;')
     this.db.exec(SCHEMA)
     this.migrate()
+    this.relaySeen = new RelaySeen(this.db)
   }
+
+  /** Dedup of relayed mesh envelopes, on (origin principal, envelope id) (#20). */
+  readonly relaySeen: RelaySeen
 
   /**
    * A4 schema (idempotent): conversation cooldown columns, pending.conv, and the

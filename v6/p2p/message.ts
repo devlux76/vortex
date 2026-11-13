@@ -19,6 +19,8 @@
 // or nowhere (Clouds' point 2 on #8).
 import { fromString } from 'uint8arrays/from-string'
 import { toString } from 'uint8arrays/to-string'
+import { peerIdFromString } from '@libp2p/peer-id'
+import { verifyRelayEnvelope } from '../client/relay-envelope.ts'
 import type { PeerId, PrivateKey } from '@libp2p/interface'
 import { findSecret } from '../hub/secrets.ts'
 
@@ -119,4 +121,22 @@ export async function verifyMessage (raw: unknown, remote: PeerId, self: PeerId,
   const ok = await pub.verify(signingBytes(msg), fromString(msg.sig, 'base64pad'))
   if (!ok) throw new Error('bad signature')
   return msg
+}
+
+/** The raw Ed25519 public key bytes carried by a peer id (identity multihash). */
+export function rawKeyOfPeerId (peerId: string): Uint8Array {
+  const pk = peerIdFromString(peerId).publicKey
+  if (pk === null || pk === undefined) throw new Error('the peer id carries no public key')
+  return pk.raw
+}
+
+/**
+ * Verify an envelope against the key in `from` alone — no transport check.
+ * This is the store-and-forward half of the verify split (Clouds' point 5 on
+ * #8): direct delivery keeps `verifyMessage` (from == Noise peer), and the
+ * bridge/hub verify relayed envelopes here. Delegates to the dependency-free
+ * implementation in ../client/relay-envelope.ts, which the hub also uses.
+ */
+export async function verifyEnvelope (raw: unknown, now = Date.now()): Promise<P2PMessage> {
+  return await verifyRelayEnvelope(raw, now) as unknown as P2PMessage
 }

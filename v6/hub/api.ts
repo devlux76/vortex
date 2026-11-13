@@ -13,6 +13,7 @@ import { EdgeAuth, EdgeAuthError, type EdgeIdentity } from './edge-auth.ts'
 import { AUTH_HEADER, STREAM_AUTH_HEADER } from '../client/edge-sign.ts'
 import { recentInRooms } from './store-log.ts'
 import { signedUpgrade, openPendingStream, answerPendingStream, closePendingStream } from './api-stream.ts'
+import { relayPost, relayRoomPath } from './relay.ts'
 
 const EVIDENCE_KINDS: Evidence[] = ['host-accepted', 'transport-written', 'hook-returned']
 
@@ -62,7 +63,11 @@ export class Api {
   /** Test seam: clear the sliding send-rate windows. */
   resetRateLimits (): void { this.rateWindows = new Map() }
 
-  private bounds (): Bounds {
+  /** The verified edge identity of a signed request (relay route, #20). */
+  signedIdentity (req: Request): EdgeIdentity | undefined { return this.signed.get(req) }
+
+  // Internal helpers the relay route (#20) shares with postMessages.
+  bounds (): Bounds {
     return {
       maxMessages: this.deps.cfg.batchMaxMessages,
       maxCodePoints: this.deps.cfg.batchMaxCodePoints,
@@ -135,11 +140,12 @@ export class Api {
     // read its rooms, and recent (filtered). Not DMs, status or bindings,
     // whatever the principal itself may do with another key (Sun, #7 finding 2).
     if (this.signed.get(req)?.key.custody === 'unsealed' &&
-      !((method === 'POST' && path === '/v1/messages') ||
+      !((method === 'POST' && (path === '/v1/messages' || relayRoomPath(path) !== undefined)) ||
         (method === 'GET' && (/^\/v1\/rooms\/[^/]+\/log$/.test(path) || path === '/v1/recent')))) {
       return json({ error: 'an unsealed key may only post to and read its named rooms' }, 403)
     }
     if (method === 'POST' && path === '/v1/messages') return this.postMessages(req)
+    if (method === 'POST' && relayRoomPath(path) !== undefined) return relayPost(this, req, relayRoomPath(path)!)
     if (method === 'PUT' && /^\/v1\/bindings\/[^/]+$/.test(path)) return this.putBinding(req, url, path.slice('/v1/bindings/'.length))
     if (method === 'DELETE' && /^\/v1\/bindings\/[^/]+\/[^/]+$/.test(path)) return this.deleteBinding(req, path)
     if (method === 'GET' && /^\/v1\/rooms\/[^/]+\/log$/.test(path)) return this.roomLog(req, url, path)
@@ -263,7 +269,8 @@ export class Api {
     return this.deps.store.isMember(m.room!, principal)
   }
 
-  private allowSend (principal: string): boolean {
+  /** Send-rate gate (§8.2), shared with the relay route (#20). */
+  allowSend (principal: string): boolean {
     const now = Date.now()
     const window = (this.rateWindows.get(principal) ?? []).filter(t => now - t < 60_000)
     if (window.length >= this.deps.cfg.sendPerMinute) {

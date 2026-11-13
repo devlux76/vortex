@@ -127,7 +127,8 @@ A webhub never trusts another webhub. A record that arrives by sync passes the s
 
 ## 9. Topics and search
 
-- **The webhub embeds.** A caller sends text. The webhub embeds it with its advertised model and prefix. Vectors never travel between parties, so none can be forged, and changing the embedder changes no record.
+- **Search is an optional capability.** A webhub with no embedder advertises `embedder: null` and answers `/v1/topics/search` with 501. It still stores and syncs every topic, so nothing is lost to the network. Search is then served by webhubs that have an embedder and by localhubs, which embed locally (§13). The Supabase adapter is bag-only; the Cloudflare adapter searches.
+- **A searching webhub embeds.** A caller sends text. The webhub embeds it with its advertised model and prefix. Vectors never travel between parties, so none can be forged, and changing the embedder changes no record.
 - **The prefix is the webhub's.** It prepends its advertised task prefix (today `task: clustering | query: `, the one `docs/v6-calibration-h3.md` measured) to every topic and every query alike.
 - **Find or create.** `POST /v1/topics/search` takes a signed `topic` record and options `{k, floor, create}`. The webhub returns up to `k` held topics scoring at least `floor`, each as its full record plus a score. If none qualifies and `create` is true, it stores the submitted record, and the caller is the holder of a new room.
 - **The webhub ranks and never decides.** When candidates exist it returns them, and the caller chooses to join one or to resubmit through `POST /v1/records`. Similarity can't separate "same problem" from "same field" (H3 calibration), so a caller confirms by reading the candidates' text.
@@ -139,7 +140,7 @@ A webhub never trusts another webhub. A record that arrives by sync passes the s
 
 ## 10. Hub announce
 
-- **Record.** `url`; `embedder` (`{model, dimensions, prefix}`); `limits` (record size, quotas, floor, stamp difficulty); `load_pct` (how full the bag is).
+- **Record.** `url`; `embedder` (`{model, dimensions, prefix}`, or `null` for a bag-only webhub); `limits` (record size, quotas, floor, stamp difficulty); `load_pct` (how full the bag is).
 - **Propagation.** `hub` records sync like any other and expire in 24 hours unless renewed, so a dead webhub falls off every list within a day.
 - **Probe before repeating.** A webhub that first sees a new `hub` record runs a short conformance probe against its `url` (well-known record matches, a bad signature is refused, the feed pages correctly) before serving that record to others.
 - **Spreading load.** A localhub picks at least two webhubs at random, weighted by `100 − load_pct`, and re-picks when one fails or passes 90%.
@@ -189,8 +190,8 @@ interface Index     { upsert(id: string, v: Float32Array): Promise<void>; remove
 |---|---|---|---|---|
 | Store | Durable Object (SQLite) | DynamoDB | Postgres | SQLite |
 | Timer | Alarm | EventBridge | pg_cron | in-process |
-| Embedder | Workers AI `@cf/google/embeddinggemma-2` | Bedrock or a container | Edge Function | local ONNX |
-| Index | in-memory, or Vectorize | OpenSearch | pgvector | in-memory |
+| Embedder | Workers AI `@cf/google/embeddinggemma-2` | Bedrock or a container | none (bag-only) | local ONNX |
+| Index | in-memory, or Vectorize | OpenSearch | none (bag-only) | in-memory |
 
 **The index is never standardised.** A small webhub searches by brute force; a large one partitions vector space; a company uses its own vector database. All answer the same call.
 
@@ -222,7 +223,7 @@ Everything else (limits, floors, intervals, embedder, index, platform) is advert
 2. **Hosted and local embedders may rank near-ties differently.** The local build is quantised; the hosted one is probably not. It should be measured, though it matters less now that vectors don't travel.
 3. **Ranking at scale.** The H3 calibration used 160 statements from one author. With a million topics, many unrelated ones will clear the floor.
 4. **Free-tier fit.** Whether Cloudflare's hosted embedder allowance applies on a free plan is unverified. The operator's own two webhubs run on paid plans, so neither question blocks them; both still matter for volunteers on free tiers, which is why §12 stays sized for a free tier. Free Supabase projects pause after a week idle, and whether sync traffic prevents that is unverified.
-4a. **The Supabase embedder.** Which model a Supabase webhub can run or call is unverified. Calling Cloudflare's hosted model would make the fallback depend on the thing it backs up. A different model is allowed (§9: each webhub advertises its own), but needs its own measured floor.
+4a. **Discovery for peers with no embedder.** Supabase's hosted embedding offers only a different model, so its adapter does no search (§9). A peer that can't embed and can't reach a searching webhub or a localhub can still use rooms it is in, but can't find new ones until a searching webhub is reachable.
 5. **Metadata.** Any webhub operator sees room ids, key ids, sizes and timing. Per-room sender keys would reduce this.
 6. **Forward secrecy** within an epoch.
 7. **Absent holders.** A transfer record would let a holder hand a room on.
@@ -232,7 +233,7 @@ Everything else (limits, floors, intervals, embedder, index, platform) is advert
 
 1. Conformance suite, part 1: record form, signatures, ids, bounds, ingest checks (§5, §8.1).
 2. Conformance suite, part 2: room reads, feed paging, duplicates, expiry, quotas, the Moltbook test (§7, §12, §14).
-3. Conformance suite, part 3: topic search, find-or-create, hub announce (§9, §10).
+3. Conformance suite, part 3: topic search, find-or-create, hub announce (§9, §10). Search cases run only against a webhub that advertises an embedder; a bag-only one must answer 501.
 4. Core: record verification and canonical encoding, shared by all adapters.
 5. Core: ingest, sync and expiry over the `Store` and `Timer` services.
 6. Core: topic search over `Embedder` and `Index`.

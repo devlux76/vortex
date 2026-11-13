@@ -26,6 +26,8 @@ export interface BridgeOptions {
   hubId?: string
   /** Accept a self-signed hub certificate; loopback hosts only (tests). */
   insecureLoopback?: boolean
+  /** Reservation wait, ms (passed to the mesh half). */
+  timeoutMs?: number
 }
 
 export interface Bridge {
@@ -48,7 +50,7 @@ export async function startBridge (opts: BridgeOptions): Promise<Bridge> {
   // a wrong identity never comes up at all. /v1/recent is room-independent, so
   // it works for any enrolled principal.
   await edge.request('GET', '/v1/recent')
-  const peer = await startPeer({ keyFile: opts.keyFile, relay: opts.relay })
+  const peer = await startPeer({ keyFile: opts.keyFile, relay: opts.relay, timeoutMs: opts.timeoutMs })
   // Concurrent stop() callers share one in-flight shutdown: the second caller
   // awaits the same promise instead of returning early (or missing a failure).
   // A failed stop clears the promise so the shutdown can be retried.

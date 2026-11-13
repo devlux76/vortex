@@ -124,8 +124,17 @@ export async function startPeer (opts: PeerOptions): Promise<Peer> {
   }
   await node.handle(MSG_PROTOCOL, onStream, { runOnLimitedConnection: true })
 
-  await node.dial(relayAddr)
-  await waitForReservation(node, relayId, opts.timeoutMs ?? 15_000)
+  // A failed dial or reservation must leave nothing open (Sun's QA on #30):
+  // the node and the dedup store are already allocated here, so the startup
+  // failure path closes both before the error propagates.
+  try {
+    await node.dial(relayAddr)
+    await waitForReservation(node, relayId, opts.timeoutMs ?? 15_000)
+  } catch (e) {
+    await Promise.resolve(node.stop()).catch(() => {})
+    dedup.close()
+    throw e
+  }
 
   const circuitAddr = (): Multiaddr => relayAddr.encapsulate(`/p2p-circuit/p2p/${self.toString()}`)
 

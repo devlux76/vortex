@@ -99,7 +99,9 @@ async function embedAll (items: Item[]): Promise<number[][]> {
 const fmt = (x: number) => x.toFixed(3)
 
 async function main (): Promise<void> {
-  const data = await Bun.file(new URL('./calibration/statements.json', import.meta.url)).json() as { topics: Array<{ family: string; topic: string; texts: string[] }> }
+  // --statements overrides the bundled labelled set (used by the tests to run on a tiny fixture).
+  const statementsPath = arg('--statements') ?? new URL('./calibration/statements.json', import.meta.url)
+  const data = await Bun.file(statementsPath).json() as { topics: Array<{ family: string; topic: string; texts: string[] }> }
   const items: Item[] = data.topics.flatMap(t => t.texts.map(text => ({ family: t.family, topic: t.topic, text })))
   const vecPath = arg('--vectors')
   let vectors: number[][] | undefined

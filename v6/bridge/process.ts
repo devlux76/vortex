@@ -49,14 +49,21 @@ export async function startBridge (opts: BridgeOptions): Promise<Bridge> {
   // it works for any enrolled principal.
   await edge.request('GET', '/v1/recent')
   const peer = await startPeer({ keyFile: opts.keyFile, relay: opts.relay })
-  let stopped = false
+  // Concurrent stop() callers share one in-flight shutdown: the second caller
+  // awaits the same promise instead of returning early (or missing a failure).
+  // A failed stop clears the promise so the shutdown can be retried.
+  let stopping: Promise<void> | undefined
   return {
     peer,
     edge,
-    stop: async () => {
-      if (stopped) return
-      stopped = true
-      await peer.stop()
+    stop: () => {
+      if (stopping === undefined) {
+        stopping = peer.stop().catch(e => {
+          stopping = undefined
+          throw e
+        })
+      }
+      return stopping
     }
   }
 }

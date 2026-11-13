@@ -1,5 +1,5 @@
 // Sub-issue #13 of #3: the bridge process starts and stops cleanly, on a real
-// TLS hub and a real relay.
+// TLS hub and a real relay. Cleanup runs even when an assertion fails.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -9,7 +9,7 @@ import { startHub } from '../hub/main.ts'
 import { enrollKey } from '../cli/keys.ts'
 import { generateEdgeKey, writeKeyFile } from '../client/edge.ts'
 import { startRelay } from '../p2p/relay.ts'
-import { startBridge, type BridgeOptions } from './process.ts'
+import { startBridge, type Bridge, type BridgeOptions } from './process.ts'
 
 async function hubKeyOn (hub: Awaited<ReturnType<typeof startHub>>, dir: string): Promise<BridgeOptions> {
   // Enroll the bridge's hub key (public key only moves) and write the key file.
@@ -28,13 +28,14 @@ async function hubKeyOn (hub: Awaited<ReturnType<typeof startHub>>, dir: string)
   }
 }
 
-test('bridge #13: starts holding a hub principal and a libp2p peer, stops cleanly', async () => {
+test('bridge #13: starts holding a hub principal and a libp2p peer, stops cleanly and concurrently', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'vx-bridge-'))
   const hub = await startHub({ stateDir: join(dir, 's'), configDir: join(dir, 'c'), cfg: { listen: '127.0.0.1:0', tlsListen: '127.0.0.1:0' } })
   const relay = await startRelay({ listen: ['/ip4/127.0.0.1/tcp/0/ws'] })
+  let bridge: Bridge | undefined
   try {
     const base = await hubKeyOn(hub, dir)
-    const bridge = await startBridge({ ...base, relay: relay.addrs()[0]!.toString() })
+    bridge = await startBridge({ ...base, relay: relay.addrs()[0]!.toString() })
     assert.ok(bridge.peer.id.toString().length > 20)
     // The mesh half holds its circuit reservation.
     assert.ok(bridge.peer.node.getMultiaddrs().some(a => a.toString().includes('/p2p-circuit')))
@@ -42,12 +43,16 @@ test('bridge #13: starts holding a hub principal and a libp2p peer, stops cleanl
     // the TLS listener with this hub's fingerprint (startBridge throws otherwise).
     assert.equal(bridge.edge.opts.principal, 'bridge')
 
-    await bridge.stop()
-    // Stopping twice is safe (idempotent lifecycle).
+    // Concurrent stop() callers share one shutdown: all resolve, none returns
+    // before the mesh half is down.
+    await Promise.all([bridge.stop(), bridge.stop(), bridge.stop()])
+    assert.notEqual(bridge.peer.node.status, 'running')
+    // Stopping again after a completed shutdown is safe.
     await assert.doesNotReject(bridge.stop())
-    // The mesh half is down; the hub half is stateless.
     assert.notEqual(bridge.peer.node.status, 'running')
   } finally {
+    // Runs even when an assertion above failed, so nothing is left open.
+    await bridge?.stop()
     await relay.stop()
     await hub.stop()
     rmSync(dir, { recursive: true, force: true })

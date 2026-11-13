@@ -12,7 +12,9 @@
 // key file is the A7 stand-in (§2 rules it out for remote principals; sealed
 // tiers come with the A7 signers).
 import { startPeer, type Peer } from '../p2p/node.ts'
+import { loadOrCreateKey } from '../p2p/identity.ts'
 import { EdgeClient } from '../client/edge.ts'
+import type { PrivateKey } from '@libp2p/interface'
 
 export interface BridgeOptions {
   /** libp2p peer key file (#8); created with mode 0600 when missing. */
@@ -24,6 +26,8 @@ export interface BridgeOptions {
   /** Overrides for the hub_url/hub_id recorded in the key file (tests). */
   hubUrl?: string
   hubId?: string
+  /** A prebuilt hub client instead of `hubKeyFile` (the bridge's own libp2p key, #11). */
+  edge?: EdgeClient
   /** Accept a self-signed hub certificate; loopback hosts only (tests). */
   insecureLoopback?: boolean
 }
@@ -33,12 +37,20 @@ export interface Bridge {
   peer: Peer
   /** The hub half (A7 §3a). Stateless fetch; nothing to close. */
   edge: EdgeClient
+  /** The mesh key file; delivery state files are derived from it. */
+  keyFile: string
+  /**
+   * The libp2p private key, for signing envelopes inside this process
+   * (v6/bridge/delivery.ts). Process-internal: no model-facing tool or hub
+   * route ever sees it or a signature over arbitrary data (A7 §2, §6).
+   */
+  privateKey: PrivateKey
   /** Stops the mesh half and closes state. Idempotent. */
   stop: () => Promise<void>
 }
 
 export async function startBridge (opts: BridgeOptions): Promise<Bridge> {
-  const edge = await EdgeClient.fromKeyFile(opts.hubKeyFile, {
+  const edge = opts.edge ?? await EdgeClient.fromKeyFile(opts.hubKeyFile, {
     url: opts.hubUrl,
     hubId: opts.hubId,
     insecureLoopback: opts.insecureLoopback
@@ -48,6 +60,9 @@ export async function startBridge (opts: BridgeOptions): Promise<Bridge> {
   // a wrong identity never comes up at all. /v1/recent is room-independent, so
   // it works for any enrolled principal.
   await edge.request('GET', '/v1/recent')
+  // Loaded before the peer starts; startPeer loads the same file and gets the
+  // same key, and the delivery layer signs envelopes with it in-process.
+  const privateKey = await loadOrCreateKey(opts.keyFile)
   const peer = await startPeer({ keyFile: opts.keyFile, relay: opts.relay })
   // Concurrent stop() callers share one in-flight shutdown: the second caller
   // awaits the same promise instead of returning early (or missing a failure).
@@ -56,6 +71,8 @@ export async function startBridge (opts: BridgeOptions): Promise<Bridge> {
   return {
     peer,
     edge,
+    keyFile: opts.keyFile,
+    privateKey,
     stop: () => {
       if (stopping === undefined) {
         stopping = peer.stop().catch(e => {

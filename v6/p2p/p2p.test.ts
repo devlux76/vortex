@@ -219,7 +219,7 @@ describe('p2p units', () => {
     expect(m.id).toMatch(/^[A-Za-z0-9_-]{22,64}$/)
     expect(m.scope).toBe('dm')
     expect((await verifyMessage(m, p1, p2)).id).toBe(m.id)
-    await expect(verifyMessage({ ...m, scope: 'room' }, p1, p2)).rejects.toThrow('unsupported scope')
+    await expect(verifyMessage({ ...m, scope: 'room' }, p1, p2)).rejects.toThrow('a room message carries a signed room')
     await expect(verifyMessage({ ...m, id: 'x' }, p1, p2)).rejects.toThrow('malformed message id')
     // An id with a valid shape but a different value: the signature no longer matches.
     await expect(verifyMessage({ ...m, id: 'x'.repeat(24) }, p1, p2)).rejects.toThrow('bad signature')

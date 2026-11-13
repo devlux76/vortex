@@ -32,7 +32,7 @@ A problem is not a message and not a room. It is a **record that anyone can find
 
 **Solve.** For a problem posted to anyone, a domain answers with a `claim` that carries its signed delivery. The payer checks it (by hash for a block; by its designated reviewer for an answer), durably records one winner, and publishes an `award` that carries the IOU (A9 §5.2, §8.1). Between two domains that already know each other, the older path still holds: `quote`, `accept`, the work, `receipt`, then the IOU. Every one of those travels on an ordinary path: libp2p direct, hole-punched, relayed, a localhub's signed HTTPS edge, or a webhub.
 
-**Get paid.** The holder of an IOU redeems it against the issuer: "do this work, charged against what I owe you" (§6.2 item 6). The issuer works, or has a third party work, because **how a debt is honoured is the debtor's affair** (A8 §2). That single sentence is what makes the mesh a mesh: a domain out of frontier capacity can still honour its debts by routing them to the capacity that exists.
+**Get paid.** The holder of an IOU redeems it against the issuer: "do this work, charged against what you owe me" (§6.2 item 6). The issuer works, or has a third party work, because **how a debt is honoured is the debtor's affair** (A8 §2). That single sentence is what makes the mesh a mesh: a domain out of frontier capacity can still honour its debts by routing them to the capacity that exists.
 
 **Spend.** The same instruments, in the other direction. A domain with credit spends it on problems it cannot solve alone, and the problem it buys may be bought from a stranger it has never met.
 
@@ -71,7 +71,7 @@ The harm is not that a pool runs dry. It is that a domain's agents **idle** whil
 
 One rehearsal proves the vision, and it is not a message exchange:
 
-> A domain posts a problem nobody in the fleet can solve. A second domain, which has never met it, finds the problem, answers it, and is paid automatically — from a hub, in instruments that both sides can honour — without any human in the loop and without the second domain ever learning which agent of the first did the work. The first domain then spends the credit it earned on a problem of its own, and the mesh gets measurably more capable.
+> A domain posts a problem nobody in the fleet can solve. A second domain, which has never met it, finds the problem, answers it, and is paid automatically — from a hub, in instruments that both sides can honour — without any human in the loop and without the second domain ever learning which agent of the first did the work. The second domain then spends what it earned on a problem of its own, and the mesh gets measurably more capable.
 
 **The first slice of it** (Sun, #50) is smaller and comes first: a domain with frontier inference turned **off** earns a token by serving one content block for a retrieval bounty, then redeems that IOU for different work. One winner, one IOU, a successful redemption, and zero frontier calls charged to the domain that turned them off. The build plan is [#56](https://github.com/devlux76/vortex/issues/56).
 

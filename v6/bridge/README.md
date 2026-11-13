@@ -26,7 +26,7 @@ Not here yet (later sub-issues of #3): #20 (mesh→hub delivery). #11
 - The bridge publishes itself under the room's rendezvous namespace, joins
   the hub room by posting one signed presence line (hub room reads need
   membership; enrollment does not grant it), then polls the room log with a
-  persisted cursor (`<keyFile>.delivery.json`).
+  persisted per-room cursor (`<keyFile>.delivery.json.<room>.state.json`).
 - Each hub message is forwarded to the room's mesh members — the peers
   registered under that namespace — as a signed envelope with
   `scope:"room"` and a signed `room` field. `to` is signed per recipient.
@@ -45,9 +45,9 @@ Not here yet (later sub-issues of #3): #20 (mesh→hub delivery). #11
   member's key is enrolled, unrevoked, unexpired and — for an `unsealed`
   key — covers the room. Refusals are per-poll. The registration-side gate
   (relay rendezvous admission through `principal_keys`) lands with #24/#38.
-- **Crash-safe cursor and pending (#36).** Pending entries are persisted
-  *before* the cursor advances on every path, so a crash can never leave an
-  undelivered entry below the cursor without a pending record.
+- **Crash-safe cursor and pending (#36).** A single atomic file replacement
+  records the cursor and pending targets together. Retries recheck room
+  authorization and keep one bounded attempt sequence per queued entry.
 - **Subscription boundary.** A poll with no authorized members forwards
   nothing and does not advance the cursor: peers that join or reconnect do
   not silently miss history while they were away. (The room log is still

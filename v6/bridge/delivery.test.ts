@@ -206,3 +206,41 @@ test('#11: room scope — the unsealed bridge key cannot read or forward another
     await w.cleanup()
   }
 })
+
+for (const revoke of [false, true]) {
+  test(revoke ? 'queued delivery rechecks authorization after revocation' : 'an unreachable recipient has one bounded retry sequence', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vx-delivery-retry-'))
+    const key = await loadOrCreateKey(join(dir, 'key'))
+    let allowed = true
+    let sends = 0
+    let polls = 0
+    const bridge = {
+      keyFile: join(dir, 'key'), privateKey: key,
+      peer: {
+        id: 'bridge', register: async () => 120, discover: async () => [{ id: 'member' }],
+        sendRaw: async () => {
+          sends++
+          if (revoke) allowed = false
+          return { ack: { ok: false, error: 'offline' } }
+        }
+      },
+      edge: {
+        opts: { principal: 'bridge' }, request: async () => ({ authorized: allowed }),
+        roomLog: async (_room: string, after: number) => {
+          polls++
+          return after === 0 ? [{ id: 'fixture', seq: 1, from: 'clouds', text: 'room marker' }] : []
+        }
+      }
+    } as unknown as Bridge
+    const delivery = await startRoomDelivery(bridge, 'mesh', { intervalMs: 10 })
+    try {
+      for (let i = 0; i < 100 && polls < 12; i++) await Bun.sleep(10)
+      assert.ok(polls >= 12)
+      assert.equal(sends, revoke ? 1 : 5)
+    } finally {
+      delivery.stop()
+      await Bun.sleep(20)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+}

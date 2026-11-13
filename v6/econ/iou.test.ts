@@ -153,7 +153,7 @@ describe('common fields', () => {
 
   test('a hub-principal sender carries its key id; verify binds from to the expected sender', async () => {
     await expect(sign(alice, input('release', { from: 'winds' }))).rejects.toThrow('carries its key id')
-    const m = await sign(alice, input('release', { from: 'winds', key: 'a'.repeat(64) }))
+    const m = await sign(alice, input('release', { from: 'winds', key: 'a'.repeat(43) }))
     await expect(verify(m)).rejects.toThrow('not a peer id')
     expect((await verify(m, alice.publicKey.raw, 'winds')).from).toBe('winds')
     await expect(verify(m, alice.publicKey.raw, 'clouds')).rejects.toThrow('does not match the expected sender')
@@ -219,12 +219,14 @@ describe('verify: size bound and authenticated sender (Sun QA on #34)', () => {
 
   test('a hub-name sender carries its key id and needs the expected name; a key alone cannot authenticate it', async () => {
     await expect(sign(alice, input('redeem', { from: 'winds' }))).rejects.toThrow(/carries its key id/)
-    const m = await sign(alice, input('redeem', { from: 'winds', key: 'a'.repeat(64) }))
+    const m = await sign(alice, input('redeem', { from: 'winds', key: 'a'.repeat(43) }))
     await expect(verify(m, alice.publicKey)).rejects.toThrow(/pass the expected sender/)
     await expect(verify(m, alice.publicKey, 'clouds')).rejects.toThrow(/does not match the expected sender/)
     expect((await verify(m, alice.publicKey, 'winds')).from).toBe('winds')
     // A malformed key id is refused at validation.
     await expect(sign(alice, input('redeem', { from: 'winds', key: 'short' }))).rejects.toThrow(/key_id/)
+    // Hex is refused: one canonical encoding per key (A8 §6.1).
+    await expect(sign(alice, input('redeem', { from: 'winds', key: 'a'.repeat(64) }))).rejects.toThrow(/base64url/)
   })
 })
 
@@ -238,14 +240,14 @@ describe('A8 §6.1 wire contract (#33 at 86f7f70, Sun QA on #34)', () => {
     const release = await sign(alice, input('release'))
     expect(Object.keys(JSON.parse(encode(release)))).toEqual(['v', 'kind', 'id', 'from', 'ts', 'issuer', 'iou', 'sig'])
     // The common `key` field sits after `ts` when present.
-    const hub = await sign(alice, input('redeem', { from: 'winds', key: 'a'.repeat(64) }))
+    const hub = await sign(alice, input('redeem', { from: 'winds', key: 'a'.repeat(43) }))
     expect(Object.keys(JSON.parse(encode(hub)))).toEqual(['v', 'kind', 'id', 'from', 'ts', 'key', 'issuer', 'iou', 'task', 'est_tokens', 'sig'])
   })
 
   test('ES256: a P-256 A7 key verifies when resolved, bound to the expected sender', async () => {
     const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
     const signer = { sign: async (data: Uint8Array) => new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pair.privateKey, data as BufferSource)) }
-    const m = await sign(signer, input('redeem', { from: 'sun', key: 'b'.repeat(64) }))
+    const m = await sign(signer, input('redeem', { from: 'sun', key: 'b'.repeat(43) }))
     await verify(m, pair.publicKey, 'sun')
     await expect(verify(m, pair.publicKey, 'winds')).rejects.toThrow('does not match the expected sender')
     await expect(verify(m, pair.publicKey)).rejects.toThrow('pass the expected sender')

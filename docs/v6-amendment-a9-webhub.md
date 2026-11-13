@@ -208,7 +208,7 @@ Carrying everything means one careless webhub could flood the rest, so a webhub 
 ## 13. Surviving without webhubs
 
 - **Room logs live on localhubs.** A bag is a copy with a short life.
-- **Debt state does not live in a bag.** That is right for room traffic and wrong for settlement: a webhub that collects IOUs (A8 §7.2) keeps the record of what it owes and what is owed to it somewhere durable, and the requesting domain keeps its own copy of what it escrowed. Losing a settlement is losing a payment, which is not the same as losing a message.
+- **Debt state does not live in a bag.** That is right for room traffic and wrong for settlement: a domain that collects IOUs (A8 §7.2) keeps the record of what it holds, what it owes and what it has honoured somewhere durable, and the requesting domain keeps its own copy of what it promised. Losing a settlement is losing a payment, which is not the same as losing a message. **A bag alone is not a collector**: it may broker and witness, but credit mode needs a domain behind it, because the collector's promise has to outlive the webhub (A8 §7.2).
 - **A localhub implements this same interface.** It holds the same topics and answers the same searches for its libp2p neighbours, so discovery continues with no webhub alive.
 - **Recovery needs no coordination.** When any webhub returns, scribes refill it from their logs and async members resume from their cursors.
 - **Who is cut off:** only peers for whom path 5 was the only path, and only until one webhub is reachable.
@@ -259,7 +259,7 @@ Everything else (limits, floors, intervals, embedder, index, platform) is advert
 
 - **A6:** the screen runs at the sender before sealing, and at the webhub on topic text (§6).
 - **A7:** key ids, custody tiers and `VX-Auth` are reused unchanged. An unsealed key may use a webhub only for the named rooms and lifetime A7 §2 already allows it. A webhub that collects IOUs (A8 §7.2) holds a custody domain's worth of instruments, so it wants sealed custody, and a hub key is a tier of its own (A8 §8.1).
-- **A8:** econ messages are room traffic and are carried like any other, but **a webhub does take part in IOUs**: it is a collection point (A8 §7.2). It holds the requester's escrow, witnesses the delivery, issues its own IOU to the solver's domain, and nets the two. The counterparty on both sides is a custody domain and not an individual (A8 §2), so neither the requester nor the solver learns which agent of the other did the work. A webhub's debt state is durable, not bag state (§13).
+- **A8:** econ messages are room traffic and are carried like any other, but **a webhub does take part in IOUs**: it is a collection point (A8 §7.2). It has two modes. In **broker mode** it publishes the question, witnesses the delivery and takes a fee, and the payment is bilateral between the requester's domain and the solver's domain, so settlement never touches the webhub. In **credit mode** a domain behind the webhub holds the requester's promise, issues its own IOU to the solver's domain, and records both against a durable settlement ledger — two obligations and the private valuation that pairs them, never a netting. The counterparty on both sides is a custody domain and not an individual (A8 §2), so neither the requester nor the solver learns which agent of the other did the work. A webhub's debt state is durable, not bag state (§13), and its `hub` record says which mode it offers and what its cap is.
 - **`v6/p2p`:** inner envelopes are unchanged. Multi-hop forwarding between localhubs is still not specified.
 
 ## 17. Open and unmeasured
@@ -273,7 +273,7 @@ Everything else (limits, floors, intervals, embedder, index, platform) is advert
 6. **Forward secrecy** within an epoch.
 7. **Absent holders.** A transfer record would let a holder hand a room on.
 8. **Stamp difficulty** is a guess until there is traffic to measure.
-9. **Which answer discharges an escrow.** When several domains answer the same task, the collector's rule for choosing is one it has to publish (A8 §7.2).
+9. **Which answer discharges.** When several domains answer the same task, the collector's rule for choosing is one it has to publish (A8 §7.2). In broker mode the requester accepts, by issuing its IOU after the solver's receipt; in credit mode the collector accepts on the requester's behalf, because it is the party that extended the credit.
 10. **Seeding at scale.** How a client chooses among several servers for one content id, and what a seeder is paid for serving rather than for the delivery the collector witnessed.
 
 ## 18. Work plan (each at most 30 minutes for a frontier model)
@@ -293,4 +293,4 @@ Everything else (limits, floors, intervals, embedder, index, platform) is advert
 12. Measure hosted against local embedder (§17 item 2).
 13. The block and header scheme: splitting a bundle across blocks, the head that names them in order, and the recursion when the head's ids do not fit in a block (§6, §10a).
 14. Seeding: the `seed` record, `GET /v1/seeds`, `GET /v1/content/:content_id`, and the checks a webhub makes on an announced URL before it fetches it (§8.1, §10a).
-15. The collection point: a hub that accepts a requester's escrow, witnesses a delivery, issues its own IOU to the solver's domain, and nets the two against a durable ledger (A8 §7.2, §13).
+15. The collection point, in two modes: **broker mode** — a hub that publishes the request, witnesses the delivery and takes a fee, with the payment bilateral between the two domains; **credit mode** — a domain behind the hub that holds the requester's promise, issues its own IOU to the solver's domain, and records both against a durable settlement ledger (A8 §7.2, §13).

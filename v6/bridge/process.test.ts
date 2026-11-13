@@ -2,7 +2,7 @@
 // TLS hub and a real relay. Cleanup runs even when an assertion fails.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readlinkSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startHub } from '../hub/main.ts'
@@ -59,7 +59,48 @@ test('bridge #13: starts holding a hub principal and a libp2p peer, stops cleanl
   }
 })
 
-test('bridge #13: a wrong hub id fails the signed handshake at start, before anything runs', async () => {
+test('bridge #13: a failed relay dial cleans up the mesh half before startBridge rejects', { timeout: 60_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vx-bridge-'))
+  const hub = await startHub({ stateDir: join(dir, 's'), configDir: join(dir, 'c'), cfg: { listen: '127.0.0.1:0', tlsListen: '127.0.0.1:0' } })
+  // A relay that is stopped immediately: reachable address, dead listener.
+  const relay = await startRelay({ listen: ['/ip4/127.0.0.1/tcp/0/ws'] })
+  const relayAddr = relay.addrs()[0]!.toString()
+  await relay.stop()
+  try {
+    const base = await hubKeyOn(hub, dir)
+    const keyFile = join(dir, 'bridge.key')
+    let failure: Error | undefined
+    try {
+      const r = await startBridge({ ...base, relay: relayAddr, keyFile, timeoutMs: 3000 })
+      await r.stop()
+      failure = new Error(`startBridge resolved: ${r.peer.id.toString().slice(0, 10)}`)
+    } catch (e) { failure = e as Error }
+    assert.match(failure!.message, /reservation|failed to connect/i, `actual error: ${failure!.message}`)
+
+    // No descriptor for the dedup database survives the failed startup
+    // (Sun's QA: the node and store are allocated before the dial).
+    const dedupFile = `${keyFile}.dedup.sqlite`
+    const targets = readdirSync('/proc/self/fd').map(f => {
+      try { return readlinkSync(join('/proc/self/fd', f)) } catch { return '' }
+    })
+    assert.ok(targets.every(t => !t.includes('dedup.sqlite')), 'a dedup descriptor leaked')
+    assert.ok(targets.every(t => !t.includes(keyFile)), 'a key descriptor leaked')
+    // A subsequent startBridge with the same key file works (no leaked state).
+    const good = await startRelay({ listen: ['/ip4/127.0.0.1/tcp/0/ws'] })
+    try {
+      let bridge: Bridge | undefined
+      try {
+        bridge = await startBridge({ ...base, relay: good.addrs()[0]!.toString(), keyFile })
+        assert.ok(bridge.peer.node.getMultiaddrs().some(a => a.toString().includes('/p2p-circuit')))
+      } finally { await bridge?.stop() }
+    } finally { await good.stop() }
+  } finally {
+    await hub.stop()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('bridge #13: a wrong hub id fails the signed handshake at start, before anything runs', { timeout: 60_000 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'vx-bridge-'))
   const hub = await startHub({ stateDir: join(dir, 's'), configDir: join(dir, 'c'), cfg: { listen: '127.0.0.1:0', tlsListen: '127.0.0.1:0' } })
   const relay = await startRelay({ listen: ['/ip4/127.0.0.1/tcp/0/ws'] })

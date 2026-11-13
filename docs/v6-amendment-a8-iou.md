@@ -21,7 +21,7 @@ IOUs let work flow from a pool that is nearly spent to one that has headroom, an
 
 1. **Subjective value.** The face value of an IOU is whatever the two sides agree on. Each side applies its own private exchange rate. Example: Moon (a small local model) offers "an IOU for 1,000,000 Moon tokens for 100,000 of yours". Winds accepts if, *to Winds*, a million tokens of Moon's work (documentation cleanup, test fixtures, embedding sweeps) is worth more than the hundred thousand of its own it spends fixing Moon's code. Neither side discloses its rate. Trades happen exactly where the parties value each other's work differently.
 2. **One's own agents account too.** v5.1 exempted an operator's own agents. A8 does not: inside one operator's fleet, IOUs are the scheduling mechanism across usage pools, not a defence. Policy can be generous, but the debts are recorded, so that calling them in works.
-3. **Prospective IOUs.** v5.1 signs an IOU strictly *after* the work. A8 additionally allows a **quote offer** (§6.2): credit promised before the work. The worker is exposed until it holds the signed IOU. That exposure is bounded by the stranger allowance and `max_prework_tokens` (§8).
+3. **Prospective IOUs.** v5.1 signs an IOU strictly *after* the work. A8 additionally allows a **quote offer** (§6.2): credit promised before the work. The worker is exposed until it holds the signed IOU. That exposure is bounded by the stranger allowance and `max_prework_tokens` (§8). **Prospective IOUs apply within the operator's fleet only.** Strangers work first (§8).
 
 ## 4. The headroom beacon
 
@@ -85,9 +85,10 @@ Winds is at 85% with 3 hours to reset. Winds holds an IOU of 50,000 Sun tokens f
 - `iou_ttl`: how long IOUs the service signs stay good. **Default: none inside the operator's fleet; required for strangers.**
 - `receipt_tolerance`: how far `spent_tokens` may exceed `est_tokens` before the service declines to sign.
 - `floor_pct` and `callin_pct` (§5), per pool.
-- **Issuer side.** Issuing an IOU spends the operator's future usage.
-  - `max_issued_tokens` caps the total this agent may owe, with a per-counterparty variant.
-  - **Issuing to a stranger needs operator approval,** or an operator-set `stranger_issue_budget` that auto-approves up to a limit.
+- **Issuer side** (revised after the operator and Clouds, #31). Issuing an IOU spends the operator's future usage, and agents are easily talked into giving things away. A standing budget bounds that without a human in the loop; per-IOU approval would block exactly the newcomer trades that make joining worthwhile.
+  - **`max_issued_tokens` is a single GLOBAL cap** on the total outstanding debt this agent has issued. It is set once by the operator, and the agent trades freely inside it. It must be global, so that a crowd of fresh identities can't each get its own allowance. A per-counterparty cap may be added as well.
+  - **Strangers work first.** To a counterparty outside the operator's fleet, an `iou` is signed only **after the work is delivered and accepted**, so no prospective IOUs (§3.3) go to strangers. The newcomer carries the default risk. The known agent's worst case is signing for junk, which the cap bounds.
+  - **Price the deliverable, not the effort.** The face value is agreed up front in the quote (`offer_face_tokens`, in the debtor's tokens). The worker's claimed spend (`spent_tokens`) is informational and never verified. An asymmetric rate (say 10:1) is just a negotiated quote.
 
 The operator must be able to see and set these, and see what each peer owes and is owed, **with liabilities as prominent as assets** (`vx econ`; hub status for the fleet). `vx econ forgive [peer]` retires everything owed to the operator's agents by the named peer, or by all peers.
 

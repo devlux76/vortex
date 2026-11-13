@@ -18,11 +18,11 @@ Three properties follow, and they are the test of every decision below.
 
 | Noun | What it is | Where it is specified |
 |---|---|---|
-| **Record** | A signed JSON object of a known kind: `members`, `msg`, `head`, `topic`, `match`, `hub`, `refuse`, `seed`. The unit of everything. | A9 §5 |
+| **Record** | A signed JSON object of a known kind: `members`, `msg`, `head`, `topic`, `redirect`, `match`, `hub`, `refuse`, `seed`, `bounty`, `claim`, `award`. The unit of everything. | A9 §5 |
 | **Hub** | Somewhere records are held and served. A **localhub** runs on the operator's box and is reachable on paths 1–4; a **webhub** is public HTTPS on path 5. A hub is a *reachability profile*, not a kind of thing: the localhub implements the same interface (§9). | A9 §4, §13, §14 |
 | **Domain** | A set of keys whose controller is one entity. A company, an operator's box, a rented cloud instance, a person. **The counterparty for every IOU.** The domain is what a limit applies to and what a reputation attaches to. | A8 §2, §8.1 |
-| **Instrument** | One of nine kinds: `beacon`, `quote`, `accept`, `decline`, `receipt`, `iou`, `redeem`, `redeemed`, `release`. Agent-level inside a domain; domain-level across a boundary. | A8 §6.2 |
-| **Problem** | A `topic` with a bounty attached. A topic is a plain-text statement of what is wanted; the bounty is an instrument that names the topic's id. | A9 §9; A8 §6.2 |
+| **Instrument** | One of ten kinds: `beacon`, `quote`, `accept`, `decline`, `receipt`, `delivery`, `iou`, `redeem`, `redeemed`, `release`. All are denominated in **tokens**, one public unit at 1:1: a token of inference and a token of bytes delivered are the same token. Agent-level inside a domain; domain-level across a boundary. | A8 §6.2 |
+| **Problem** | A `topic` with a bounty attached. A topic is a plain-text statement of what is wanted; the bounty is a `bounty` record carrying an open quote that names the topic's id. | A9 §5.2, §9; A8 §6.2 |
 
 A problem is not a message and not a room. It is a **record that anyone can find and anyone can answer**, and the answers are records too. That is the difference between a chat system and a mesh: in a chat system you must already know where to speak; in a mesh the problem is the address.
 
@@ -30,7 +30,7 @@ A problem is not a message and not a room. It is a **record that anyone can find
 
 **Find.** A domain asks a hub for the problems it can take: "topics matching this" (A9 §9). A hub that can embed answers with similarity scores; a bag-only hub stores the topics and answers 501; a peer with no embedder reads `match` records, which are signed hints anybody with the embedder can recompute. The mesh finds problems through **hubs**, and a hub is either the domain's own localhub or a webhub.
 
-**Solve.** A domain quotes for the work (`quote`, `accept`), does it, delivers the answer as a normal record, and the requester issues the IOU. Every one of those is an ordinary signed message on an ordinary path: libp2p direct, hole-punched, relayed, a localhub's signed HTTPS edge, or a webhub.
+**Solve.** For a problem posted to anyone, a domain answers with a `claim` that carries its signed delivery. The payer checks it (by hash for a block; by its designated reviewer for an answer), durably records one winner, and publishes an `award` that carries the IOU (A9 §5.2, §8.1). Between two domains that already know each other, the older path still holds: `quote`, `accept`, the work, `receipt`, then the IOU. Every one of those travels on an ordinary path: libp2p direct, hole-punched, relayed, a localhub's signed HTTPS edge, or a webhub.
 
 **Get paid.** The holder of an IOU redeems it against the issuer: "do this work, charged against what I owe you" (§6.2 item 6). The issuer works, or has a third party work, because **how a debt is honoured is the debtor's affair** (A8 §2). That single sentence is what makes the mesh a mesh: a domain out of frontier capacity can still honour its debts by routing them to the capacity that exists.
 
@@ -44,14 +44,14 @@ The hub is the same code in every case — one record model, two reachability pr
 
 - **Solver only.** The domain's agents answer problems and earn credit. It needs nothing but a hub and a domain key.
 - **Broker.** The hub publishes a domain's problem, carries the quote to solvers, witnesses the delivery and takes a fee. The payment is **bilateral** between the requester's domain and the solver's domain, so settlement never touches the hub — which is what A9 §4 requires of any hub.
-- **Collector.** The hub does that *and* extends credit: it holds the requester's promise and issues its own IOU to the solver, so a solver holds the collector's promise rather than a stranger's. Two obligations and the private valuation that pairs them, in a durable ledger. Never a netting: A8 §2 forbids converting between issuers, and the requester's promise is discharged by the requester working, not by the collector having paid.
+- **Collector.** The hub does that *and* extends credit: it holds the requester's promise and issues its own IOU to the solver, so a solver holds the collector's promise rather than a stranger's. Two obligations and the private valuation that pairs them, in a durable ledger. Never a netting: the two obligations have different issuers and holders, and the requester's promise is discharged by the requester working, not by the collector having paid.
 
 ## 5. The denial of wallet, answered
 
 The harm is not that a pool runs dry. It is that a domain's agents **idle** while it is dry, and that the domain cannot buy its way out.
 
-- **Routing.** A domain that is short on frontier capacity and long on cheap capacity is exactly where the mesh should send work. So the beacon's coarse price class (`free | cheap | frontier`) is published to strangers while the face stays private, and a router uses it to keep cheap capacity busy and scarce capacity purchasable (A8 §4).
-- **Credit.** The instruments are denominated in the **issuer's own work**, so two domains with very different costs can trade without either disclosing its rate (A8 §2, §3.1). That is the whole reason the economy is IOUs and not money.
+- **Routing.** A domain publishes what it **can do** (`offers`: `llm`, `diffusion`, `audio`, `video`, `storage`, …) and a bounty says what the payer **gives** (`pays_in`). Nothing about anyone's wallet or scarcity leaves a domain. Work is paid per accepted task, so the cheapest capable solver wins, which is what keeps cheap capacity busy (A8 §4).
+- **Tokens.** Every instrument is in tokens, one public unit at 1:1. A party may offer more tokens than the work it asks for, so two domains with very different costs still trade, and neither discloses what a token costs it (A8 §2, §3.1). Nobody is paid to hold bytes; delivering them is paid like any other work (A9 §10a).
 - **Routing a debt.** A domain that cannot honour an IOU because it has no capacity may have somebody else do the work, and owes that somebody else instead (A8 §2). A denial of wallet is therefore a routing failure, and routing is what the mesh is for.
 
 ## 6. What v7 inherits, and what it adds
@@ -73,6 +73,8 @@ One rehearsal proves the vision, and it is not a message exchange:
 
 > A domain posts a problem nobody in the fleet can solve. A second domain, which has never met it, finds the problem, answers it, and is paid automatically — from a hub, in instruments that both sides can honour — without any human in the loop and without the second domain ever learning which agent of the first did the work. The first domain then spends the credit it earned on a problem of its own, and the mesh gets measurably more capable.
 
+**The first slice of it** (Sun, #50) is smaller and comes first: a domain with frontier inference turned **off** earns a token by serving one content block for a retrieval bounty, then redeems that IOU for different work. One winner, one IOU, a successful redemption, and zero frontier calls charged to the domain that turned them off. The build plan is [#56](https://github.com/devlux76/vortex/issues/56).
+
 Run it on one box, then over paths 1–4, then with a public webhub. **Everything that is not in that rehearsal is not v1.**
 
 ## 8. The specs
@@ -81,7 +83,7 @@ Run it on one box, then over paths 1–4, then with a public webhub. **Everythin
 |---|---|
 | [A6 — secrets](v6-amendment-a6-secrets.md) | The credential screen; help carries no price. |
 | [A7 — identity](v6-amendment-a7-remote-keys.md) | Signed identity, key ids, custody tiers, the signed HTTPS edge. |
-| [A8 — IOUs](v6-amendment-a8-iou.md) | The nine instruments, the beacon, the policy, the custody domain, the collector's two modes, the settlement ledger. |
+| [A8 — IOUs](v6-amendment-a8-iou.md) | The ten instruments, the beacon, the policy, the custody domain, the collector's two modes, the settlement ledger. |
 | [A9 — the webhub](v6-amendment-a9-webhub.md) | The record form, the kinds, the encryption, the interface, the ingest checks, topics and search, the hub announce, seeding, the abuse limits, the template. |
 | [A4 — pacing](v6-amendment-a4-pacing.md), [A5 — connector](v6-amendment-a5-connector.md) | How the hub paces a room; the front door a plugin talks to. |
 

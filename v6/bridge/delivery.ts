@@ -137,19 +137,35 @@ export async function startRoomDelivery (bridge: Bridge, room: string, opts: { i
   const loop = (async () => {
     while (running) {
       try {
-        const members = (await bridge.peer.discover(room)).map(p => p.id.toString())
-        // Retries first: messages still undelivered for some member.
+        // Room-scoped targets (#36, Sun's QA): discovery alone must never
+        // grant room reads, so every candidate is checked with the hub
+        // (peer id → principal_keys → the key's room scope) before it
+        // receives anything.
+        const discovered = (await bridge.peer.discover(room)).map(p => p.id.toString())
+        const members: string[] = []
+        for (const id of discovered) {
+          if (id === bridge.peer.id.toString()) continue
+          try {
+            const verdict = await bridge.edge.request('GET', `/v1/rooms/${encodeURIComponent(room)}/peer-authorized?peer=${encodeURIComponent(id)}`)
+            if (verdict?.authorized === true) members.push(id)
+          } catch { /* a check failure refuses the peer for this poll */ }
+        }
+        // Retries next: messages still undelivered for some member. Pending
+        // is persisted BEFORE any cursor advance, so a crash can never leave
+        // an undelivered entry below the cursor without a pending record.
         const keep: Pending[] = []
+        let retryThrough = after
         for (const p of pending) {
           p.attempts++
           let failed: string[]
           try { failed = await deliver(bridge, room, p.msg, p.targets, stats) } catch { failed = p.targets }
-          if (failed.length === 0) saveCursor(p.msg.seq)
+          if (failed.length === 0) retryThrough = Math.max(retryThrough, p.msg.seq)
           else if (p.attempts < MAX_ATTEMPTS) keep.push({ ...p, targets: failed })
           else stats.dropped++
         }
         pending = keep
         writePending(stateFile, room, pending)
+        if (retryThrough > after) saveCursor(retryThrough)
         // Room log reads need membership (§8.2), which enrollment does not
         // grant; posting does. The bridge announces itself once.
         let entries: HubLogEntry[]
@@ -163,11 +179,14 @@ export async function startRoomDelivery (bridge: Bridge, room: string, opts: { i
           }
           throw e
         }
-        if (entries.length > 0) {
+        // Subscription boundary (#36): with no authorized members, nothing is
+        // forwarded and the cursor does not advance, so peers that join or
+        // reconnect do not silently miss history while they were away.
+        if (entries.length > 0 && members.length > 0) {
           const r = await forwardMessages(bridge, room, entries, members, stats)
-          saveCursor(r.through)
           pending = [...pending, ...r.pending.map(p => ({ ...p, attempts: 1 }))]
           writePending(stateFile, room, pending)
+          if (r.through > after) saveCursor(r.through)
         }
       } catch { /* hub or relay hiccup: keep polling */ }
       await Bun.sleep(intervalMs)

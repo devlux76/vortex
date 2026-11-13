@@ -39,6 +39,20 @@ Not here yet (later sub-issues of #3): #20 (mesh→hub delivery). #11
 - The bridge's own room lines are not forwarded. A message undelivered for
   some member is retried on later polls (bounded attempts, then dropped and
   counted in `stats`).
+- **Room authorization (#36).** Discovery alone does not grant room reads:
+  before forwarding, the bridge asks the hub
+  (`GET /v1/rooms/:room/peer-authorized?peer=…`) whether each candidate
+  member's key is enrolled, unrevoked, unexpired and — for an `unsealed`
+  key — covers the room. Refusals are per-poll. The registration-side gate
+  (relay rendezvous admission through `principal_keys`) lands with #24/#38.
+- **Crash-safe cursor and pending (#36).** Pending entries are persisted
+  *before* the cursor advances on every path, so a crash can never leave an
+  undelivered entry below the cursor without a pending record.
+- **Subscription boundary.** A poll with no authorized members forwards
+  nothing and does not advance the cursor: peers that join or reconnect do
+  not silently miss history while they were away. (The room log is still
+  bounded by the poll batch; long gaps with no members re-read from the
+  cursor each poll.)
 - The bridge's hub key is its own libp2p key (`identity.ts`): as SPKI,
   sha256 binds the peer id to the enrolled principal (`principal_keys`), so
   one key signs both halves.

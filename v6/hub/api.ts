@@ -13,6 +13,7 @@ import { EdgeAuth, EdgeAuthError, type EdgeIdentity } from './edge-auth.ts'
 import { AUTH_HEADER, STREAM_AUTH_HEADER } from '../client/edge-sign.ts'
 import { recentInRooms } from './store-log.ts'
 import { signedUpgrade, openPendingStream, answerPendingStream, closePendingStream } from './api-stream.ts'
+import { peerAuthorizedRoute } from './peer-auth.ts'
 
 const EVIDENCE_KINDS: Evidence[] = ['host-accepted', 'transport-written', 'hook-returned']
 
@@ -53,6 +54,9 @@ export class Api {
   streamAuthTimeoutMs = 10_000
   /** Requests authenticated by signature, keyed by the rebuilt Request object. */
   private signed = new WeakMap<Request, EdgeIdentity>()
+
+  /** The verified edge identity of a signed request (mesh delivery routes, #36). */
+  signedIdentity (req: Request): EdgeIdentity | undefined { return this.signed.get(req) }
 
   constructor (deps: HubServerDeps) {
     this.deps = deps
@@ -136,9 +140,10 @@ export class Api {
     // whatever the principal itself may do with another key (Sun, #7 finding 2).
     if (this.signed.get(req)?.key.custody === 'unsealed' &&
       !((method === 'POST' && path === '/v1/messages') ||
-        (method === 'GET' && (/^\/v1\/rooms\/[^/]+\/log$/.test(path) || path === '/v1/recent')))) {
+        (method === 'GET' && (/^\/v1\/rooms\/[^/]+\/log$/.test(path) || /^\/v1\/rooms\/[^/]+\/peer-authorized$/.test(path) || path === '/v1/recent')))) {
       return json({ error: 'an unsealed key may only post to and read its named rooms' }, 403)
     }
+    if (method === 'GET' && /^\/v1\/rooms\/[^/]+\/peer-authorized$/.test(path)) return peerAuthorizedRoute(this, req, url, path)
     if (method === 'POST' && path === '/v1/messages') return this.postMessages(req)
     if (method === 'PUT' && /^\/v1\/bindings\/[^/]+$/.test(path)) return this.putBinding(req, url, path.slice('/v1/bindings/'.length))
     if (method === 'DELETE' && /^\/v1\/bindings\/[^/]+\/[^/]+$/.test(path)) return this.deleteBinding(req, path)

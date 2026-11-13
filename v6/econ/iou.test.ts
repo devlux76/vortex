@@ -18,9 +18,9 @@ const REF = newId()
 // One valid input per kind; the first int field of each is the "amount" used below.
 const CASES: Record<EconKind, Record<string, unknown>> = {
   beacon: { agent: A, pool: 'claude-5h', used_pct: 62, resets_at: TS + 3600, floor_pct: 20, callin_pct: 80, lending: true, cost_hint: 'frontier' },
-  quote: { to: B, task: 'QA PR #12', est_tokens: 20000, offer_face_tokens: 50000, expires: TS + 600 },
+  quote: { to: B, task: 'QA PR #12', est_tokens: 20000, offer_face_tokens: 50000, expires_at: TS + 600 },
   accept: { quote: REF, reason: '' },
-  decline: { quote: REF, reason: 'over max_owed_by_peer' },
+  decline: { ref: REF, reason: 'redeem over the remaining balance', remaining: 32000 },
   receipt: { quote: REF, spent_tokens: 18000 },
   iou: { holder: B, face_tokens: 50000, quote: REF, issued_at: TS, expires_at: 0 },
   redeem: { iou: REF, task: 'docs cleanup', est_tokens: 20000 },
@@ -76,7 +76,8 @@ describe('every kind', () => {
         const amount = firstInt(kind)
         const t = amount !== undefined ? { ...m, [amount]: (m[amount] as number) + 1 } : { ...m, ts: TS + 1 }
         await expect(verify(t)).rejects.toThrow('bad signature')
-        await expect(verify({ ...m, from: B })).rejects.toThrow('bad signature')
+        const other = kind === 'beacon' ? { from: B, agent: B } : { from: B }
+        await expect(verify({ ...m, ...other })).rejects.toThrow('bad signature')
       })
 
       test('wrong signer fails', async () => {
@@ -171,6 +172,7 @@ describe('beacon ranges', () => {
     ['floor over 100', { callin_pct: undefined, floor_pct: 101 }, 'floor_pct'],
     ['cost_hint outside the classes', { cost_hint: 'metered' }, 'cost_hint'],
     ['lending not boolean', { lending: 'yes' }, 'lending'],
+    ['agent is not the signer', { agent: B }, 'beacon agent must equal from'],
   ]
   for (const [name, extra, msg] of bad) {
     test(name, async () => {
@@ -185,5 +187,14 @@ describe('beacon ranges', () => {
     await sign(alice, input('beacon', { floor_pct: 0, callin_pct: 0 }))
     await sign(alice, input('beacon', { floor_pct: 100, callin_pct: 100, used_pct: 100 }))
     for (const c of COST_HINTS) await sign(alice, input('beacon', { cost_hint: c }))
+  })
+})
+
+describe('decline', () => {
+  test('remaining is optional (absent when declining a quote)', async () => {
+    const m = await sign(alice, input('decline', { remaining: undefined, reason: 'over max_owed_by_peer' }))
+    expect(Object.keys(m)).not.toContain('remaining')
+    expect(encode(m)).not.toContain('remaining')
+    await verify(encode(m))
   })
 })

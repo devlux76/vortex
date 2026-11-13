@@ -85,6 +85,9 @@ Everything a webhub stores is a **record**: a JSON object, signed by the key tha
 | `hub` | a webhub's own key | `url`, `embedder`, `limits`, `load_pct`, `stamp` | 24 hours, renewable |
 | `refuse` | a webhub's own key | `room` | 7 days, renewable |
 | `seed` | any key that holds the content | `content_id`, `size`, `sealed`, `servers`, `stamp` | 7 days, renewable |
+| `bounty` | the payer | `quote`, `stamp` | until the quote's `expires_at`, at most 7 days |
+| `claim` | the solver's domain | `bounty`, `delivery`, `servers`, `stamp` | the life of the bounty |
+| `award` | the payer | `bounty`, `claim`, `iou` | 7 days |
 
 - **`members`.** `room` must equal base64url SHA-256 of `from` followed by `nonce`. Room ownership is therefore self-certifying: no webhub has to remember who came first, and nobody can claim another holder's room. `members` is a list of at most 256 entries `{id, enc, wrap}`: a key id, that member's X25519 public key, and the room key of this `epoch` wrapped for that member (§6). `epoch` is an integer that rises with each change; a webhub keeps only the highest. `async` is true when the room wants mirroring (§11).
 - **`msg`.** `body` is one sealed block (§6). `seq` is the sender's own counter in that room, starting at 1 and shared by its `msg` and `head` records, so a reader can see a gap. `from` must be in the room's current `members` record.
@@ -94,6 +97,9 @@ Everything a webhub stores is a **record**: a JSON object, signed by the key tha
 - **`match`.** A search answer left for a peer that can't embed (§9). `matches` is a list of at most 8 entries `{id, score}` naming held topics. A webhub keeps at most 8 `match` records per topic, one per signing key (*provisional*).
 - **`hub`** and **`refuse`**: §10 and §8.
 - **`seed`.** An offer to serve a package (§10a). `content_id` names it, `size` is its length in bytes, `sealed` says whether its owner encrypted it before splitting, and `servers` lists at most 8 `{url}` entries that serve it. The signer holds the package; publishing the offer is its owner's choice.
+- **`bounty`.** An open offer, published so that a stranger can find it at a hub. `quote` carries the payer's signed A8 open quote **verbatim** — `to` is `"*"`, an offer to anyone (A8 §6.2) — and `stamp` is the proof of work that keeps the kind from being free to spam. The face was already public in the quote, so a bounty discloses nothing that was not already.
+- **`claim`.** A solver's answer to a bounty. `bounty` is the bounty's record id; `delivery` is the solver's signed delivery, bound to that quote and to the solver's domain (A8 §6.2); `servers` says where the block or the answer can be fetched, under the same URL rules as a `seed` — a hub checks the text of a URL and never requests it (§8.1 check 7). `stamp` again.
+- **`award`.** The payer's decision. `bounty` names the bounty, `claim` the winning claim, and `iou` the payer's signed IOU to the winner, which travels **inside** the award so that a solver reading the hub learns of the payment from one record. A hub keeps at most one `award` per bounty and refuses a second from the same payer.
 - **`stamp`**: proof of work (§12).
 
 ## 6. Encryption
@@ -124,6 +130,8 @@ All calls are HTTP/1.1 over TLS on port 443, with JSON bodies, except that conte
 | `GET /v1/feed?after=N` | an announced hub | Every record after position N, for sync (§8) |
 | `GET /v1/inventory` | anyone | Count and digest of held record ids per hour bucket |
 | `GET /v1/seeds` | anyone | The `seed` records this webhub holds (§10a) |
+| `GET /v1/bounties` | anyone | The `bounty` records this webhub holds (§5.2) |
+| `GET /v1/bounties/:id/claims` | anyone | The `claim` records for that bounty, in arrival order (§5.2) |
 | `GET /v1/content/:content_id` | anyone | The root index block of a package this webhub holds (§10a) |
 | `GET /v1/blocks/:block_id` | anyone | One content block, as 512 KiB of raw bytes (§10a) |
 | `PUT /v1/blocks/:block_id` | a key this webhub accepts content from | Offer one content block to this webhub (§10a) |
@@ -145,6 +153,11 @@ All calls are HTTP/1.1 over TLS on port 443, with JSON bodies, except that conte
 6. Quotas (§12), which are the operator's.
 7. For a `seed`: every `url` in `servers` is well formed: scheme `https`, no port other than 443, no user or password part, a host name and not an address literal, at most 256 bytes. **A webhub checks the text of a URL and never requests it** (§10a).
 8. `seed` and `hub` records carry a stamp (§12).
+9. For a `bounty`: the `quote` is a well-formed A8 open quote — `to` is `"*"` — signed by the bounty's own `from`; the quote has not expired; and the bounty outlives neither the quote's `expires_at` nor 7 days.
+10. For a `claim`: it names a bounty; the `delivery`'s signature verifies and is bound to an open quote's id and to the claimant's domain (A8 §6.2); every `url` in `servers` passes the text rules of check 7; and the claim carries a stamp. A claim for a bounty this hub has not seen is held and served under that bounty's id; if the bounty arrives already expired, the claim is refused.
+11. For an `award`: it names a bounty and one of its claims; the `iou`'s signature verifies and its `from` is the award's own `from`; and **this hub keeps at most one award per bounty and refuses a second from the same payer.** Where this hub holds the bounty, the `iou`'s face does not exceed the open quote's `offer_face_tokens`, so an award cannot carry a promise larger than the one the bounty advertised.
+
+A hub checks form and signatures only. **It never decides a winner** (§5.2).
 
 A webhub never trusts another webhub. A record that arrives by sync passes the same checks, except that the 5-minute `ts` window is replaced by "not expired".
 
@@ -192,7 +205,7 @@ A provider can go offline. Hugging Face can go offline. A model that lives in on
 - **Fetching.** A client gets the root from any server, checks that it hashes to the content id and that its size matches the `seed`, then fetches each block by id and checks each hash. A block that fails is discarded and asked for elsewhere. Any server can supply any block.
 - **Not opening what you did not expect.** A package may be large, and a reader must not take delivery of one it was not expecting. A client fetches only after the size is known and a human or the local agent has agreed to it; it never fetches one on its own initiative.
 - **Who makes the request.** A `seed` names URLs. A webhub checks their text (§8.1) and never requests them, so a `seed` can't be used to aim webhubs at anyone. Only a client that has decided to download makes the request, and it resolves the name once, refuses a private, loopback or link-local address, connects to the address it checked, follows no redirect, verifies TLS against the name it was given, sets a deadline, and reads at most one block per request.
-- **Payment.** Nobody is paid to hold bytes. A requester offers credit for the delivery of named blocks, and the first delivery that hashes correctly earns it, with no reviewer and no dispute (operator, 2026-11-13). Block ids are what such an offer names. Its record and settlement belong to A8 and are not specified here (§17 item 10).
+- **Payment.** Nobody is paid to hold bytes. A requester offers tokens for the delivery of named blocks: it publishes an open quote naming the block ids in `task` (A8 §6.2) inside a **`bounty`** record (§5.2). A solver that holds the blocks answers with a **`claim`** naming its delivery and the servers; the requester fetches, verifies the hashes, **durably records one winner**, and publishes an **`award`**, which carries the IOU (§5.2). The first delivery the payer records earns it, and there is no dispute: a block either hashes to its name or it does not. Block ids are what such an offer names.
 
 ## 11. Scribes and async members
 
@@ -206,7 +219,7 @@ A provider can go offline. Hugging Face can go offline. A model that lives in on
 
 Carrying everything means one careless webhub could flood the rest, so a webhub needs limits. Whose limits they are is the operator's, and the protocol imposes none: the values below are defaults, not rules, and the operator — or the agent setting the webhub up, to whatever degree of hands-off the operator asked for — may set anything else. What the protocol does is make the limits *legible*: a webhub advertises them (§10), checks them on every record (§8.1), and answers with the matching code (§7).
 
-- **Stamp.** `members`, `topic`, `seed` and `hub` records carry `stamp`, a value such that SHA-256 of the record id computed without `stamp`, followed by `stamp`, has at least 20 leading zero bits. It needs no accounts and every webhub checks it identically. A webhub may demand more for direct submissions, and accepts the difficulty it advertises by sync. The difficulty is the operator's: the default is a starting point, not a floor, and an operator may set it to zero deliberately.
+- **Stamp.** `members`, `topic`, `seed`, `hub`, `bounty` and `claim` records carry `stamp`, a value such that SHA-256 of the record id computed without `stamp`, followed by `stamp`, has at least 20 leading zero bits. It needs no accounts and every webhub checks it identically. A webhub may demand more for direct submissions, and accepts the difficulty it advertises by sync. The difficulty is the operator's: the default is a starting point, not a floor, and an operator may set it to zero deliberately.
 - **Defaults are finite; unlimited is deliberate.** The protocol sets no limit, and the reference adapters ship the ones below. An operator may raise any of them, or set one to `unlimited` by name. A webhub never runs without a limit merely because none was configured: on a metered platform an unlimited bag is a bill that any one key can run up.
 - **Whole bag** (*default*): 4 GiB of records.
 - **Per room** (*default*): 256 MiB and 500 records held at once.
@@ -268,6 +281,7 @@ These can't change without a new `v`:
 6. `content_type` on topics.
 7. The block size, 512 KiB, and the sealed-block framing of §6.
 8. The content id construction of §10a. It is not frozen until test vectors exist for 16,383 and 16,384 data blocks, the boundary where the index gains a level; a change after that would give one package two names.
+9. The kinds `bounty`, `claim` and `award`, and their key orders.
 
 Everything else (limits, floors, intervals, embedder, index, platform) is advertised or local.
 
@@ -290,7 +304,7 @@ Everything else (limits, floors, intervals, embedder, index, platform) is advert
 7. **Absent holders.** A transfer record would let a holder hand a room on.
 8. **Stamp difficulty** is a guess until there is traffic to measure.
 9. **Which answer discharges.** When several domains answer the same task, the collector's rule for choosing is one it has to publish (A8 §7.2). In broker mode the requester accepts, by issuing its IOU after the solver's receipt; in credit mode the collector accepts on the requester's behalf, because it is the party that extended the credit.
-10. **Retrieval offers.** The record by which a requester offers credit for named blocks, how a deliverer claims it, and how a client chooses among several servers. Payment is for retrieval only, never for storage (§10a); the instrument is A8's.
+10. **Retrieval offers.** The record by which a requester offers credit for named blocks, how a deliverer claims it, and how a client chooses among several servers. Payment is for retrieval only, never for storage (§10a); the instrument is A8's. **The first two are now specified** — the `bounty`, `claim` and `award` records of §5.2 — and what is left is the last: how a client chooses among several servers for one content id, and how a solver finds the bounty at all, which is the retrieval lookup (§10a).
 11. **The cost of a fixed block for chat.** A 200-byte reply is a 699 KB request. A scribe that posted every minute to two webhubs would store about 720 MiB a day per room on each, which is why §11 has it post only when there is something new.
 12. **Sun's queued findings on `186690a`** are not yet folded in. §8.1 check 7 and §10's following rule are written to meet the one known to concern announced URLs.
 

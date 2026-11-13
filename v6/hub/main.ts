@@ -73,6 +73,7 @@ export async function startHub (over: { cfg?: Partial<HubConfig>; stateDir?: str
     fingerprint = hasher.digest('hex')
   }
 
+  api.hubId = fingerprint
   const listen = parseListen(cfg.listen)
   const handlers = api.handlers()
   const plain = Bun.serve({
@@ -83,6 +84,11 @@ export async function startHub (over: { cfg?: Partial<HubConfig>; stateDir?: str
     // remote traffic look local (A7 §1). Requests it forwards carry one of
     // these headers; refuse them before authentication or upgrade.
     fetch: (req: Request, server: any) => {
+      // Signed requests are bound to the TLS listener's identity (A7 §3);
+      // the plaintext loopback listener is for local bearer clients only.
+      if (req.headers.has('vx-auth') || req.headers.has('vx-stream-auth')) {
+        return new Response(JSON.stringify({ error: 'signed requests are accepted only on the TLS listener' }), { status: 421, headers: { 'content-type': 'application/json' } })
+      }
       const via = forwardedBy(req)
       if (via !== undefined) {
         console.error(`[vortexd] refused forwarded request on the loopback listener (${via}); point tunnels at tls.listen`)

@@ -52,6 +52,9 @@ const SHAPES: readonly Shape[] = [
   { kind: 'stripe-key', re: /(?<![A-Za-z0-9])[rs]k_live_[A-Za-z0-9]{20,}/g },
   { kind: 'jwt', re: /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g },
   { kind: 'libp2p-key', re: /(?<![A-Za-z0-9+/_-])CA[AEIM]S[A-Za-z0-9+/_-]{44,}={0,2}/g, ok: m => libp2pPrivateKey(m[0]) },
+  // A JWK private key (an A7 unsealed edge key file, or any exported key): one
+  // JSON object holding both "kty" and a long private "d" member, either order.
+  { kind: 'jwk-private-key', re: /\{[^{}]*"kty"\s*:[^{}]*"d"\s*:\s*"[A-Za-z0-9_-]{40,}"[^{}]*\}|\{[^{}]*"d"\s*:\s*"[A-Za-z0-9_-]{40,}"[^{}]*"kty"\s*:[^{}]*\}/g },
   { kind: 'bearer-credential', re: /\bBearer\s+([A-Za-z0-9._~+/-]{20,})=*/gi, ok: m => randomTail(m[1]) },
 ]
 

@@ -13,10 +13,15 @@ import { hookContext } from './hook.ts'
 import { codexBind } from './codex.ts'
 import { uninstallFiles } from './uninstall.ts'
 import { installPrincipal } from './install.ts'
+import { keysMain } from './keys.ts'
 
 const USAGE = `vx — operator CLI for VORTEX v6
 
   vx enroll <name>                          enroll a principal (hub host)
+  vx enroll <name> --key <spki-b64> [--alg ed25519|p256] [--custody C] [--rooms a,b] [--ttl-hours N]
+                                            enroll a device's public key (A7; no secret moves)
+  vx key list [<principal>] | vx key revoke <key-id>
+  vx edge keygen|send|read ...              signed HTTP edge client (A7 §3; see v6/cli/keys.ts)
   vx install <principal>                    enroll and write its credential file (hub host, local agent)
   vx say [--to a,b] [--room r] [--scope room|dm] [--reply-to <id>] <text>
   vx log [<room>]|--dm [--after seq] [--limit n]   ids + refs printed (A1)
@@ -62,6 +67,7 @@ async function main (): Promise<void> {
     process.exit(0)
   }
 
+  if (await keysMain(command, rest)) return
   if (command === 'enroll') {
     const name = rest[0]
     if (name === undefined || !PRINCIPAL_RE.test(name)) die(`enroll takes a principal name matching ${PRINCIPAL_RE}`)

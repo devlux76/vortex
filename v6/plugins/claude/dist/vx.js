@@ -1,6 +1,6 @@
 // @bun
 // v6/cli/vx.ts
-import { mkdirSync as mkdirSync5, existsSync as existsSync5 } from "fs";
+import { mkdirSync as mkdirSync5, existsSync as existsSync6 } from "fs";
 
 // v6/client/client.ts
 function derDigest(raw) {
@@ -1399,10 +1399,372 @@ async function installPrincipal(principal) {
   return { credentialPath: path, hub };
 }
 
+// v6/cli/keys.ts
+import { existsSync as existsSync5 } from "fs";
+
+// v6/hub/store-keys.ts
+var CUSTODY = ["hardware", "separate-user", "os-keystore", "unsealed"];
+var UNSEALED_MAX_TTL_MS = 7 * 24 * 3600000;
+var KEYS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS principal_keys (
+  key_id TEXT PRIMARY KEY,
+  principal TEXT NOT NULL,
+  alg TEXT NOT NULL,
+  spki TEXT NOT NULL,
+  custody TEXT NOT NULL,
+  rooms TEXT,
+  expires INTEGER,
+  created INTEGER NOT NULL,
+  revoked INTEGER
+);
+CREATE INDEX IF NOT EXISTS principal_keys_principal ON principal_keys(principal);
+CREATE TABLE IF NOT EXISTS edge_nonces (
+  key_id TEXT NOT NULL,
+  nonce TEXT NOT NULL,
+  expires INTEGER NOT NULL,
+  PRIMARY KEY (key_id, nonce)
+);
+CREATE INDEX IF NOT EXISTS edge_nonces_expires ON edge_nonces(expires);
+`;
+function rowOf(r) {
+  return { ...r, rooms: r.rooms === null ? null : JSON.parse(r.rooms) };
+}
+var ready = new WeakSet;
+function ensureKeysSchema(s) {
+  if (ready.has(s))
+    return;
+  s.db.exec(KEYS_SCHEMA);
+  ready.add(s);
+}
+function addKey(s, k, now = Date.now()) {
+  if (k.custody === "unsealed") {
+    if (k.rooms === null || k.rooms.length === 0)
+      throw new Error("an unsealed key must be limited to named rooms");
+    if (k.expires === null || k.expires - now > UNSEALED_MAX_TTL_MS)
+      throw new Error("an unsealed key must expire within 7 days");
+  }
+  if (!CUSTODY.includes(k.custody))
+    throw new Error(`unknown custody: ${k.custody}`);
+  ensureKeysSchema(s);
+  s.db.prepare(`INSERT INTO principal_keys (key_id, principal, alg, spki, custody, rooms, expires, created, revoked)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`).run(k.key_id, k.principal, k.alg, k.spki, k.custody, k.rooms === null ? null : JSON.stringify(k.rooms), k.expires, now);
+  return getKey(s, k.key_id);
+}
+function getKey(s, keyId) {
+  ensureKeysSchema(s);
+  const r = s.db.prepare("SELECT * FROM principal_keys WHERE key_id = ?").get(keyId);
+  return r === null || r === undefined ? undefined : rowOf(r);
+}
+function listKeys(s, principal) {
+  ensureKeysSchema(s);
+  const rows = principal === undefined ? s.db.prepare("SELECT * FROM principal_keys ORDER BY principal, created").all() : s.db.prepare("SELECT * FROM principal_keys WHERE principal = ? ORDER BY created").all(principal);
+  return rows.map(rowOf);
+}
+function revokeKey(s, keyId, now = Date.now()) {
+  ensureKeysSchema(s);
+  return s.db.prepare("UPDATE principal_keys SET revoked = ? WHERE key_id = ? AND revoked IS NULL").run(now, keyId).changes === 1;
+}
+
+// v6/client/edge-sign.ts
+var AUTH_DOMAIN = "vortex-v6-auth\x00";
+var AUTH_HEADER = "vx-auth";
+var ALGS = {
+  ed25519: { importParams: { name: "Ed25519" }, signParams: { name: "Ed25519" }, generate: { name: "Ed25519" } },
+  p256: {
+    importParams: { name: "ECDSA", namedCurve: "P-256" },
+    signParams: { name: "ECDSA", hash: "SHA-256" },
+    generate: { name: "ECDSA", namedCurve: "P-256" }
+  }
+};
+var enc2 = new TextEncoder;
+function b64url(bytes) {
+  return Buffer.from(bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : bytes).toString("base64url");
+}
+function hex(bytes) {
+  return Buffer.from(new Uint8Array(bytes)).toString("hex");
+}
+async function sha256Hex2(bytes) {
+  return hex(await crypto.subtle.digest("SHA-256", bytes));
+}
+async function keyIdOf(spki) {
+  return sha256Hex2(spki);
+}
+function signedBytes(f, method, path, bodySha256) {
+  const payload = JSON.stringify({
+    v: 1,
+    kind: "http",
+    principal: f.principal,
+    key_id: f.key_id,
+    hub: f.hub,
+    nonce: f.nonce,
+    ts: f.ts,
+    method: method.toUpperCase(),
+    path,
+    body: bodySha256
+  });
+  return enc2.encode(AUTH_DOMAIN + payload);
+}
+function formatAuthHeader(f, sig) {
+  return `${f.principal} ${f.key_id} ${f.ts} ${f.nonce} ${b64url(sig)}`;
+}
+async function signRequest(key, alg, ids, method, path, body, now = Date.now()) {
+  const f = { ...ids, nonce: b64url(crypto.getRandomValues(new Uint8Array(24))), ts: now };
+  const sig = await crypto.subtle.sign(ALGS[alg].signParams, key, signedBytes(f, method, path, await sha256Hex2(body)));
+  return formatAuthHeader(f, sig);
+}
+
+// v6/client/edge.ts
+import { chmodSync as chmodSync3, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "fs";
+async function generateEdgeKey(alg = "ed25519") {
+  const pair = await crypto.subtle.generateKey(ALGS[alg].generate, true, ["sign", "verify"]);
+  const spki = new Uint8Array(await crypto.subtle.exportKey("spki", pair.publicKey));
+  return { jwk: await crypto.subtle.exportKey("jwk", pair.privateKey), spkiB64: Buffer.from(spki).toString("base64"), keyId: await keyIdOf(spki) };
+}
+function writeKeyFile(path, file) {
+  writeFileSync3(path, JSON.stringify(file, null, 2) + `
+`, { mode: 384 });
+  chmodSync3(path, 384);
+}
+function readKeyFile(path) {
+  const f = JSON.parse(readFileSync4(path, "utf8"));
+  if (f.v !== 1 || f.custody !== "unsealed" || !(f.alg in ALGS))
+    throw new Error(`${path} is not a VORTEX edge key file`);
+  return f;
+}
+
+class EdgeClient {
+  opts;
+  constructor(opts) {
+    const host = new URL(opts.url).hostname.replace(/^\[|\]$/g, "");
+    if (opts.insecureLoopback === true && !["127.0.0.1", "localhost", "::1"].includes(host)) {
+      throw new Error("insecureLoopback is only for loopback hosts");
+    }
+    this.opts = opts;
+  }
+  static async fromKeyFile(path, over = {}) {
+    const f = readKeyFile(path);
+    const url = over.url ?? f.hub_url;
+    const hubId = over.hubId ?? f.hub_id;
+    if (url === undefined || hubId === undefined)
+      throw new Error(`${path} lacks hub_url/hub_id; pass --hub and --hub-id`);
+    const key = await crypto.subtle.importKey("jwk", f.jwk, ALGS[f.alg].importParams, false, ["sign"]);
+    return new EdgeClient({ url, principal: f.principal, keyId: f.key_id, hubId, alg: f.alg, key, insecureLoopback: over.insecureLoopback });
+  }
+  async request(method, path, body) {
+    const bytes = body === undefined ? new Uint8Array(0) : new TextEncoder().encode(JSON.stringify(body));
+    const o = this.opts;
+    const auth = await signRequest(o.key, o.alg, { principal: o.principal, key_id: o.keyId, hub: o.hubId }, method, path, bytes);
+    const headers = { [AUTH_HEADER]: auth };
+    if (body !== undefined)
+      headers["content-type"] = "application/json";
+    const res = await fetch(new URL(path, o.url), {
+      method,
+      headers,
+      body: body === undefined ? undefined : bytes,
+      ...o.insecureLoopback === true ? { tls: { rejectUnauthorized: false } } : {}
+    });
+    const text = await res.text();
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = { error: text };
+    }
+    if (!res.ok)
+      throw Object.assign(new Error(`vortex hub ${res.status}: ${parsed?.error ?? text}`), { status: res.status });
+    return parsed;
+  }
+  send(msg) {
+    return this.request("POST", "/v1/messages", { scope: "room", ...msg });
+  }
+  async roomLog(room, after = 0, limit = 100) {
+    return (await this.request("GET", `/v1/rooms/${encodeURIComponent(room)}/log?after=${after}&limit=${limit}`)).messages;
+  }
+  async dms(after = 0, limit = 100) {
+    return (await this.request("GET", `/v1/dms/mine?after=${after}&limit=${limit}`)).messages;
+  }
+}
+
+// v6/cli/keys.ts
+function die(message) {
+  console.error(`vx: ${message}`);
+  process.exit(1);
+}
+function parseArgs(rest) {
+  const flags = new Map;
+  const bare = [];
+  const bools = new Set;
+  for (let i = 0;i < rest.length; i++) {
+    const a = rest[i];
+    if (!a.startsWith("--")) {
+      bare.push(a);
+      continue;
+    }
+    const next = rest[i + 1];
+    if (next !== undefined && !next.startsWith("--")) {
+      flags.set(a.slice(2), next);
+      i++;
+    } else {
+      bools.add(a.slice(2));
+    }
+  }
+  return { flags, bare, bools };
+}
+function hubFingerprint(stateDir) {
+  const certPath = `${stateDir}/cert.pem`;
+  if (!existsSync5(certPath))
+    return;
+  const der = Bun.spawnSync(["openssl", "x509", "-in", certPath, "-outform", "DER"]).stdout;
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(der);
+  return hasher.digest("hex");
+}
+async function enrollKey(store, a, now = Date.now()) {
+  if (!PRINCIPAL_RE.test(a.principal))
+    throw new Error(`principal must match ${PRINCIPAL_RE}`);
+  if (a.principal === "operator" && a.custody === "unsealed")
+    throw new Error("the operator may not hold an unsealed key");
+  for (const r of a.rooms ?? [])
+    if (!ROOM_RE.test(r))
+      throw new Error(`invalid room: ${r}`);
+  const spki = new Uint8Array(Buffer.from(a.spkiB64, "base64"));
+  await crypto.subtle.importKey("spki", spki, ALGS[a.alg].importParams, true, ["verify"]).catch(() => {
+    throw new Error(`--key is not a valid ${a.alg} SubjectPublicKeyInfo`);
+  });
+  const ttlMs = a.ttlHours === undefined ? a.custody === "unsealed" ? 24 * 3600000 : undefined : a.ttlHours * 3600000;
+  if (a.custody === "unsealed" && ttlMs !== undefined && ttlMs > UNSEALED_MAX_TTL_MS)
+    throw new Error("an unsealed key may live at most 168 hours");
+  if (!store.principalExists(a.principal))
+    store.createPrincipal(a.principal);
+  return addKey(store, {
+    key_id: await keyIdOf(spki),
+    principal: a.principal,
+    alg: a.alg,
+    spki: Buffer.from(spki).toString("base64"),
+    custody: a.custody,
+    rooms: a.rooms,
+    expires: ttlMs === undefined ? null : now + ttlMs
+  }, now);
+}
+function hubStore() {
+  const roots = hubRoots();
+  if (!existsSync5(roots.db))
+    die(`no hub database at ${roots.db}; run vortexd on this host first`);
+  return new HubStore(roots.db);
+}
+function describe(k) {
+  const state = k.revoked !== null ? "revoked" : k.expires !== null && Date.now() >= k.expires ? "expired" : "active";
+  const rooms = k.rooms === null ? "any room" : `rooms ${k.rooms.join(",")}`;
+  const exp = k.expires === null ? "no expiry" : `expires ${new Date(k.expires).toISOString()}`;
+  return `${k.key_id}  ${k.principal}  ${k.alg}  custody=${k.custody}  ${rooms}  ${exp}  ${state}`;
+}
+async function keysMain(command, rest) {
+  if (command === "enroll" && rest.includes("--key")) {
+    const { flags, bare } = parseArgs(rest);
+    const alg = flags.get("alg") ?? "ed25519";
+    if (!(alg in ALGS))
+      die("--alg must be ed25519 or p256");
+    const custody = flags.get("custody") ?? "unsealed";
+    if (!CUSTODY.includes(custody))
+      die(`--custody must be one of ${CUSTODY.join(", ")}`);
+    const rooms = flags.has("rooms") ? flags.get("rooms").split(",").filter(Boolean) : null;
+    const ttl = flags.has("ttl-hours") ? Number(flags.get("ttl-hours")) : undefined;
+    if (ttl !== undefined && !(Number.isFinite(ttl) && ttl > 0))
+      die("--ttl-hours must be a positive number");
+    const store = hubStore();
+    try {
+      const k = await enrollKey(store, { principal: bare[0] ?? "", spkiB64: flags.get("key") ?? "", alg, custody, rooms, ttlHours: ttl });
+      console.log(describe(k));
+      const fp = hubFingerprint(hubRoots().state);
+      console.log(fp === undefined ? "hub id: none yet (configure tls.listen and start the hub; signed requests need the TLS listener)" : `hub id: ${fp}`);
+      console.log("Compare the key id with the one the device printed. Only the public key is stored.");
+    } catch (e) {
+      die(e.message);
+    } finally {
+      store.close();
+    }
+    return true;
+  }
+  if (command === "key") {
+    const store = hubStore();
+    try {
+      if (rest[0] === "list")
+        for (const k of listKeys(store, rest[1]))
+          console.log(describe(k));
+      else if (rest[0] === "revoke" && rest[1] !== undefined)
+        console.log(revokeKey(store, rest[1]) ? `revoked ${rest[1]}` : die("no such active key"));
+      else
+        die("usage: vx key list [<principal>] | vx key revoke <key-id>");
+    } finally {
+      store.close();
+    }
+    return true;
+  }
+  if (command === "edge")
+    return edgeMain(rest);
+  return false;
+}
+async function edgeMain(rest) {
+  const [sub, ...args] = rest;
+  const { flags, bare, bools } = parseArgs(args);
+  if (sub === "keygen") {
+    const principal = flags.get("principal");
+    const out = flags.get("out");
+    if (principal === undefined || !PRINCIPAL_RE.test(principal) || out === undefined)
+      die("usage: vx edge keygen --principal <name> --out <file> [--alg ed25519|p256] [--hub <url>] [--hub-id <fp>]");
+    if (existsSync5(out))
+      die(`${out} already exists`);
+    const alg = flags.get("alg") ?? "ed25519";
+    if (!(alg in ALGS))
+      die("--alg must be ed25519 or p256");
+    const k = await generateEdgeKey(alg);
+    writeKeyFile(out, { v: 1, principal, alg, key_id: k.keyId, custody: "unsealed", hub_url: flags.get("hub"), hub_id: flags.get("hub-id"), jwk: k.jwk });
+    console.log(`key id: ${k.keyId}`);
+    console.log(`public key (spki, base64): ${k.spkiB64}`);
+    console.log(`custody: unsealed (private key in ${out}, mode 0600, readable by this user)`);
+    console.log(`On the hub host: vx enroll ${principal} --key ${k.spkiB64} --alg ${alg} --custody unsealed --rooms <room> --ttl-hours 24`);
+    return true;
+  }
+  const keyPath = flags.get("key");
+  if (keyPath === undefined)
+    die("usage: vx edge send|read --key <file> ...");
+  const client = await EdgeClient.fromKeyFile(keyPath, { url: flags.get("hub"), hubId: flags.get("hub-id"), insecureLoopback: bools.has("insecure-loopback") });
+  if (sub === "send") {
+    const text = bare.join(" ");
+    if (text === "")
+      die("send needs text");
+    const to = flags.get("to")?.split(",").filter(Boolean);
+    console.log(JSON.stringify(await client.send({ text, room: flags.get("room"), to })));
+    return true;
+  }
+  if (sub === "read") {
+    let after = Number(flags.get("after") ?? 0);
+    const dm = bools.has("dm");
+    const room = flags.get("room") ?? "all";
+    for (;; ) {
+      const messages = dm ? await client.dms(after) : await client.roomLog(room, after);
+      for (const m of messages) {
+        console.log(logLine(m));
+        after = Math.max(after, m.seq);
+      }
+      if (!bools.has("follow"))
+        break;
+      await Bun.sleep(messages.length > 0 ? 250 : 3000);
+    }
+    console.error(`[vx edge] next --after ${after}`);
+    return true;
+  }
+  die("usage: vx edge keygen|send|read ...");
+}
+
 // v6/cli/vx.ts
 var USAGE = `vx \u2014 operator CLI for VORTEX v6
 
   vx enroll <name>                          enroll a principal (hub host)
+  vx enroll <name> --key <spki-b64> [--alg ed25519|p256] [--custody C] [--rooms a,b] [--ttl-hours N]
+                                            enroll a device's public key (A7; no secret moves)
+  vx key list [<principal>] | vx key revoke <key-id>
+  vx edge keygen|send|read ...              signed HTTP edge client (A7 \xA73; see v6/cli/keys.ts)
   vx install <principal>                    enroll and write its credential file (hub host, local agent)
   vx say [--to a,b] [--room r] [--scope room|dm] [--reply-to <id>] <text>
   vx log [<room>]|--dm [--after seq] [--limit n]   ids + refs printed (A1)
@@ -1412,18 +1774,18 @@ var USAGE = `vx \u2014 operator CLI for VORTEX v6
   vx uninstall <principal>                  remove that agent's local credential and state files
   vx hook context [--host claude|codex]     (plugins only: hook event JSON on stdin)
 `;
-function die(message) {
+function die2(message) {
   console.error(`vx: ${message}`);
   process.exit(1);
 }
 function operatorClient() {
   const credential = loadCredential("operator");
   if (credential === undefined) {
-    die(`no operator credential at ${vortexConfigDir()}/operator.json; run vortexd on this machine (bun v6/hub/main.ts)`);
+    die2(`no operator credential at ${vortexConfigDir()}/operator.json; run vortexd on this machine (bun v6/hub/main.ts)`);
   }
   return new VortexClient(credential);
 }
-function parseArgs(rest) {
+function parseArgs2(rest) {
   const flags = new Map;
   const bare = [];
   const bools = new Set;
@@ -1450,13 +1812,15 @@ async function main() {
     console.log(USAGE);
     process.exit(0);
   }
+  if (await keysMain(command, rest))
+    return;
   if (command === "enroll") {
     const name = rest[0];
     if (name === undefined || !PRINCIPAL_RE.test(name))
-      die(`enroll takes a principal name matching ${PRINCIPAL_RE}`);
+      die2(`enroll takes a principal name matching ${PRINCIPAL_RE}`);
     const roots = hubRoots();
-    if (!existsSync5(roots.db))
-      die(`no hub database at ${roots.db}; run vortexd on this host first`);
+    if (!existsSync6(roots.db))
+      die2(`no hub database at ${roots.db}; run vortexd on this host first`);
     mkdirSync5(roots.config, { recursive: true, mode: 448 });
     const store = new HubStore(roots.db);
     let token = "";
@@ -1465,16 +1829,16 @@ async function main() {
     } catch (e) {
       const message = e.message;
       if (message.includes("UNIQUE"))
-        die("already enrolled");
+        die2("already enrolled");
       if (message.includes("operator"))
-        die(message);
+        die2(message);
       throw e;
     } finally {
       store.close();
     }
     let fingerprint;
     const certPath = `${roots.state}/cert.pem`;
-    if (existsSync5(certPath)) {
+    if (existsSync6(certPath)) {
       const der = Bun.spawnSync(["openssl", "x509", "-in", certPath, "-outform", "DER"]).stdout;
       const hasher = new Bun.CryptoHasher("sha256");
       hasher.update(der);
@@ -1487,19 +1851,19 @@ async function main() {
     return;
   }
   if (command === "say") {
-    const { flags, bare } = parseArgs(rest);
+    const { flags, bare } = parseArgs2(rest);
     const text = bare.join(" ");
     if (text.length === 0)
-      die("say takes the message text");
+      die2("say takes the message text");
     const scope = flags.get("scope");
     if (scope !== undefined && scope !== "room" && scope !== "dm")
-      die("scope is room|dm");
+      die2("scope is room|dm");
     const room = flags.get("room");
     if (scope === "dm" && room !== undefined)
-      die("a DM takes no room");
+      die2("a DM takes no room");
     const to = (flags.get("to") ?? "").split(",").filter((w) => w.length > 0);
     if (scope === "dm" && to.length !== 1)
-      die("a DM needs exactly one recipient: --to <name>");
+      die2("a DM needs exactly one recipient: --to <name>");
     const client = operatorClient();
     const { id, seq } = await client.send({
       text,
@@ -1512,11 +1876,11 @@ async function main() {
     return;
   }
   if (command === "log") {
-    const { flags, bare, bools } = parseArgs(rest);
+    const { flags, bare, bools } = parseArgs2(rest);
     const after = Number(flags.get("after") ?? 0);
     const limit = Number(flags.get("limit") ?? 100);
     if (!Number.isInteger(after) || !Number.isInteger(limit))
-      die("log flags --after/--limit take integers");
+      die2("log flags --after/--limit take integers");
     const client = operatorClient();
     if (bools.has("dm")) {
       const res = await client.dmLog(after, limit);
@@ -1526,7 +1890,7 @@ async function main() {
     }
     const room = bare.length === 1 ? bare[0] : flags.get("room");
     if (room === undefined)
-      die("log takes a room: vx log <room>  (or vx log --dm)");
+      die2("log takes a room: vx log <room>  (or vx log --dm)");
     const res = await client.roomLog(room, after, limit);
     for (const m of res.messages)
       console.log(logLine(m));
@@ -1539,10 +1903,10 @@ async function main() {
   }
   if (command === "binding") {
     if (rest[0] !== "release")
-      die('binding takes "release <principal>/<name>"');
+      die2('binding takes "release <principal>/<name>"');
     const [principal, name] = (rest[1] ?? "").split("/");
     if (!principal || !name)
-      die("binding release takes <principal>/<name>");
+      die2("binding release takes <principal>/<name>");
     const client = operatorClient();
     await client.release(principal, name);
     console.log(`released ${principal}/${name}`);
@@ -1553,7 +1917,7 @@ async function main() {
       const { credentialPath, hub } = await installPrincipal(rest[0] ?? "");
       console.log(`enrolled ${rest[0]}; credential for ${hub} written to ${credentialPath}`);
     } catch (e) {
-      die(e.message);
+      die2(e.message);
     }
     return;
   }
@@ -1562,7 +1926,7 @@ async function main() {
     try {
       removed = uninstallFiles(rest[0] ?? "", hubRoots());
     } catch (e) {
-      die(e.message);
+      die2(e.message);
     }
     console.log(removed.length === 0 ? "nothing to remove" : removed.map((p) => `removed ${p}`).join(`
 `));
@@ -1570,20 +1934,20 @@ async function main() {
   }
   if (command === "codex") {
     if (rest[0] !== "bind")
-      die('codex takes "bind [<thread-id>]"');
+      die2('codex takes "bind [<thread-id>]"');
     process.exit(await codexBind(rest.slice(1)));
   }
   if (command === "hook") {
     if (rest[0] !== "context")
-      die('hook takes "context"');
+      die2('hook takes "context"');
     const h = rest.indexOf("--host");
     const host = h >= 0 ? rest[h + 1] : "claude";
     if (host !== "claude" && host !== "codex")
-      die("hook --host is claude|codex");
+      die2("hook --host is claude|codex");
     await hookContext(host);
     process.exit(0);
   }
-  die(`unknown command: ${command}
+  die2(`unknown command: ${command}
 ${USAGE}`);
 }
 main();

@@ -15,7 +15,7 @@ import { webSockets } from '@libp2p/websockets'
 import type { Libp2p, PrivateKey } from '@libp2p/interface'
 import type { Multiaddr } from '@multiformats/multiaddr'
 import { loadOrCreateKey } from './identity.ts'
-import { startRendezvousServer, type RendezvousServer } from './rendezvous.ts'
+import { startRendezvousServer, type RendezvousServer, type RendezvousServerOptions } from './rendezvous.ts'
 
 export interface RelayOptions {
   /** Listen multiaddrs. Default: /ip4/127.0.0.1/tcp/0/ws */
@@ -26,8 +26,8 @@ export interface RelayOptions {
   keyFile?: string
   /** Max simultaneous circuit reservations. */
   maxReservations?: number
-  /** Serve rendezvous on this node (default true). */
-  rendezvous?: boolean
+  /** Serve rendezvous on this node (default true); pass options for the caps. */
+  rendezvous?: boolean | RendezvousServerOptions
 }
 
 export interface Relay {
@@ -56,7 +56,8 @@ export async function startRelay (opts: RelayOptions = {}): Promise<Relay> {
       })
     }
   })
-  const rendezvous = opts.rendezvous === false ? null : await startRendezvousServer(node)
+  const rvOpts = opts.rendezvous === false ? null : opts.rendezvous === true || opts.rendezvous === undefined ? {} : opts.rendezvous
+  const rendezvous = rvOpts === null ? null : await startRendezvousServer(node, rvOpts)
   return {
     node,
     rendezvous,

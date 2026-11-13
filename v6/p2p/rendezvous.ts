@@ -34,17 +34,21 @@ export interface RendezvousServer {
 
 export interface RendezvousServerOptions {
   maxRegistrations?: number
+  /** Max namespaces one peer may hold at once (Sun's QA on #8: capacity must not be hogged by one peer). */
+  maxPerPeer?: number
   now?: () => number
 }
 
 /** Serve rendezvous on `node`. Run it on the relay node. */
 export async function startRendezvousServer (node: Libp2p, opts: RendezvousServerOptions = {}): Promise<RendezvousServer> {
   const max = opts.maxRegistrations ?? 1000
+  const maxPerPeer = opts.maxPerPeer ?? 32
   const now = opts.now ?? Date.now
   const byNs = new Map<string, Map<string, Entry>>()
   let seq = 0
 
   const count = (): number => { let n = 0; for (const m of byNs.values()) n += m.size; return n }
+  const countPeer = (p: string): number => { let n = 0; for (const m of byNs.values()) if (m.has(p)) n++; return n }
   const sweep = (): void => {
     const t = now()
     for (const [ns, m] of byNs) {
@@ -66,8 +70,14 @@ export async function startRendezvousServer (node: Libp2p, opts: RendezvousServe
       return reply(Status.E_INVALID_SIGNED_PEER_RECORD, (e as Error).message)
     }
     sweep()
+    const key = remote.toString()
     const m = byNs.get(r.ns) ?? new Map<string, Entry>()
-    if (!m.has(remote.toString()) && count() >= max) return reply(Status.E_UNAVAILABLE, 'registration table full')
+    if (!m.has(key)) {
+      // A new (peer, ns) pair first passes the per-peer cap, then the table
+      // cap, so one authenticated peer cannot fill the table for the others.
+      if (countPeer(key) >= maxPerPeer) return reply(Status.E_UNAVAILABLE, 'too many registrations for one peer')
+      if (count() >= max) return reply(Status.E_UNAVAILABLE, 'registration table full')
+    }
     m.set(remote.toString(), { seq: ++seq, record: r.signedPeerRecord, expires: now() + ttl * 1000 })
     byNs.set(r.ns, m)
     return reply(Status.OK, undefined, ttl)

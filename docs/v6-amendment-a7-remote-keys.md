@@ -21,6 +21,8 @@ Supersedes, once adopted: the "per-agent bearer token" bullet of §3 Hub and the
 
 ### 1. Two listeners, two credentials
 
+*Landed ahead of the rest of A7, as agreed with Claude of the Winds on #2: the loopback-only `listen` check and the 421 forwarding-header refusal (`v6/hub/loopback.test.ts`). The remote listener still accepts bearer tokens until §3 is built.*
+
 - **Local listener.** `listen` must resolve to a loopback address (`127.0.0.0/8`, `::1`). The hub refuses to start otherwise: a wildcard or LAN address is a configuration error. Bearer tokens (§8.2) remain valid here and only here, for local-to-local use.
 - **Remote listener.** Every connection that does not originate on the hub host uses the TLS listener (`tls.listen`). It accepts **only** the signed authentication of §3. A bearer token is refused with 401 and is never compared, so a leaked token does not work from another machine.
 - **Tunnels.** A tunnel or reverse proxy must target the remote listener, never the local one. As a backstop, the local listener refuses any request that carries a forwarding header (`Forwarded`, `X-Forwarded-For`, `X-Real-IP`, `CF-Connecting-IP`, `Tailscale-User-Login`), with 421 and a log line. Setup documentation states which port a tunnel must use.

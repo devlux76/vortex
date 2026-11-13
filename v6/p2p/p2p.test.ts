@@ -114,6 +114,62 @@ describe('p2p milestone 1 (relay over WebSockets, localhost)', () => {
     expect(res.registerResponse?.status).toBe(Status.E_INVALID_SIGNED_PEER_RECORD)
   })
 
+  test('A6 outbound screen: a credential-shaped send is refused before signing', async () => {
+    const [found] = await a.discover(NS)
+    const before = b.inbox.length
+    await expect(a.send(found!.id, 'the key is sk-ant-test1234test1234test12'))
+      .rejects.toThrow('refused: text contains a credential (anthropic-key)')
+    expect(b.inbox.length).toBe(before)
+  })
+
+  test('duplicate signed frames are deduped on (from,id), across a receiver restart', async () => {
+    const g = await startPeer({ keyFile: join(dir, 'g.key'), relay: relayAddr })
+    const aKey = await loadOrCreateKey(join(dir, 'a.key'))
+    const frame = await signMessage(aKey, a.id, g.id, 'once only')
+    try {
+      const first = await a.sendRaw(g.id, frame)
+      expect(first.ack).toEqual({ ok: true })
+      const dup = await a.sendRaw(g.id, frame)
+      expect(dup.ack).toEqual({ ok: false, error: 'duplicate message' })
+      expect(g.inbox.filter(m => m.text === 'once only').length).toBe(1)
+
+      // Restart: same key file, same dedup database — the replay stays closed.
+      await g.stop()
+      const g2 = await startPeer({ keyFile: join(dir, 'g.key'), relay: relayAddr })
+      expect(g2.id.toString()).toBe(g.id.toString())
+      const again = await a.sendRaw(g2.id, frame)
+      expect(again.ack).toEqual({ ok: false, error: 'duplicate message' })
+      expect(g2.inbox.length).toBe(0)
+      await g2.stop()
+    } finally {
+      await Promise.allSettled([g.stop()])
+    }
+  })
+
+  test('rendezvous per-peer cap: one peer cannot fill the table for the others', async () => {
+    const r2 = await startRelay({ rendezvous: { maxRegistrations: 4, maxPerPeer: 2 } })
+    const addr = r2.addrs()[0]!.toString()
+    let e: Peer | undefined
+    let f: Peer | undefined
+    try {
+      ;[e, f] = await Promise.all([
+        startPeer({ keyFile: join(dir, 'e.key'), relay: addr }),
+        startPeer({ keyFile: join(dir, 'f.key'), relay: addr })
+      ])
+      expect(await e.register('ns1')).toBeGreaterThan(0)
+      expect(await e.register('ns2')).toBeGreaterThan(0)
+      await expect(e.register('ns3')).rejects.toThrow('too many registrations for one peer')
+      // A second peer is not locked out by the first one's registrations.
+      expect(await f.register('ns3')).toBeGreaterThan(0)
+      expect(await f.register('ns4')).toBeGreaterThan(0)
+      await expect(f.register('ns5')).rejects.toThrow('too many registrations for one peer')
+      expect(r2.rendezvous!.size()).toBe(4)
+    } finally {
+      await Promise.allSettled([e?.stop(), f?.stop()])
+      await r2.stop()
+    }
+  }, 20_000)
+
   test('key file is 0600 and the peer id survives a restart', async () => {
     const keyFile = join(dir, 'a.key')
     expect(statSync(keyFile).mode & 0o777).toBe(0o600)
@@ -152,6 +208,33 @@ describe('p2p units', () => {
     await expect(verifyMessage(m, p1, p2)).rejects.toThrow('skew')
     const ok = await signMessage(k1, p1, p2, 'hi')
     expect((await verifyMessage(ok, p1, p2)).text).toBe('hi')
+  })
+
+  test('envelope: id and scope are signed fields; tampering either breaks the signature', async () => {
+    const k1 = await generateKeyPair('Ed25519')
+    const k2 = await generateKeyPair('Ed25519')
+    const p1 = peerIdFromPrivateKey(k1)
+    const p2 = peerIdFromPrivateKey(k2)
+    const m = await signMessage(k1, p1, p2, 'hi')
+    expect(m.id).toMatch(/^[A-Za-z0-9_-]{22,64}$/)
+    expect(m.scope).toBe('dm')
+    expect((await verifyMessage(m, p1, p2)).id).toBe(m.id)
+    await expect(verifyMessage({ ...m, scope: 'room' }, p1, p2)).rejects.toThrow('unsupported scope')
+    await expect(verifyMessage({ ...m, id: 'x' }, p1, p2)).rejects.toThrow('malformed message id')
+    // An id with a valid shape but a different value: the signature no longer matches.
+    await expect(verifyMessage({ ...m, id: 'x'.repeat(24) }, p1, p2)).rejects.toThrow('bad signature')
+    await expect(verifyMessage({ ...m, id: undefined }, p1, p2)).rejects.toThrow('field id missing')
+  })
+
+  test('text bound is 4096 UTF-8 bytes, counted like the hub', async () => {
+    const k1 = await generateKeyPair('Ed25519')
+    const p1 = peerIdFromPrivateKey(k1)
+    const p2 = peerIdFromPrivateKey(await generateKeyPair('Ed25519'))
+    expect((await signMessage(k1, p1, p2, 'x'.repeat(4096))).text.length).toBe(4096)
+    await expect(signMessage(k1, p1, p2, 'x'.repeat(4097))).rejects.toThrow('text longer than 4096 bytes')
+    // 2049 two-byte characters are 4098 UTF-8 bytes, over the bound despite a
+    // 2049-code-unit length.
+    await expect(signMessage(k1, p1, p2, 'ä'.repeat(2049))).rejects.toThrow('text longer than 4096 bytes')
   })
 
   test('ICE config from env; credentials pass through, bad urls refused', () => {

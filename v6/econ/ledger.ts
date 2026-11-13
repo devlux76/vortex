@@ -56,12 +56,15 @@ export interface LedgerState {
   quotes: Quote[]
   /** Each receipt with the sender of the quote it answers (quote ids are per sender). */
   receipts: { quoteFrom: string; receipt: Receipt }[]
-  redeems: Redeem[]
+  /** Each redeem with the issuer its IOU resolved to when it was taken (settlement is strictly per issuer). */
+  redeems: { issuer: string; redeem: Redeem }[]
 }
 
 export interface PeerView { peer: string; owesMe: number; iOwe: number }
 
 const pairKey = (from: string, id: string): string => `${from}\n${id}`
+/** A redemption is credited once per (issuer, holder, redeem id). */
+const settleKey = (issuer: string, holder: string, redeemId: string): string => `${issuer}\n${holder}\n${redeemId}`
 
 /** Records keyed by (sender, id), indexed by id for references that carry only the id. */
 class PairMap<T extends Ref> {
@@ -90,9 +93,12 @@ export class Ledger {
   private readonly ious = new PairMap<Iou>()
   private readonly quotes = new PairMap<Quote>()
   private readonly receipts = new Map<string, { quoteFrom: string; receipt: Receipt }>() // by the quote's (from, id)
-  private readonly redeems = new PairMap<Redeem>()
-  /** Redeems (holder, id) already credited, so one redemption is credited once. */
+  /** Redeems by (holder, id), with the issuer their IOU resolved to. */
+  private readonly redeemRecs = new Map<string, { issuer: string; redeem: Redeem }>()
+  /** (issuer, redeem holder, redeem id) already credited, so one redemption is credited once, to one issuer. */
   private readonly settled = new Set<string>()
+  /** (issuer, quote id) pairs an IOU has already been issued against (one IOU per quote). */
+  private readonly issuedQuotes = new Set<string>()
 
   readonly self: string
   constructor (self: string) { this.self = self }
@@ -106,7 +112,7 @@ export class Ledger {
       case 'receipt': this.onReceipt(m, opts); break
       case 'iou': this.onIou(m); break
       case 'redeem': this.onRedeem(m, now, opts); break
-      case 'redeemed': this.onRedeemed(m, now, opts); break
+      case 'redeemed': this.onRedeemed(m, now); break
       case 'release': this.onRelease(m, now, opts); break
       default: break // beacon, accept, decline: nothing to account; still deduplicated
     }
@@ -136,6 +142,19 @@ export class Ledger {
     if (m.holder === m.from) throw new LedgerError('iou issued to its own issuer')
     if (m.from !== this.self && m.holder !== this.self) throw new LedgerError('iou does not involve this agent')
     if (this.ious.has(m.from, m.id)) throw new LedgerError('iou id already in use by this issuer')
+    if (m.quote !== '') {
+      // One IOU per quote (A8 §6.2): a second one for the same quote is refused, whatever its face.
+      if (this.quoteUsed(m.from, m.quote)) throw new LedgerError('quote already has an iou from this issuer')
+      const q = this.quotes.get(m.from, m.quote)
+      if (q !== undefined) {
+        if (q.to !== m.holder) throw new LedgerError('quote is not addressed to the holder')
+        if (m.face_tokens > q.offer_face_tokens) {
+          throw new LedgerError(`face ${m.face_tokens} exceeds the ${q.offer_face_tokens} agreed in the quote`)
+        }
+        if (q.expires_at > 0 && m.issued_at >= q.expires_at) throw new LedgerError('quote expired before the iou was issued')
+      }
+      this.issuedQuotes.add(pairKey(m.from, m.quote))
+    }
     this.ious.set(m)
     this.entries.set(pairKey(m.from, m.id), { iou: m, credited: 0, redeemed: [] })
   }
@@ -164,22 +183,30 @@ export class Ledger {
     if (m.est_tokens > remaining) {
       throw new LedgerError(`redeem asks for ${m.est_tokens} tokens but only ${remaining} remain on this iou`, remaining)
     }
-    this.redeems.set(m)
+    // Keep the issuer this redeem resolved to, so a later proof settles that IOU and no other.
+    this.redeemRecs.set(pairKey(m.from, m.id), { issuer: e.iou.from, redeem: m })
   }
 
-  private onRedeemed (m: Redeemed, now: number, opts: IngestOptions): void {
-    const e = this.live(m.iou, m.from, now, opts)
-    const r = this.redeems.get(m.from, m.redeem)
-    if (r === undefined || r.iou !== m.iou) throw new LedgerError('redeemed names no redeem on this iou')
-    const rk = pairKey(r.from, r.id)
-    if (this.settled.has(rk)) throw new LedgerError('redeem already credited')
+  private onRedeemed (m: Redeemed, now: number): void {
+    const rec = this.redeemRecs.get(pairKey(m.from, m.redeem))
+    if (rec === undefined || rec.redeem.iou !== m.iou) {
+      const holds = [...this.entries.values()].some(e => e.iou.id === m.iou && e.iou.holder === m.from)
+      throw new LedgerError(holds ? 'redeemed names no redeem on this iou' : 'not signed by the iou holder (no such iou held by the signer)')
+    }
+    // Strictly the recorded issuer's IOU: a proof for issuer A never changes B's balance.
+    const e = this.entries.get(pairKey(rec.issuer, m.iou))
+    if (e === undefined || e.iou.holder !== m.from) throw new LedgerError('redeemed is not from the iou holder')
+    const s = statusOf(e, now)
+    if (s !== 'live') throw new LedgerError(`iou is retired (${s})`, 0)
+    const sk = settleKey(rec.issuer, m.from, m.redeem)
+    if (this.settled.has(sk)) throw new LedgerError('redeem already credited')
     const remaining = e.iou.face_tokens - e.credited
     if (m.credited_tokens > remaining) {
       throw new LedgerError(`credit of ${m.credited_tokens} exceeds the ${remaining} remaining`, remaining)
     }
     e.credited += m.credited_tokens
     e.redeemed.push(m)
-    this.settled.add(rk)
+    this.settled.add(sk)
   }
 
   private onRelease (m: Release, now: number, opts: IngestOptions): void {
@@ -191,6 +218,8 @@ export class Ledger {
   entry (iou: Ref): IouEntry | undefined { return this.entries.get(pairKey(iou.from, iou.id)) }
   quote (from: string, id: string): Quote | undefined { return this.quotes.get(from, id) }
   receipt (quote: Ref): Receipt | undefined { return this.receipts.get(pairKey(quote.from, quote.id))?.receipt }
+  /** Whether `issuer` has already issued an IOU against quote `quoteId`. */
+  quoteUsed (issuer: string, quoteId: string): boolean { return this.issuedQuotes.has(pairKey(issuer, quoteId)) }
 
   status (iou: Ref, now: number): IouStatus | undefined {
     const e = this.entry(iou)
@@ -246,7 +275,7 @@ export class Ledger {
       ious: [...this.entries.values()],
       quotes: this.quotes.values(),
       receipts: [...this.receipts.values()],
-      redeems: this.redeems.values(),
+      redeems: [...this.redeemRecs.values()],
     }
   }
 
@@ -255,11 +284,12 @@ export class Ledger {
     for (const k of s.seen) l.seen.add(k)
     for (const q of s.quotes) l.quotes.set(q)
     for (const { quoteFrom, receipt } of s.receipts) l.receipts.set(pairKey(quoteFrom, receipt.quote), { quoteFrom, receipt })
-    for (const r of s.redeems) l.redeems.set(r)
+    for (const r of s.redeems) l.redeemRecs.set(pairKey(r.redeem.from, r.redeem.id), { issuer: r.issuer, redeem: r.redeem })
     for (const e of s.ious) {
       l.ious.set(e.iou)
       l.entries.set(pairKey(e.iou.from, e.iou.id), { ...e, redeemed: [...e.redeemed] })
-      for (const d of e.redeemed) l.settled.add(pairKey(d.from, d.redeem))
+      if (e.iou.quote !== '') l.issuedQuotes.add(pairKey(e.iou.from, e.iou.quote))
+      for (const d of e.redeemed) l.settled.add(settleKey(e.iou.from, d.from, d.redeem))
     }
     return l
   }

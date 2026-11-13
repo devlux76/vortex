@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { generateKeyPair } from '@libp2p/crypto/keys'
 import { peerIdFromPrivateKey } from '@libp2p/peer-id'
 import type { PrivateKey } from '@libp2p/interface'
-import { sign, verify, type EconInput, type EconMessage, type Iou, type Quote, type Redeem } from './iou.ts'
+import { newId, sign, verify, type EconInput, type EconMessage, type Iou, type Quote, type Redeem } from './iou.ts'
 import { Ledger, LedgerError } from './ledger.ts'
 import { checkIssue, checkQuote, checkRedeem, declineRedeem, type EconPolicy } from './policy.ts'
 
@@ -274,5 +274,53 @@ describe('policy (A8 §8)', () => {
 
   test('cannot issue to oneself', () => {
     expect(checkIssue(new Ledger(WINDS), policy, { holder: WINDS, face_tokens: 1, quote: '' }, T).ok).toBe(false)
+  })
+})
+
+describe('settlement and quotes (Sun QA on #35)', () => {
+  test('a proof for issuer A never changes issuer B balance (same IOU id from A and B)', async () => {
+    const holder = new Ledger(WINDS)
+    const SHARED = newId()
+    const fromA = await msg<Iou>(keys.sun, { kind: 'iou', id: SHARED, holder: WINDS, face_tokens: 100, quote: '', issued_at: T, expires_at: 0 })
+    const fromB = await msg<Iou>(keys.moon, { kind: 'iou', id: SHARED, holder: WINDS, face_tokens: 100, quote: '', issued_at: T, expires_at: 0 })
+    holder.ingest(fromA, T)
+    holder.ingest(fromB, T)
+    // The redeem resolves to A's IOU through the carrier peer A.
+    const r = await msg<Redeem>(keys.winds, { kind: 'redeem', iou: SHARED, task: 'QA', est_tokens: 75 })
+    holder.ingest(r, T, { peer: SUN })
+    // The proof is then ingested with carrier peer B: it must still settle A's IOU only.
+    holder.ingest(await msg(keys.winds, { kind: 'redeemed', iou: SHARED, redeem: r.id, credited_tokens: 75 }), T, { peer: MOON })
+    expect(holder.balance(fromA, T)).toBe(25)
+    expect(holder.balance(fromB, T)).toBe(100)
+    // Settlement survives serialisation and stays per issuer.
+    const copy = Ledger.fromJSON(JSON.parse(JSON.stringify(holder)))
+    expect(copy.balance(fromB, T)).toBe(100)
+    await expect((async () => copy.ingest(await msg(keys.winds, { kind: 'redeemed', iou: SHARED, redeem: r.id, credited_tokens: 1 }), T))())
+      .rejects.toThrow('already credited')
+  })
+
+  const qpolicy: EconPolicy = { fleet: new Set([SUN, WINDS]), maxIssuedTokens: 1e9, maxOwedByPeer: 1e9 }
+
+  test('one IOU per quote: a second IOU against the same quote is refused, whatever its face', async () => {
+    const sun = new Ledger(SUN)
+    const q = await msg<Quote>(keys.sun, { kind: 'quote', to: WINDS, task: 'QA PR #12', est_tokens: 20000, offer_face_tokens: 50000, expires_at: T + 600 })
+    sun.ingest(q, T)
+    const first = await msg<Iou>(keys.sun, { kind: 'iou', holder: WINDS, face_tokens: 50000, quote: q.id, issued_at: T, expires_at: 0 })
+    sun.ingest(first, T)
+    expect(checkIssue(sun, qpolicy, { holder: WINDS, face_tokens: 1000, quote: q.id }, T))
+      .toEqual({ ok: false, reason: 'quote already has an iou from this agent (one iou per quote)' })
+    const second = await msg<Iou>(keys.sun, { kind: 'iou', holder: WINDS, face_tokens: 1000, quote: q.id, issued_at: T, expires_at: 0 })
+    expect(() => sun.ingest(second, T)).toThrow('quote already has an iou from this issuer')
+  })
+
+  test('face may not exceed the quote offer, and issuance must precede quote expiry', async () => {
+    const winds = new Ledger(WINDS)
+    const q = await msg<Quote>(keys.sun, { kind: 'quote', to: WINDS, task: 'QA', est_tokens: 1000, offer_face_tokens: 5000, expires_at: T + 100 })
+    winds.ingest(q, T)
+    const over = await msg<Iou>(keys.sun, { kind: 'iou', holder: WINDS, face_tokens: 5001, quote: q.id, issued_at: T, expires_at: 0 })
+    expect(() => winds.ingest(over, T)).toThrow('exceeds the 5000 agreed in the quote')
+    const late = await msg<Iou>(keys.sun, { kind: 'iou', holder: WINDS, face_tokens: 5000, quote: q.id, issued_at: T + 100, expires_at: 0 })
+    expect(() => winds.ingest(late, T + 100)).toThrow('quote expired before the iou was issued')
+    expect(checkIssue(new Ledger(SUN), qpolicy, { holder: WINDS, face_tokens: 1, quote: 'missing' }, T).ok).toBe(false)
   })
 })

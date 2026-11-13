@@ -38,6 +38,8 @@ export function checkIssue (l: Ledger, p: EconPolicy, iou: Pick<Iou, 'holder' | 
   if (q !== undefined) {
     if (q.to !== iou.holder) return no('quote is not addressed to the holder')
     if (iou.face_tokens > q.offer_face_tokens) return no(`face ${iou.face_tokens} exceeds the ${q.offer_face_tokens} agreed in the quote`)
+    if (q.expires_at > 0 && now >= q.expires_at) return no('quote has expired')
+    if (l.quoteUsed(l.self, iou.quote)) return no('quote already has an iou from this agent (one iou per quote)')
   }
   if (!p.fleet.has(iou.holder)) {
     if (q === undefined) return no('outside the fleet an iou needs a quote this agent made')

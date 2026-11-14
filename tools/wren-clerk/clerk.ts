@@ -53,6 +53,11 @@ export function buildPrompt(system: string, issueBody: string, comments: Comment
   return { user, chars: system.length + user.length, kept: kept.length, dropped: blocks.length - kept.length }
 }
 
+/** Ledger lines are machine-shaped, so plain code keeps only comments that carry one; the model sees a short thread. */
+export function ledgerComments(comments: Comment[]): Comment[] {
+  return comments.filter(c => /^\s*(IOU|REDEEMED|RELEASED|VOID)\s+\d+\s*\|/m.test(c.body))
+}
+
 /** Parse raw-text tags only. Never JSON. */
 export function parseTags(text: string): Parsed {
   return {
@@ -148,7 +153,9 @@ async function main(argv: string[]) {
   if (!existsSync(promptPath)) throw new Error(`no prompt for task: ${task}`)
   const system = readFileSync(promptPath, 'utf8')
 
-  const { body, comments } = await fetchIssue(issue)
+  const fetched = await fetchIssue(issue)
+  const body = fetched.body
+  const comments = task === 'ledger' ? ledgerComments(fetched.comments) : fetched.comments
   const prompt = buildPrompt(system, body, comments, `Run task "${task}" on issue #${issue}. Answer now, using only the tags.`)
   console.error(`prompt: ${prompt.chars} chars, kept ${prompt.kept} of ${prompt.kept + prompt.dropped} comments`)
 

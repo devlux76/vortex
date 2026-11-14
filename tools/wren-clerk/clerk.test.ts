@@ -102,3 +102,10 @@ describe('thinking', () => {
     expect(noThinkPrompt('s', 'u').endsWith('<|im_start|>assistant\n<think></think>')).toBe(true)
   })
 })
+
+import { ledgerComments } from './clerk.ts'
+test('ledger keeps only comments carrying ledger lines', () => {
+  const c = (body: string) => ({ user: 'u', created_at: 't', body })
+  const kept = ledgerComments([c('**A**\nIOU 12 | issuer: A | holder: B'), c('**B** chatter about IOU 12'), c('REDEEMED 3 | credited: x')])
+  expect(kept.length).toBe(2)
+})

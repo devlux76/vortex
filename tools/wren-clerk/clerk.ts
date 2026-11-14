@@ -5,7 +5,7 @@
 // Environment: WREN_ENDPOINT (OpenAI-compatible chat-completions URL), WREN_MODEL (model id).
 // The model name and endpoint are read from the environment and never written into the source.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -86,29 +86,58 @@ async function fetchIssue(n: number) {
   return { body, comments }
 }
 
-async function callModel(system: string, user: string) {
+/** Render ChatML by hand with an empty think block, so the model answers without thinking. */
+export function noThinkPrompt(system: string, user: string): string {
+  return `<|im_start|>system\n${system}<|im_end|>\n<|im_start|>user\n${user}<|im_end|>\n<|im_start|>assistant\n<think></think>`
+}
+
+/** Split model output into thinking and answer. The template opens <think> in the prompt, so output may hold only the closing tag. */
+export function splitThinking(raw: string, reasoning = ''): { text: string; thinking: string } {
+  let body = raw, thinking = reasoning
+  const close = body.lastIndexOf('</think>')
+  if (close >= 0) { thinking += body.slice(0, close).replace(/^\s*<think>/, ''); body = body.slice(close + 8) }
+  return { text: body.trim(), thinking: thinking.trim() }
+}
+
+/** Stream the reply, appending every token to `live` so a watcher can judge the track and kill a run that veers off. */
+async function callModel(system: string, user: string, live: string) {
   const endpoint = process.env.WREN_ENDPOINT
   const model = process.env.WREN_MODEL
   if (!endpoint || !model) throw new Error('set WREN_ENDPOINT and WREN_MODEL')
+  const noThink = process.env.WREN_NO_THINK === '1'
+  const url = noThink ? endpoint.replace(/\/v1\/chat\/completions$/, '/completion') : endpoint
+  const body = noThink
+    ? { model, prompt: noThinkPrompt(system, user), temperature: 0.1, stream: true, n_predict: -1 }
+    : { model, temperature: 0.1, stream: true, stream_options: { include_usage: true },
+        messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }
+  writeFileSync(live, '')
   const t0 = performance.now()
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      model, temperature: 0.1, // no max_tokens: let it think and answer in full
-      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-    }),
-    // CPU run: no client timeout (Bun-specific option).
-    timeout: false,
-  } as RequestInit)
-  if (!res.ok) throw new Error(`model request failed: HTTP ${res.status}`)
-  const json = await res.json() as { choices: { message: { content: string; reasoning_content?: string } }[]; usage?: unknown }
-  const msg = json.choices[0].message
-  const raw = msg.content ?? ''
-  const inline = [...raw.matchAll(/<think>([\s\S]*?)<\/think>/g)].map(m => m[1])
-  const thinking = [msg.reasoning_content ?? '', ...inline].filter(Boolean).join('\n')
-  const text = raw.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
-  return { text, thinking, usage: json.usage, wallMs: Math.round(performance.now() - t0) }
+  // No max_tokens and no client timeout (Bun-specific option): a CPU run takes as long as it takes.
+  const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body), timeout: false } as RequestInit)
+  if (!res.ok || !res.body) throw new Error(`model request failed: HTTP ${res.status}`)
+  let raw = '', reasoning = '', usage: unknown, buf = ''
+  const dec = new TextDecoder()
+  for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+    buf += dec.decode(chunk, { stream: true })
+    let nl: number
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1)
+      if (!line.startsWith('data:')) continue
+      const data = line.slice(5).trim()
+      if (data === '[DONE]') continue
+      const o = JSON.parse(data)
+      const d = o.choices?.[0]?.delta ?? {}
+      const piece = (o.content ?? d.content ?? '') as string
+      const think = (d.reasoning_content ?? '') as string
+      raw += piece; reasoning += think
+      if (piece || think) appendFileSync(live, think + piece)
+      if (o.usage) usage = o.usage
+      if (o.timings) usage = { ...(usage as object ?? {}), timings: o.timings, tokens_predicted: o.tokens_predicted, tokens_evaluated: o.tokens_evaluated }
+    }
+  }
+  const { text, thinking } = splitThinking(raw, reasoning)
+  return { text, thinking, usage, wallMs: Math.round(performance.now() - t0) }
 }
 
 async function main(argv: string[]) {
@@ -123,13 +152,15 @@ async function main(argv: string[]) {
   const prompt = buildPrompt(system, body, comments, `Run task "${task}" on issue #${issue}. Answer now, using only the tags.`)
   console.error(`prompt: ${prompt.chars} chars, kept ${prompt.kept} of ${prompt.kept + prompt.dropped} comments`)
 
-  const reply = await callModel(system, prompt.user)
-  console.error(`model: ${reply.wallMs} ms, usage ${JSON.stringify(reply.usage)}`)
-
-  const parsed = parseTags(reply.text)
   const outDir = join(HERE, 'out')
   mkdirSync(outDir, { recursive: true })
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const live = join(outDir, `${task}-${issue}-${stamp}.live`)
+  console.error(`streaming to ${live}`)
+  const reply = await callModel(system, prompt.user, live)
+  console.error(`model: ${reply.wallMs} ms, usage ${JSON.stringify(reply.usage)}`)
+
+  const parsed = parseTags(reply.text)
   const outFile = join(outDir, `${task}-${issue}-${stamp}.md`)
   writeFileSync(outFile, [
     `# ${task} #${issue}`, '',

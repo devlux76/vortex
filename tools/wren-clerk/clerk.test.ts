@@ -89,3 +89,16 @@ describe('assertPostable', () => {
     expect(() => assertPostable('ok **Wren**')).toThrow()
   })
 })
+
+import { noThinkPrompt, splitThinking } from './clerk.ts'
+describe('thinking', () => {
+  test('splits output whose <think> was opened by the prompt', () => {
+    expect(splitThinking('plan it</think>\n<answer>x</answer>')).toEqual({ thinking: 'plan it', text: '<answer>x</answer>' })
+  })
+  test('passes through output with no thinking', () => {
+    expect(splitThinking('<answer>x</answer>', '')).toEqual({ thinking: '', text: '<answer>x</answer>' })
+  })
+  test('no-think prompt ends with an empty think block', () => {
+    expect(noThinkPrompt('s', 'u').endsWith('<|im_start|>assistant\n<think></think>')).toBe(true)
+  })
+})

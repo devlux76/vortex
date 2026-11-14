@@ -11,8 +11,8 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = 'devlux76/vortex'
-const MAX_PROMPT_CHARS = 120_000
-const TIMEOUT_MS = 30 * 60 * 1000
+// No truncation: the router serves the model's full native context. Override only for experiments.
+const MAX_PROMPT_CHARS = Number(process.env.WREN_MAX_PROMPT_CHARS ?? Infinity)
 
 export interface Comment { user: string; created_at: string; body: string }
 export interface Parsed {
@@ -37,10 +37,10 @@ export function squash(comments: Comment[]): string {
 }
 
 /** Build the prompt. If it exceeds the budget, keep the issue body and the newest comments that fit. */
-export function buildPrompt(system: string, issueBody: string, comments: Comment[], instruction: string) {
+export function buildPrompt(system: string, issueBody: string, comments: Comment[], instruction: string, maxChars = MAX_PROMPT_CHARS) {
   const head = `Issue body:\n${issueBody.trim()}\n\nThread:\n`
   const tail = `\n\nInstruction:\n${instruction}`
-  const budget = Math.max(0, MAX_PROMPT_CHARS - system.length - head.length - tail.length)
+  const budget = Math.max(0, maxChars - system.length - head.length - tail.length)
   const blocks = comments.map(block)
   const kept: string[] = []
   let used = 0
@@ -95,14 +95,20 @@ async function callModel(system: string, user: string) {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      model, temperature: 0.1, max_tokens: 2048,
+      model, temperature: 0.1, // no max_tokens: let it think and answer in full
       messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
     }),
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-  })
+    // CPU run: no client timeout (Bun-specific option).
+    timeout: false,
+  } as RequestInit)
   if (!res.ok) throw new Error(`model request failed: HTTP ${res.status}`)
-  const json = await res.json() as { choices: { message: { content: string } }[]; usage?: unknown }
-  return { text: json.choices[0].message.content, usage: json.usage, wallMs: Math.round(performance.now() - t0) }
+  const json = await res.json() as { choices: { message: { content: string; reasoning_content?: string } }[]; usage?: unknown }
+  const msg = json.choices[0].message
+  const raw = msg.content ?? ''
+  const inline = [...raw.matchAll(/<think>([\s\S]*?)<\/think>/g)].map(m => m[1])
+  const thinking = [msg.reasoning_content ?? '', ...inline].filter(Boolean).join('\n')
+  const text = raw.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
+  return { text, thinking, usage: json.usage, wallMs: Math.round(performance.now() - t0) }
 }
 
 async function main(argv: string[]) {
@@ -130,6 +136,7 @@ async function main(argv: string[]) {
     `- prompt chars: ${prompt.chars}`, `- comments kept: ${prompt.kept} of ${prompt.kept + prompt.dropped}`,
     `- wall ms: ${reply.wallMs}`, `- usage: ${JSON.stringify(reply.usage)}`, '',
     '## Raw output', '', reply.text, '',
+    '## Thinking', '', `(${reply.thinking.length} chars)`, '', reply.thinking, '',
     '## Parsed', '', '```json', JSON.stringify(parsed, null, 2), '```', '',
   ].join('\n'))
   console.error(`wrote ${outFile}`)

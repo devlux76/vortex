@@ -43,7 +43,7 @@ describe('buildPrompt', () => {
     const big = Array.from({ length: 2000 }, (_, i) => ({
       user: 'u', created_at: `t${i}`, body: `**A**\n${'y'.repeat(100)}`,
     }))
-    const p = buildPrompt('sys', 'the body', big, 'go')
+    const p = buildPrompt('sys', 'the body', big, 'go', 120_000)
     expect(p.dropped).toBeGreaterThan(0)
     expect(p.kept + p.dropped).toBe(2000)
     expect(p.chars).toBeLessThanOrEqual(120_000 + 10)

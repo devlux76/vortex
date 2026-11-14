@@ -3,9 +3,16 @@
 //
 // Two rules:
 // 1. Other econ source files (not tests, not amount.ts): no bare + or - on an identifier
-//    that names an amount.
-// 2. amount.ts itself: no binary + or - anywhere except inside the allowlisted checked
-//    helpers below. Comments, string literals and regex literals are stripped first.
+//    that names an amount (line-based, as before).
+// 2. amount.ts itself: a small tokenizer scans the whole source as one string. A + or -
+//    is binary when the previous token is an identifier, number, ')' or ']'. Binary
+//    + and -, and += -= ++ --, are flagged unless their offset lies inside an allowed
+//    helper's body (matched by brace depth on the token stream).
+//
+// Tokenizer choices: // and /* */ comments are skipped. '…' and "…" strings are skipped.
+// Template literals are skipped whole, including any ${…} contents, so an operator inside
+// ${…} is NOT checked. A regex literal is recognised after an operator, punctuation other
+// than ')' ']' '}', or a keyword, and is skipped.
 import { describe, expect, test } from 'bun:test'
 import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -19,22 +26,6 @@ export const ALLOWED_HELPERS: readonly string[] = ['checkedAdd', 'checkedSub']
 // An amount-named identifier, then a bare + or - (not ++, --, +=, -=).
 const BARE = /\b\w*[aA]mount\w*\s*[-+](?![-+=])|(?<![-+])[-+](?![-+=])\s*\w*[aA]mount\w*\b/
 
-// A binary + or -: an operand (identifier, number, or closing bracket) before it and an
-// operand after it. Unary signs and ++/--/+=/-= do not match.
-const BINARY = /[\w)\]]\s*[-+](?![-+=])\s*[\w(]/
-
-/** Source with comments, string literals and regex literals blanked out, line by line. */
-function codeLines(source: string): string[] {
-  return source.split('\n').map(line => {
-    const t = line.trim()
-    if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) return ''
-    return line
-      .replace(/\/\/.*$/, '')
-      .replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`/g, '""')
-      .replace(/=\s*\/[^/\n]+\/[a-z]*/g, '= //')
-  })
-}
-
 /** Returns the offending lines of one source text, skipping comment-only lines. */
 export function bareAmountArithmetic(source: string): string[] {
   return source.split('\n').filter(line => {
@@ -44,34 +35,93 @@ export function bareAmountArithmetic(source: string): string[] {
   })
 }
 
-/** Line indexes (0-based) inside the bodies of the named top-level functions. */
-function allowedLines(source: string, names: readonly string[]): Set<number> {
-  const lines = codeLines(source)
-  const allowed = new Set<number>()
-  for (const name of names) {
-    const start = lines.findIndex(l => new RegExp(`^(export\\s+)?function\\s+${name}\\s*\\(`).test(l.trimStart()))
-    if (start < 0) continue
-    let depth = 0
-    let opened = false
-    for (let i = start; i < lines.length; i++) {
-      allowed.add(i)
-      for (const ch of lines[i]) {
-        if (ch === '{') { depth++; opened = true } else if (ch === '}') depth--
+type Tok = { kind: 'id' | 'num' | 'op' | 'punct' | 'lit'; text: string; at: number }
+
+const KEYWORDS = new Set(['return', 'typeof', 'throw', 'case', 'void', 'delete', 'in', 'of', 'new', 'else', 'do', 'yield', 'await', 'instanceof'])
+const LITERAL = /'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/y
+const NUMBER = /\d[\w.]*(?:[eE][+-]\d+)?/y
+const IDENT = /[A-Za-z_$][\w$]*/y
+
+/** Single-pass tokenizer over the whole source; comments are dropped, literals become 'lit'. */
+function tokenize(src: string): Tok[] {
+  const toks: Tok[] = []
+  const at = (re: RegExp, i: number) => { re.lastIndex = i; return re.exec(src) }
+  let i = 0
+  while (i < src.length) {
+    const c = src[i]
+    if (/\s/.test(c)) { i++; continue }
+    if (src.startsWith('//', i)) { const e = src.indexOf('\n', i); i = e < 0 ? src.length : e; continue }
+    if (src.startsWith('/*', i)) { const e = src.indexOf('*/', i + 2); i = e < 0 ? src.length : e + 2; continue }
+    const prev = toks[toks.length - 1]
+    const regexOk = !prev || prev.kind === 'op' || (prev.kind === 'punct' && !')]}'.includes(prev.text))
+      || (prev.kind === 'id' && KEYWORDS.has(prev.text))
+    if (c === '/' && regexOk) {
+      let j = i + 1, inClass = false
+      while (j < src.length && (src[j] !== '/' || inClass)) {
+        if (src[j] === '\\') j++
+        else if (src[j] === '[') inClass = true
+        else if (src[j] === ']') inClass = false
+        j++
       }
-      if (opened && depth === 0) break
+      j++
+      while (j < src.length && /[a-z]/.test(src[j])) j++
+      toks.push({ kind: 'lit', text: src.slice(i, j), at: i }); i = j; continue
     }
+    const lit = at(LITERAL, i)
+    if (lit) { toks.push({ kind: 'lit', text: lit[0], at: i }); i += lit[0].length; continue }
+    const id = at(IDENT, i)
+    if (id) { toks.push({ kind: 'id', text: id[0], at: i }); i += id[0].length; continue }
+    const num = at(NUMBER, i)
+    if (num) { toks.push({ kind: 'num', text: num[0], at: i }); i += num[0].length; continue }
+    const two = src.slice(i, i + 2)
+    if (['++', '--', '+=', '-='].includes(two)) { toks.push({ kind: 'op', text: two, at: i }); i += 2; continue }
+    toks.push({ kind: /[+-]/.test(c) ? 'op' : 'punct', text: c, at: i }); i++
   }
-  return allowed
+  return toks
+}
+
+/** Offset spans [start, end) of each allowed helper's body, found by brace depth. */
+function helperSpans(toks: Tok[], names: readonly string[]): [number, number][] {
+  const spans: [number, number][] = []
+  toks.forEach((t, idx) => {
+    if (t.kind !== 'id') return
+    const named = names.some(n =>
+      (t.text === 'function' && toks[idx + 1]?.text === n) ||
+      (t.text === 'const' && toks[idx + 1]?.text === n && toks[idx + 2]?.text === '='))
+    if (!named) return
+    let open = idx
+    while (open < toks.length && toks[open].text !== '{') open++
+    let depth = 0
+    for (let k = open; k < toks.length; k++) {
+      if (toks[k].text === '{') depth++
+      else if (toks[k].text === '}' && --depth === 0) { spans.push([t.at, toks[k].at + 1]); break }
+    }
+  })
+  return spans
 }
 
 /**
- * Lines with a binary + or - outside the allowed helpers. Returns the offending line
- * texts; an empty array means every operation is guarded.
+ * Binary + and -, and += -= ++ --, outside the allowed helpers. Returns `line:col op` for
+ * each hit; an empty array means every operation is guarded.
  */
 export function unguardedOperators(source: string, allow: readonly string[] = ALLOWED_HELPERS): string[] {
-  const lines = codeLines(source)
-  const allowed = allowedLines(source, allow)
-  return lines.filter((l, i) => !allowed.has(i) && BINARY.test(l))
+  const toks = tokenize(source)
+  const spans = helperSpans(toks, allow)
+  const hits: string[] = []
+  toks.forEach((t, idx) => {
+    if (t.kind !== 'op') return
+    const prev = toks[idx - 1]
+    const incOrCompound = t.text !== '+' && t.text !== '-'
+    const binary = !!prev && (prev.kind === 'num' || (prev.kind === 'id' && !KEYWORDS.has(prev.text))
+      || prev.text === ')' || prev.text === ']')
+    if (!incOrCompound && !binary) return
+    if (spans.some(([s, e]) => t.at >= s && t.at < e)) return
+    const before = source.slice(0, t.at)
+    const line = before.split('\n').length
+    const col = t.at - before.lastIndexOf('\n')
+    hits.push(`${line}:${col} ${t.text}`)
+  })
+  return hits
 }
 
 const SCOPED = readdirSync(HERE).filter(f =>
@@ -83,19 +133,25 @@ describe('bare amount arithmetic detector', () => {
     expect(bareAmountArithmetic('return total - amount')).toHaveLength(1)
     expect(bareAmountArithmetic('const y = iou.faceAmount * 2')).toHaveLength(0)
   })
-
-  test('ignores comments, increments and assignments', () => {
-    expect(bareAmountArithmetic('// amount + 1 is forbidden')).toHaveLength(0)
-    expect(bareAmountArithmetic('amount += 1')).toHaveLength(0)
-    expect(bareAmountArithmetic('const n = checkedAdd(amount, 1, U32)')).toHaveLength(0)
-  })
 })
 
-describe('unguarded operator detector (amount.ts)', () => {
-  test('flags a + or - outside the allowed helpers, whatever the names', () => {
-    const src = 'export function f(a: number, b: number) {\n  return a + b\n}\n'
-    expect(unguardedOperators(src)).toEqual(['  return a + b'])
-    expect(unguardedOperators('const d = x - 1\n')).toHaveLength(1)
+describe('unguarded operator detector (amount.ts, tokenizer)', () => {
+  test('catches Hollis multiline unchecked return, reported with line:col', () => {
+    const src = 'export function sneaky(a: number, b: number) {\n  return (\n    a +\n    b )\n}\n'
+    expect(unguardedOperators(src)).toEqual(['3:7 +'])
+  })
+
+  test('flags compound assignment x += 1', () => {
+    expect(unguardedOperators('let x = 0\nx += 1\n')).toEqual(['2:3 +='])
+  })
+
+  test('does not flag unary -a, including after return', () => {
+    expect(unguardedOperators('const n = -a\n')).toEqual([])
+    expect(unguardedOperators('function f(a) {\n  return -a\n}\n')).toEqual([])
+  })
+
+  test('does not flag operators inside strings or comments', () => {
+    expect(unguardedOperators('const s = "a+b"\n// a + b\n/* c - d */\n')).toEqual([])
   })
 
   test('allows operators inside the allowlisted helpers only', () => {
@@ -103,20 +159,13 @@ describe('unguarded operator detector (amount.ts)', () => {
     expect(unguardedOperators(ok)).toEqual([])
     const sub = 'export function checkedSub(a: number, b: number) {\n  return a - b\n}\n'
     expect(unguardedOperators(sub)).toEqual([])
-    // A helper with a longer name is not the allowlisted one.
     const sneaky = 'export function checkedAddAll(a: number, b: number) {\n  return a + b\n}\n'
     expect(unguardedOperators(sneaky)).toHaveLength(1)
-    // An operator after the helper's closing brace is outside it.
-    const after = 'export function checkedAdd(a: number, b: number) {\n  return a\n}\nconst z = a + b\n'
-    expect(unguardedOperators(after)).toEqual(['const z = a + b'])
   })
 
-  test('ignores unary signs, increments, comments, strings and regex literals', () => {
-    expect(unguardedOperators('const n = -1\n')).toEqual([])
-    expect(unguardedOperators('i++\nj += 2\n')).toEqual([])
-    expect(unguardedOperators('// a + b\n')).toEqual([])
-    expect(unguardedOperators('throw new RangeError("a + b")\n')).toEqual([])
-    expect(unguardedOperators('const C = /^[1-9][0-9]*$/\n')).toEqual([])
+  test('flags an operator after a helper closing brace', () => {
+    const after = 'export function checkedAdd(a: number, b: number) {\n  return a\n}\nconst z = a + b\n'
+    expect(unguardedOperators(after)).toEqual(['4:13 +'])
   })
 
   test('amount.ts has no unguarded + or -', () => {

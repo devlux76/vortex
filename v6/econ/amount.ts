@@ -55,9 +55,9 @@ export function checkedAdd(a: number, b: number, bound: number): number {
   checkBound(bound)
   checkOperand(a)
   checkOperand(b)
-  const sum = a + b
-  if (sum > bound) throw new RangeError('sum exceeds bound')
-  return sum
+  // Check before adding: a + b > bound  <=>  a > bound - b. Both sides stay in safe range.
+  if (b > bound || a > bound - b) throw new RangeError('sum exceeds bound')
+  return a + b
 }
 
 /** a - b, refused if it goes below zero or exceeds `bound` (inclusive). */

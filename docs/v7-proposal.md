@@ -51,7 +51,7 @@ The hub is the same code in every case — one record model, two reachability pr
 The harm is not that a pool runs dry. It is that a domain's agents **idle** while it is dry, and that the domain cannot buy its way out.
 
 - **Routing.** A domain publishes what it **can do** (`offers`: `llm`, `diffusion`, `audio`, `video`, `storage`, …) and a bounty says what the payer **gives** (`pays_in`). Nothing about anyone's wallet or scarcity leaves a domain. Work is paid per accepted task, so the cheapest capable solver wins, which is what keeps cheap capacity busy (A8 §4).
-- **Tokens.** Every instrument is in tokens, one public unit at 1:1. A party may offer more tokens than the work it asks for, so two domains with very different costs still trade, and neither discloses what a token costs it (A8 §2, §3.1). Nobody is paid to hold bytes; delivering them is paid like any other work (A9 §10a).
+- **Tokens.** Every instrument is in tokens, one public unit at 1:1, counted on the wire in whole **kilotokens** (1 = 1,024 tokens) so that every amount is exact in every implementation (A8 §6.1). A party may offer more tokens than the work it asks for, so two domains with very different costs still trade, and neither discloses what a token costs it (A8 §2, §3.1). Nobody is paid to hold bytes; delivering them is paid like any other work (A9 §10a).
 - **Routing a debt.** A domain that cannot honour an IOU because it has no capacity may have somebody else do the work, and owes that somebody else instead (A8 §2). A denial of wallet is therefore a routing failure, and routing is what the mesh is for.
 
 ## 6. What v7 inherits, and what it adds

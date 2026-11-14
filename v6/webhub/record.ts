@@ -10,6 +10,10 @@
 // Encodings: `from` is the A7 key id (lowercase hex SHA-256 of the SPKI,
 // `keyIdOf`); `key` and `sig` are standard padded base64 (A9 §5.1 says
 // "base64"); the record id is base64url without padding.
+//
+// The canonical text is built here, key by key, and never by JSON.stringify over
+// a caller's object: JavaScript enumerates integer-like keys first, so an object
+// alone cannot carry the UTF-16 order the spec states.
 
 import { keyIdOf } from '../client/edge-sign.ts'
 import { b64pad, b64url } from '../client/b64.ts'
@@ -48,7 +52,7 @@ export const MAX_LIFE: Record<Kind, number | null> = {
   seed: 7 * 86400,
 }
 
-/** Fixed key order for the nested objects §5.2 names. Others are sorted (see `canon`). */
+/** Fixed key order for the nested objects §5.2 names. Others are sorted (see `canonText`). */
 const NESTED: Record<string, readonly string[]> = {
   members: ['id', 'enc', 'wrap'],
   matches: ['id', 'score'],
@@ -63,53 +67,63 @@ const enc = new TextEncoder()
 const isKind = (k: unknown): k is Kind => typeof k === 'string' && Object.hasOwn(KINDS, k)
 
 /**
- * Canonical value: arrays keep their order; an object inside a named list
- * (`members`, `matches`, `servers`) takes that list's fixed order; any other
- * object (e.g. `hub.limits`) has its keys sorted by UTF-16 code unit. Numbers
- * use JSON's shortest round-trip form and must be finite.
+ * Canonical JSON text of a value. Arrays keep their order; an object inside a
+ * named list (`members`, `matches`, `servers`) takes that list's fixed order; any
+ * other object (e.g. `hub.limits`) has its keys sorted by UTF-16 code unit. Keys
+ * are written from those lists, never from the object's own enumeration order.
+ * Only JSON values are accepted: undefined, functions, symbols, bigints and
+ * non-finite numbers are refused rather than silently dropped or coerced.
  */
-function canon (value: unknown, listName?: string): unknown {
-  if (Array.isArray(value)) return value.map(item => canon(item, listName))
+function canonText (value: unknown, listName?: string): string {
+  if (value === undefined) throw new RecordError('non-JSON value: undefined')
+  if (typeof value === 'function' || typeof value === 'symbol' || typeof value === 'bigint') {
+    throw new RecordError(`non-JSON value: ${typeof value}`)
+  }
+  if (Array.isArray(value)) return '[' + value.map(item => canonText(item, listName)).join(',') + ']'
   if (value !== null && typeof value === 'object') {
     const obj = value as Record<string, unknown>
     const fixed = listName !== undefined ? NESTED[listName] : undefined
-    const keys = fixed ?? Object.keys(obj).sort()
     if (fixed !== undefined) {
       const extra = Object.keys(obj).filter(k => !fixed.includes(k))
       if (extra.length > 0) throw new RecordError(`unknown field in ${listName}: ${extra.join(', ')}`)
     }
-    const out: Record<string, unknown> = {}
-    for (const k of keys) {
+    const keys = fixed ?? Object.keys(obj).sort()
+    const parts = keys.map(k => {
       if (!Object.hasOwn(obj, k)) throw new RecordError(`missing field in ${listName ?? 'object'}: ${k}`)
-      out[k] = canon(obj[k])
-    }
-    return out
+      return JSON.stringify(k) + ':' + canonText(obj[k])
+    })
+    return '{' + parts.join(',') + '}'
   }
   if (typeof value === 'number' && !Number.isFinite(value)) throw new RecordError('non-finite number')
-  return value
+  return JSON.stringify(value)
 }
 
-/** The record's fields in signing order (no `sig`), after form checks. */
-function ordered (rec: Record<string, unknown>, omit: ReadonlySet<string> = new Set()): Record<string, unknown> {
+/**
+ * Canonical JSON text of the record's fields in signing order (no `sig`), after
+ * form checks. Keys in `omit` are left out on purpose (the stampless path).
+ */
+function bodyText (rec: Record<string, unknown>, omit: ReadonlySet<string> = new Set()): string {
   if (rec.v !== VERSION) throw new RecordError(`unknown v: ${String(rec.v)}`)
   if (!isKind(rec.kind)) throw new RecordError(`unknown kind: ${String(rec.kind)}`)
   const order = [...COMMON, ...KINDS[rec.kind]].filter(k => !omit.has(k))
   const allowed = new Set<string>([...order, ...omit, 'sig'])
   const extra = Object.keys(rec).filter(k => !allowed.has(k))
   if (extra.length > 0) throw new RecordError(`unknown field: ${extra.join(', ')}`)
-  for (const k of order) if (!Object.hasOwn(rec, k)) throw new RecordError(`missing field: ${k}`)
+  for (const k of order) {
+    if (!Object.hasOwn(rec, k)) throw new RecordError(`missing field: ${k}`)
+    if (rec[k] === undefined) throw new RecordError(`missing field: ${k} is undefined`)
+  }
   for (const k of ['ts', 'exp'] as const) {
     if (!Number.isSafeInteger(rec[k])) throw new RecordError(`${k} must be an integer`)
   }
   if (typeof rec.from !== 'string' || typeof rec.key !== 'string') throw new RecordError('from and key must be strings')
-  const out: Record<string, unknown> = {}
-  for (const k of order) out[k] = canon(rec[k], Object.hasOwn(NESTED, k) ? k : undefined)
-  return out
+  const parts = order.map(k => JSON.stringify(k) + ':' + canonText(rec[k], Object.hasOwn(NESTED, k) ? k : undefined))
+  return '{' + parts.join(',') + '}'
 }
 
 /** Canonical JSON of the record without `sig`. */
 export function canonical (rec: Record<string, unknown>): string {
-  return JSON.stringify(ordered(rec))
+  return bodyText(rec)
 }
 
 /** DOMAIN + canonical JSON, as UTF-8. */
@@ -138,7 +152,7 @@ export function stamplessSigningBytes (rec: Record<string, unknown>): Uint8Array
   if (!isKind(rec.kind) || !(KINDS[rec.kind] as readonly string[]).includes('stamp')) {
     throw new RecordError(`kind ${String(rec.kind)} carries no stamp`)
   }
-  return enc.encode(DOMAIN + JSON.stringify(ordered(rec, NO_STAMP)))
+  return enc.encode(DOMAIN + bodyText(rec, NO_STAMP))
 }
 
 /** The stampless id: base64url SHA-256 of `stamplessSigningBytes`. */
@@ -149,7 +163,8 @@ export async function stamplessId (rec: Record<string, unknown>): Promise<string
 /** The full wire form: canonical fields, then `sig`. */
 export function encode (rec: Record<string, unknown>): string {
   if (typeof rec.sig !== 'string') throw new RecordError('missing sig')
-  return JSON.stringify({ ...ordered(rec), sig: rec.sig })
+  const body = bodyText(rec)
+  return body.slice(0, -1) + ',"sig":' + JSON.stringify(rec.sig) + '}'
 }
 
 /** Parse wire text, refusing anything but the one canonical encoding. */
@@ -181,7 +196,7 @@ export async function sign (fields: Record<string, unknown>, signer: Signer): Pr
   const rec: Record<string, unknown> = { ...fields, from: await keyIdOf(spki), key: b64pad.encode(spki) }
   delete rec.sig
   const sig = new Uint8Array(await crypto.subtle.sign({ name: 'Ed25519' }, signer.privateKey, signingBytes(rec) as BufferSource))
-  return { ...(ordered(rec) as Record_), sig: b64pad.encode(sig) }
+  return JSON.parse(encode({ ...rec, sig: b64pad.encode(sig) })) as Record_
 }
 
 export type Verdict = { ok: true, id: string } | { ok: false, reason: string }

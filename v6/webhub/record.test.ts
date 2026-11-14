@@ -136,3 +136,42 @@ test('committed vectors fix the signing bytes, id and signature for one record o
     expect(await verify(rec)).toEqual({ ok: true, id: v.id })
   }
 })
+
+// #96 review defects (Sun, on 924c6d5). Each test fails on the previous encoder.
+
+test('a nested own __proto__ member is signed, and changing it breaks the signature', async () => {
+  const signer = await signerFromSeed(SEED)
+  const limits = JSON.parse('{"__proto__":1,"a":2}') as Record<string, unknown>
+  const rec = await sign({ ...fields('hub'), limits }, signer)
+  expect(new TextDecoder().decode(signingBytes(rec))).toContain('"limits":{"__proto__":1,"a":2}')
+  expect((await verify(rec)).ok).toBe(true)
+  const tampered = { ...rec, limits: JSON.parse('{"__proto__":9,"a":2}') }
+  expect(await verify(tampered)).toEqual({ ok: false, reason: 'bad signature' })
+})
+
+test('full signing and verification refuse an explicitly undefined required stamp', async () => {
+  const signer = await signerFromSeed(SEED)
+  await expect(sign({ ...fields('members'), stamp: undefined }, signer)).rejects.toThrow(/stamp/)
+  const rec = await sign(fields('members'), signer)
+  const verdict = await verify({ ...rec, stamp: undefined })
+  expect(verdict.ok).toBe(false)
+  // Intentional omission still works on the stampless path, with or without the key present.
+  const { stamp: _s, sig: _g, ...noStamp } = rec
+  expect(stamplessSigningBytes(noStamp)).toEqual(stamplessSigningBytes({ ...rec, stamp: undefined }))
+})
+
+test('non-JSON values are refused in nested fields too', async () => {
+  const signer = await signerFromSeed(SEED)
+  await expect(sign({ ...fields('hub'), limits: { a: undefined } }, signer)).rejects.toThrow(/undefined/)
+  await expect(sign({ ...fields('hub'), limits: { a: () => 1 } }, signer)).rejects.toThrow(/function/)
+  await expect(sign({ ...fields('hub'), limits: { a: 10n } }, signer)).rejects.toThrow(/bigint/)
+})
+
+test('integer-like nested keys are signed in UTF-16 code-unit order, not enumeration order', async () => {
+  const signer = await signerFromSeed(SEED)
+  const limits = JSON.parse('{"2":1,"10":2,"a":3}') as Record<string, unknown>
+  const rec = await sign({ ...fields('hub'), limits }, signer)
+  expect(new TextDecoder().decode(signingBytes(rec))).toContain('"limits":{"10":2,"2":1,"a":3}')
+  expect(decode(encode(rec))).toEqual(rec)
+  expect((await verify(rec)).ok).toBe(true)
+})
